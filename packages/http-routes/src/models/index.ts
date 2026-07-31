@@ -1,29 +1,32 @@
 import { Hono } from "hono";
-import type { Env } from "@open-managed-agents/shared";
-
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 interface ProviderModel {
   id: string;
   name: string;
 }
 
-// POST /v1/models/list — fetch models from official provider API using caller's key
-// Body: { provider: "ant" | "oai", api_key: string }
-app.post("/list", async (c) => {
-  const body = await c.req.json<{ provider?: string; api_key?: string }>();
-  const provider = body.provider || "ant";
-  const apiKey = body.api_key || "";
+export function buildModelsRoutes() {
+  const app = new Hono<{ Variables: { tenant_id: string } }>();
 
-  if (!apiKey) return c.json({ error: "api_key is required" }, 400);
+  // POST /v1/models/list — fetch models from official provider API using caller's key
+  // Body: { provider: "ant" | "oai", api_key: string }
+  app.post("/list", async (c) => {
+    const body = await c.req.json<{ provider?: string; api_key?: string }>();
+    const provider = body.provider || "ant";
+    const apiKey = body.api_key || "";
 
-  try {
-    const models = await fetchModels(provider, apiKey);
-    return c.json({ data: models });
-  } catch (err) {
-    return c.json({ error: `Failed to fetch models: ${(err as Error).message}` }, 502);
-  }
-});
+    if (!apiKey) return c.json({ error: "api_key is required" }, 400);
+
+    try {
+      const models = await fetchModels(provider, apiKey);
+      return c.json({ data: models });
+    } catch (err) {
+      return c.json({ error: `Failed to fetch models: ${(err as Error).message}` }, 502);
+    }
+  });
+
+  return app;
+}
 
 async function fetchModels(provider: string, apiKey: string): Promise<ProviderModel[]> {
   if (provider === "ant") {
@@ -57,5 +60,3 @@ async function fetchModels(provider: string, apiKey: string): Promise<ProviderMo
 
   return [];
 }
-
-export default app;

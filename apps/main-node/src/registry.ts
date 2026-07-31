@@ -76,6 +76,7 @@ export interface SessionRegistryDeps {
   buildTools(
     agent: AgentConfig,
     sandbox: SandboxExecutor,
+    sessionId: string,
     tenantId: string,
   ): Promise<unknown>;
 
@@ -264,7 +265,7 @@ export class SessionRegistry {
       mountMemoryStores: async () => {},
       mountSessionOutputs: async () => {},
       buildModel: (agent) => this.deps.buildModel(agent, tenantId),
-      buildTools: (agent, sb) => this.deps.buildTools(agent, sb, tenantId),
+      buildTools: (agent, sb) => this.deps.buildTools(agent, sb, sessionId, tenantId),
       buildHarness: () => this.deps.buildHarness(),
       buildHarnessContext: (input) =>
         this.deps.buildHarnessContext({

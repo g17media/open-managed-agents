@@ -1,57 +1,53 @@
-// Environments — CRUD + archive.
+// Environments routes — post-GitHub-build replacement.
 //
-// Sourced from apps/main/src/routes/environments.ts post-setup-on-warmup.
-// Same wire shape so the Console Environments page works against CF and
-// main-node without branching. Limits validation is optional (CF passes
-// its Anthropic-aligned caps; Node may omit).
+// The legacy `dockerfile` build path (GitHub Actions → per-env worker →
+// /build-complete callback) was removed once setup-on-warmup landed
+// (apps/agent/src/runtime/setup-on-warmup.ts). Now env create writes a
+// D1 row and returns immediately — packages are installed at the FIRST
+// session warmup by the SessionDO, not at env-create time.
+//
+// Removed:
+//   - triggerBuild() + GitHub workflow_dispatch
+//   - /build-complete callback
+//   - image_strategy / pickStrategy
+//   - per-env sandbox_worker_name + service-binding plumbing
+//
+// What stayed:
+//   - Standard CRUD (GET / POST / PUT / archive)
+//   - Networking + packages config in EnvironmentConfig
+//   - Tenant scoping
 
 import { Hono } from "hono";
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
 import {
-  EnvironmentNotFoundError,
   toEnvironmentConfig,
+  EnvironmentNotFoundError,
   type EnvironmentService,
 } from "@open-managed-agents/environments-store";
-import type { SessionService } from "@open-managed-agents/sessions-store";
-
-interface Vars {
-  Variables: { tenant_id: string };
-}
-
-function parsePageQuery(c: {
-  req: { query: (k: string) => string | undefined };
-}): {
-  limit?: number;
-  cursor?: string;
-  q?: string;
-} {
-  const limitParam = c.req.query("limit");
-  const cursor = c.req.query("cursor") || c.req.query("page") || undefined;
-  const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-  const qRaw = c.req.query("q");
-  const q = qRaw && qRaw.trim() ? qRaw.trim() : undefined;
-  return {
-    limit: limit !== undefined && !isNaN(limit) ? limit : undefined,
-    cursor,
-    q,
-  };
-}
+import type { RouteServicesArg } from "../types";
+import { resolveServices } from "../types";
+import { jsonPage, parsePageQuery } from "../lib/list-page";
+import { validateEnvironmentLimits } from "../lib/limits";
 
 export interface EnvironmentRoutesDeps {
-  environments: EnvironmentService;
-  /** When provided, DELETE refuses while sessions still reference the env. */
-  sessions?: SessionService;
-  /** Optional field-size caps (CF wires apps/main/src/lib/limits). */
-  validateLimits?: (body: unknown) => { ok: boolean; error?: string };
+  services: RouteServicesArg;
+}
+
+function notConfigured(c: Parameters<typeof resolveServices>[1]) {
+  return c.json(
+    { error: { type: "api_error", message: "Environments service is not configured" } },
+    501,
+  );
 }
 
 export function buildEnvironmentRoutes(deps: EnvironmentRoutesDeps) {
-  const app = new Hono<Vars>();
-  const { environments, sessions, validateLimits } = deps;
+  const app = new Hono<{ Variables: { tenant_id: string } }>();
 
-  // POST / — create
+  // POST /v1/environments — create environment
   app.post("/", async (c) => {
-    const t = c.var.tenant_id;
+    const services = resolveServices(deps.services, c);
+    if (!services.environments) return notConfigured(c);
+    const t = c.get("tenant_id");
     const body = (await c.req.json()) as {
       name: string;
       description?: string;
@@ -62,14 +58,14 @@ export function buildEnvironmentRoutes(deps: EnvironmentRoutesDeps) {
       return c.json({ error: "name is required" }, 400);
     }
 
-    if (validateLimits) {
-      const limitCheck = validateLimits(body);
-      if (!limitCheck.ok) {
-        return c.json({ error: limitCheck.error }, 400);
-      }
+    // Field-size caps (Anthropic-aligned for shared fields; OMA-specific
+    // for config.dockerfile / config.packages). See lib/limits.ts.
+    const limitCheck = validateEnvironmentLimits(body);
+    if (!limitCheck.ok) {
+      return c.json({ error: limitCheck.error }, 400);
     }
 
-    const row = await environments.create({
+    const row = await services.environments.create({
       tenantId: t,
       name: body.name,
       description: body.description,
@@ -83,16 +79,18 @@ export function buildEnvironmentRoutes(deps: EnvironmentRoutesDeps) {
     return c.json(toEnvironmentConfig(row), 201);
   });
 
-  // GET / — list (cursor-paginated)
+  // GET /v1/environments — list environments (cursor-paginated)
   app.get("/", async (c) => {
+    const services = resolveServices(deps.services, c);
+    if (!services.environments) return notConfigured(c);
+    // status: enum filter on archive state. Whitelist strictly — any
+    // unknown value is a 400, NOT a silent fallback to "any". Allowing
+    // arbitrary strings here would mask client bugs (typo'd "active "
+    // returning every row looks like a feature).
     const statusRaw = c.req.query("status");
     let status: "active" | "archived" | "any" | undefined;
     if (statusRaw !== undefined) {
-      if (
-        statusRaw === "active" ||
-        statusRaw === "archived" ||
-        statusRaw === "any"
-      ) {
+      if (statusRaw === "active" || statusRaw === "archived" || statusRaw === "any") {
         status = statusRaw;
       } else {
         return c.json(
@@ -108,6 +106,9 @@ export function buildEnvironmentRoutes(deps: EnvironmentRoutesDeps) {
       }
     }
 
+    // created_after / created_before: ISO timestamps → epoch ms. Reject
+    // unparseable values explicitly so the client knows it's a malformed
+    // request, not just "no results".
     const parseMs = (
       raw: string | undefined,
       field: string,
@@ -133,14 +134,11 @@ export function buildEnvironmentRoutes(deps: EnvironmentRoutesDeps) {
     };
     const createdAfterRes = parseMs(c.req.query("created_after"), "created_after");
     if (createdAfterRes.err) return createdAfterRes.err;
-    const createdBeforeRes = parseMs(
-      c.req.query("created_before"),
-      "created_before",
-    );
+    const createdBeforeRes = parseMs(c.req.query("created_before"), "created_before");
     if (createdBeforeRes.err) return createdBeforeRes.err;
 
-    const page = await environments.listPage({
-      tenantId: c.var.tenant_id,
+    const page = await services.environments.listPage({
+      tenantId: c.get("tenant_id"),
       ...parsePageQuery(c),
       ...(status !== undefined ? { status } : {}),
       ...(createdAfterRes.value !== undefined
@@ -150,31 +148,72 @@ export function buildEnvironmentRoutes(deps: EnvironmentRoutesDeps) {
         ? { createdBefore: createdBeforeRes.value }
         : {}),
     });
-    const data = page.items.map(toEnvironmentConfig);
-    if (!page.nextCursor) return c.json({ data });
-    return c.json({
-      data,
-      next_page: page.nextCursor,
-      next_cursor: page.nextCursor,
-    });
+    return jsonPage(c, page, toEnvironmentConfig);
   });
 
-  // GET /:id
+  // GET /v1/environments/:id — get environment
   app.get("/:id", async (c) => {
-    const row = await environments.get({
-      tenantId: c.var.tenant_id,
-      environmentId: c.req.param("id"),
-    });
+    const services = resolveServices(deps.services, c);
+    if (!services.environments) return notConfigured(c);
+    const t = c.get("tenant_id");
+    const id = c.req.param("id");
+    const row = await services.environments.get({ tenantId: t, environmentId: id });
     if (!row) return c.json({ error: "Environment not found" }, 404);
     return c.json(toEnvironmentConfig(row));
   });
 
-  // POST /:id/archive — register before generic POST /:id update
+  // PUT (and POST) /v1/environments/:id — update environment (re-prepares image if config changed)
+  // POST alias mirrors Anthropic Managed-Agents SDK convention so users can drop in
+  // `client.beta.environments.update(...)` from the official @anthropic-ai/sdk unchanged.
+  app.on(["PUT", "POST"], "/:id", async (c) => {
+    const services = resolveServices(deps.services, c);
+    if (!services.environments) return notConfigured(c);
+    const t = c.get("tenant_id");
+    const id = c.req.param("id");
+    const existing = await services.environments.get({ tenantId: t, environmentId: id });
+    if (!existing) return c.json({ error: "Environment not found" }, 404);
+
+    const body = (await c.req.json()) as {
+      name?: string;
+      description?: string;
+      config?: EnvironmentConfig["config"];
+      metadata?: Record<string, unknown>;
+    };
+
+    // Field-size caps (Anthropic-aligned for shared fields; OMA-specific
+    // for config.dockerfile / config.packages). See lib/limits.ts.
+    const limitCheck = validateEnvironmentLimits(body);
+    if (!limitCheck.ok) {
+      return c.json({ error: limitCheck.error }, 400);
+    }
+
+    const patch: Parameters<EnvironmentService["update"]>[0] = {
+      tenantId: t,
+      environmentId: id,
+    };
+    if (body.name !== undefined) patch.name = body.name;
+    if (body.description !== undefined) patch.description = body.description;
+    if (body.config !== undefined) patch.config = body.config;
+    if (body.metadata !== undefined) patch.metadata = body.metadata;
+
+    // No re-build trigger — packages take effect at the next session
+    // warmup via setup-on-warmup's hash-mismatch detection (the marker
+    // hash bakes in the new packages list, so ensureSetupApplied falls
+    // through to the fresh path automatically).
+    const row = await services.environments.update(patch);
+    return c.json(toEnvironmentConfig(row));
+  });
+
+  // POST /v1/environments/:id/archive
   app.post("/:id/archive", async (c) => {
+    const services = resolveServices(deps.services, c);
+    if (!services.environments) return notConfigured(c);
+    const t = c.get("tenant_id");
+    const id = c.req.param("id");
     try {
-      const row = await environments.archive({
-        tenantId: c.var.tenant_id,
-        environmentId: c.req.param("id"),
+      const row = await services.environments.archive({
+        tenantId: t,
+        environmentId: id,
       });
       return c.json(toEnvironmentConfig(row));
     } catch (err) {
@@ -185,63 +224,32 @@ export function buildEnvironmentRoutes(deps: EnvironmentRoutesDeps) {
     }
   });
 
-  // PUT + POST /:id — update (Anthropic SDK uses POST)
-  app.on(["PUT", "POST"], "/:id", async (c) => {
-    const t = c.var.tenant_id;
-    const id = c.req.param("id");
-
-    const existing = await environments.get({ tenantId: t, environmentId: id });
-    if (!existing) return c.json({ error: "Environment not found" }, 404);
-
-    const body = (await c.req.json()) as {
-      name?: string;
-      description?: string;
-      config?: EnvironmentConfig["config"];
-      metadata?: Record<string, unknown>;
-    };
-
-    if (validateLimits) {
-      const limitCheck = validateLimits(body);
-      if (!limitCheck.ok) {
-        return c.json({ error: limitCheck.error }, 400);
-      }
-    }
-
-    const patch: Parameters<typeof environments.update>[0] = {
-      tenantId: t,
-      environmentId: id,
-    };
-    if (body.name !== undefined) patch.name = body.name;
-    if (body.description !== undefined) patch.description = body.description;
-    if (body.config !== undefined) patch.config = body.config;
-    if (body.metadata !== undefined) patch.metadata = body.metadata;
-
-    const row = await environments.update(patch);
-    return c.json(toEnvironmentConfig(row));
-  });
-
-  // DELETE /:id
+  // DELETE /v1/environments/:id — hard delete. Pairs with POST archive
+  // for the two-tier delete UX the console exposes via RowActionsMenu.
   app.delete("/:id", async (c) => {
-    const t = c.var.tenant_id;
+    const services = resolveServices(deps.services, c);
+    if (!services.environments) return notConfigured(c);
+    const t = c.get("tenant_id");
     const id = c.req.param("id");
     try {
-      if (sessions) {
-        const hasActiveSessions = await sessions.hasActiveByEnvironment({
-          tenantId: t,
-          environmentId: id,
-        });
-        if (hasActiveSessions) {
-          return c.json(
-            {
-              error:
-                "Cannot delete environment with active sessions. Archive or delete sessions first.",
-            },
-            409,
-          );
-        }
+      const hasActiveSessions = await services.sessions.hasActiveByEnvironment({
+        tenantId: t,
+        environmentId: id,
+      });
+      if (hasActiveSessions) {
+        return c.json(
+          {
+            error:
+              "Cannot delete environment with active sessions. Archive or delete sessions first.",
+          },
+          409,
+        );
       }
 
-      await environments.delete({ tenantId: t, environmentId: id });
+      await services.environments.delete({
+        tenantId: t,
+        environmentId: id,
+      });
       return c.json({ type: "environment_deleted", id });
     } catch (err) {
       if (err instanceof EnvironmentNotFoundError) {

@@ -539,22 +539,31 @@ Endpoints main-node implements for the console:
 - `/auth-info` (provider list)
 - `/auth/*` (better-auth: sign-up, sign-in, sign-out, get-session, OTP)
 - `/v1/me`, `/v1/me/tenants`
-- `/v1/agents` CRUD, `/v1/sessions` CRUD + events + SSE stream
+- `/v1/agents` CRUD (with model-card validation + field-size limits + delete guards), `/v1/sessions` CRUD + events + SSE stream
 - `/v1/memory_stores` + `/memories` + per-session bindings
 - `/v1/vaults` + `/credentials`
-- `/v1/model_cards` CRUD (+ `/key` for cleartext; capability probe on create)
-- `/v1/environments` CRUD (+ archive). Node persists the environment config,
-  but currently runs sessions in the local sandbox snapshot; environment
-  package lists are not installed automatically at warmup yet.
-- `/v1/models/list` (GET catalog stub + POST provider key probe)
+- `/v1/environments` CRUD
+- `/v1/model_cards` CRUD — per-card provider/base_url/api_key; the harness
+  resolves the card first and falls back to `ANTHROPIC_API_KEY` /
+  `ANTHROPIC_BASE_URL`, so `oai`/`oai-compatible` providers work per-agent
+- `/v1/skills` CRUD + zip upload + versions, `/v1/clawhub` search/install
+- `/v1/files` upload/list/get/content/delete
+- `/v1/models/list`, `/v1/stats`
+- `/v1/oauth` (MCP-server OAuth connect: authorize/callback/refresh),
+  `/v1/cap-cli/oauth` (RFC 8628 device flow)
+- `/v1/api_keys`
+- MCP tool calls from in-process agents route through the same
+  credential-injection proxy logic CF uses (`vault-forward/proxy`) —
+  vault tokens never reach the sandbox
+- In-memory rate limiting on `/auth/*` and `/v1/*` writes (same buckets +
+  limits as CF; single-process only)
 - `/v1/integrations/{linear,github,slack}/{installations,publications,...}` — read + persona/capability PATCH + dispatch-rule CRUD. Active when `PLATFORM_ROOT_SECRET` env var is set. Publication-create endpoints (`start-a1`, `credentials`, `handoff-link`, `personal-token`) now run in-process via `NodeInstallBridge.startInstallation` — wire shape matches the CF gateway verbatim. The OAuth callback / setup-page / webhook / Linear MCP / GitHub refresh-by-vault routes are all in-process via `buildIntegrationsGatewayRoutes`.
 
 Endpoints stubbed (return empty `data: []` so the UI degrades gracefully):
-- `/v1/api_keys`, `/v1/me/cli-tokens`,
-  `/v1/runtimes`, `/v1/skills`
-
-These pages render an "empty" state in the console; their CF counterparts
-will land in main-node as follow-up work.
+- `/v1/runtimes` — the `oma bridge daemon` WebSocket path (CF RuntimeRoom
+  DO) has no Node equivalent yet, so runtime-attached agents are CF-only
+- `/v1/cost_report` is intentionally absent: it reports Cloudflare-account
+  infrastructure spend via the CF API, which has no meaning on self-host
 
 ### Integrations on self-host
 

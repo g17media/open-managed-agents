@@ -4,14 +4,16 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./proxy": "./src/proxy.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@open-managed-agents/shared": "workspace:*",
-    "@open-managed-agents/credentials-store": "workspace:*"
+    "@open-managed-agents/credentials-store": "workspace:*",
+    "@open-managed-agents/sessions-store": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^4.1.3"

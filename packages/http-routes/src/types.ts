@@ -14,6 +14,8 @@ import type { CredentialService } from "@open-managed-agents/credentials-store";
 import type { MemoryStoreService } from "@open-managed-agents/memory-store";
 import type { SessionService } from "@open-managed-agents/sessions-store";
 import type { DreamService } from "@open-managed-agents/dreams-store";
+import type { EnvironmentService } from "@open-managed-agents/environments-store";
+import type { ModelCardService } from "@open-managed-agents/model-cards-store";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { KvStore } from "@open-managed-agents/kv-store";
 import type {
@@ -22,6 +24,7 @@ import type {
   Tracer,
 } from "@open-managed-agents/observability";
 import type { BrowserHarness } from "@open-managed-agents/browser-harness";
+import type { BlobStore } from "@open-managed-agents/blob-store";
 
 export interface BackgroundRunner {
   /** Fire-and-forget on Node (with logged error handler), waitUntil on CF. */
@@ -100,6 +103,13 @@ export interface RouteServices {
    *  backend is configured (legacy fixtures); the harness silently
    *  skips browser tool registration. */
   browser?: BrowserHarness | null;
+  /** Optional like dreams — buildEnvironmentRoutes requires it at runtime. */
+  environments?: EnvironmentService;
+  /** Optional like dreams — buildModelCardRoutes requires it at runtime. */
+  modelCards?: ModelCardService;
+  /** File/skill blob storage (CF: R2, Node: local FS or S3). Null when the
+   *  deployment has no bucket configured — routes 500 with a clear message. */
+  filesBlob?: BlobStore | null;
 }
 
 /** Per-request services accessor. CF passes a callback that resolves
