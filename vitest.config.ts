@@ -149,6 +149,7 @@ export default defineConfig({
       { find: "@open-managed-agents/kv-store", replacement: "./packages/kv-store/src/index.ts" },
       { find: "@open-managed-agents/quotas", replacement: "./packages/quotas/src/index.ts" },
       { find: "@open-managed-agents/rate-limit", replacement: "./packages/rate-limit/src/index.ts" },
+      { find: "@open-managed-agents/vault-forward/proxy", replacement: "./packages/vault-forward/src/proxy.ts" },
       { find: "@open-managed-agents/vault-forward", replacement: "./packages/vault-forward/src/index.ts" },
       { find: "@open-managed-agents/schema", replacement: "./packages/schema/src/index.ts" },
       { find: "@open-managed-agents/http-routes", replacement: "./packages/http-routes/src/index.ts" },

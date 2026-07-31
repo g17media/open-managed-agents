@@ -50,6 +50,40 @@ export type {
 export { buildEvalRoutes } from "./evals";
 export type { EvalRoutesDeps, EvalTaskSpec } from "./evals";
 
+export { buildEnvironmentRoutes } from "./environments";
+export type { EnvironmentRoutesDeps } from "./environments";
+
+export { buildModelCardRoutes } from "./model-cards";
+export type { ModelCardRoutesDeps } from "./model-cards";
+
+export { buildModelsRoutes } from "./models";
+
+export { buildSkillRoutes } from "./skills";
+export type { SkillRoutesDeps } from "./skills";
+
+export { buildStatsRoutes } from "./stats";
+export type { StatsRoutesDeps } from "./stats";
+
+export { buildClawhubRoutes } from "./clawhub";
+export type { ClawhubRoutesDeps } from "./clawhub";
+
+export { buildOAuthRoutes } from "./oauth";
+export type { OAuthRoutesDeps } from "./oauth";
+
+export { buildCapCliOauthRoutes } from "./cap-cli-oauth";
+export type { CapCliOauthRoutesDeps } from "./cap-cli-oauth";
+
+export { kvKey, kvPrefix, kvListAll } from "./lib/kv-helpers";
+
+export { jsonPage, parsePageQuery } from "./lib/list-page";
+export type { PageQuery } from "./lib/list-page";
+export { validateAgentLimits, validateEnvironmentLimits } from "./lib/limits";
+export type {
+  ValidationResult,
+  AgentLimitsInput,
+  EnvironmentLimitsInput,
+} from "./lib/limits";
+
 export { buildIntegrationsRoutes } from "./integrations";
 export type {
   IntegrationsRoutesDeps,

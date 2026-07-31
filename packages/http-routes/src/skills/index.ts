@@ -1,14 +1,20 @@
 import { Hono } from "hono";
-import type { Env } from "@open-managed-agents/shared";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
 import { unzipSync } from "fflate";
-import { checkUploadFreq, checkUploadSize } from "../quotas";
-import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
-import type { Services } from "@open-managed-agents/services";
+import type { KvStore } from "@open-managed-agents/kv-store";
 import type { BlobStore } from "@open-managed-agents/blob-store";
+import type { RouteServicesArg } from "../types";
+import { resolveServices } from "../types";
+import { kvKey, kvPrefix, kvListAll } from "../lib/kv-helpers";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>();
+export interface SkillRoutesDeps {
+  services: RouteServicesArg;
+  /** Upload guards — CF wires these to env-configured limits (UPLOAD_MAX_BYTES,
+   *  RL_UPLOAD_TENANT). Omitted = soft-pass, same as CF with them unconfigured. */
+  checkUploadSize?: (req: Request) => Response | null;
+  checkUploadFreq?: (tenantId: string) => Promise<Response | null>;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -204,9 +210,6 @@ async function deleteFilesFromR2(
   );
 }
 
-function ensureBucket(c: { var: { services: Services } }): BlobStore | null {
-  return c.var.services.filesBlob;
-}
 
 /**
  * Attempt to extract `name` and `description` from YAML frontmatter in a
@@ -421,7 +424,7 @@ interface PersistArgs {
 }
 
 async function persistNewSkill(
-  env: Env,
+  kv: KvStore,
   bucket: BlobStore,
   tenantId: string,
   args: PersistArgs,
@@ -472,8 +475,8 @@ async function persistNewSkill(
   const version: SkillVersion = { version: versionId, files: manifest, created_at: now };
 
   await Promise.all([
-    env.CONFIG_KV.put(kvKey(tenantId, "skill", id), JSON.stringify(skill)),
-    env.CONFIG_KV.put(kvKey(tenantId, "skillver", id, versionId), JSON.stringify(version)),
+    kv.put(kvKey(tenantId, "skill", id), JSON.stringify(skill)),
+    kv.put(kvKey(tenantId, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
   const filesOut = await readFilesFromR2(bucket, tenantId, id, versionId, manifest);
@@ -481,7 +484,7 @@ async function persistNewSkill(
 }
 
 async function persistNewVersion(
-  env: Env,
+  kv: KvStore,
   bucket: BlobStore,
   tenantId: string,
   skillId: string,
@@ -490,7 +493,7 @@ async function persistNewVersion(
   | { ok: true; version: SkillVersion; status: 201 }
   | { ok: false; status: number; error: string }
 > {
-  const raw = await env.CONFIG_KV.get(kvKey(tenantId, "skill", skillId));
+  const raw = await kv.get(kvKey(tenantId, "skill", skillId));
   if (!raw) return { ok: false, status: 404, error: "Skill not found" };
   const skill: SkillMeta = JSON.parse(raw);
   if (skill.source !== "custom") {
@@ -520,396 +523,410 @@ async function persistNewVersion(
   if (!args.description && extracted.description) skill.description = extracted.description;
 
   await Promise.all([
-    env.CONFIG_KV.put(kvKey(tenantId, "skill", skillId), JSON.stringify(skill)),
-    env.CONFIG_KV.put(kvKey(tenantId, "skillver", skillId, versionId), JSON.stringify(version)),
+    kv.put(kvKey(tenantId, "skill", skillId), JSON.stringify(skill)),
+    kv.put(kvKey(tenantId, "skillver", skillId, versionId), JSON.stringify(version)),
   ]);
 
   return { ok: true, status: 201, version };
 }
 
-// ---------------------------------------------------------------------------
-// POST /v1/skills — create a custom skill (JSON; SDK / programmatic path)
-// ---------------------------------------------------------------------------
+export function buildSkillRoutes(deps: SkillRoutesDeps) {
+  const app = new Hono<{ Variables: { tenant_id: string } }>();
 
-app.post("/", async (c) => {
-  const t = c.get("tenant_id");
-  const sizeCheck = checkUploadSize(c.env, c.req.raw);
-  if (sizeCheck) return sizeCheck;
-  const freqCheck = await checkUploadFreq(c.env, t);
-  if (freqCheck) return freqCheck;
+  // ---------------------------------------------------------------------------
+  // POST /v1/skills — create a custom skill (JSON; SDK / programmatic path)
+  // ---------------------------------------------------------------------------
 
-  const bucket = ensureBucket(c);
-  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+  app.post("/", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const t = c.get("tenant_id");
+    const sizeCheck = deps.checkUploadSize?.(c.req.raw) ?? null;
+    if (sizeCheck) return sizeCheck;
+    const freqCheck = deps.checkUploadFreq ? await deps.checkUploadFreq(t) : null;
+    if (freqCheck) return freqCheck;
 
-  const body = await c.req.json<PersistArgs>();
-  const result = await persistNewSkill(c.env, bucket, t, body);
-  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
-  return c.json({ ...toApiSkill(result.skill), files: result.files }, 201);
-});
+    const bucket = services.filesBlob ?? null;
+    if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
-// ---------------------------------------------------------------------------
-// POST /v1/skills/upload — create a custom skill from a packaged .zip
-// (multipart/form-data: file=<zip>, optional display_title)
-// ---------------------------------------------------------------------------
-
-app.post("/upload", async (c) => {
-  const t = c.get("tenant_id");
-  const sizeCheck = checkUploadSize(c.env, c.req.raw);
-  if (sizeCheck) return sizeCheck;
-  const freqCheck = await checkUploadFreq(c.env, t);
-  if (freqCheck) return freqCheck;
-
-  const bucket = ensureBucket(c);
-  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
-
-  const contentType = c.req.header("content-type") || "";
-  if (!contentType.includes("multipart/form-data")) {
-    return c.json({ error: "expected multipart/form-data" }, 400);
-  }
-
-  let formData: FormData;
-  try {
-    formData = await c.req.formData();
-  } catch (err) {
-    return c.json(
-      { error: `Invalid multipart body: ${err instanceof Error ? err.message : "unknown"}` },
-      400,
-    );
-  }
-  const file = formData.get("file") as File | null;
-  if (!file || typeof (file as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
-    return c.json({ error: "file field is required (the skill .zip)" }, 400);
-  }
-
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let parsed: ParsedSkillZip;
-  try {
-    parsed = parseSkillZipBytes(bytes);
-  } catch (err) {
-    return c.json(
-      { error: err instanceof Error ? err.message : "Failed to read zip" },
-      400,
-    );
-  }
-
-  const displayTitle =
-    typeof formData.get("display_title") === "string"
-      ? (formData.get("display_title") as string)
-      : undefined;
-
-  const result = await persistNewSkill(c.env, bucket, t, {
-    files: parsed.files,
-    name: parsed.name,
-    description: parsed.description,
-    display_title: displayTitle,
+    const body = await c.req.json<PersistArgs>();
+    const result = await persistNewSkill(services.kv, bucket, t, body);
+    if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
+    return c.json({ ...toApiSkill(result.skill), files: result.files }, 201);
   });
-  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
-  return c.json({ ...toApiSkill(result.skill), files: result.files }, 201);
-});
 
-// ---------------------------------------------------------------------------
-// GET /v1/skills — list skills (custom + builtin)
-// ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // POST /v1/skills/upload — create a custom skill from a packaged .zip
+  // (multipart/form-data: file=<zip>, optional display_title)
+  // ---------------------------------------------------------------------------
 
-app.get("/", async (c) => {
-  // source: enum filter. Whitelist strictly — anything other than
-  // anthropic|custom|any is a 400, NOT a silent fallback. Lets the
-  // console drive a single-select chip without the server quietly
-  // ignoring typos. Output `source` is always normalized to `anthropic`
-  // via toApiSkill(), so the input enum doesn't need to know about the
-  // legacy `builtin` storage value.
-  const sourceRaw = c.req.query("source");
-  let source: "anthropic" | "custom" | "any" | undefined;
-  if (sourceRaw !== undefined) {
-    if (sourceRaw === "anthropic" || sourceRaw === "custom" || sourceRaw === "any") {
-      source = sourceRaw;
-    } else {
+  app.post("/upload", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const t = c.get("tenant_id");
+    const sizeCheck = deps.checkUploadSize?.(c.req.raw) ?? null;
+    if (sizeCheck) return sizeCheck;
+    const freqCheck = deps.checkUploadFreq ? await deps.checkUploadFreq(t) : null;
+    if (freqCheck) return freqCheck;
+
+    const bucket = services.filesBlob ?? null;
+    if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+    const contentType = c.req.header("content-type") || "";
+    if (!contentType.includes("multipart/form-data")) {
+      return c.json({ error: "expected multipart/form-data" }, 400);
+    }
+
+    let formData: FormData;
+    try {
+      formData = await c.req.formData();
+    } catch (err) {
       return c.json(
-        {
-          error: {
-            type: "invalid_request_error",
-            code: "invalid_source",
-            message: `Invalid source '${sourceRaw}'; expected one of anthropic|custom|any.`,
-          },
-        },
+        { error: `Invalid multipart body: ${err instanceof Error ? err.message : "unknown"}` },
         400,
       );
     }
-  }
-  const onlyBuiltin = source === "anthropic";
-  let customs: SkillMeta[] = [];
-  if (!onlyBuiltin) {
+    const file = formData.get("file") as File | null;
+    if (!file || typeof (file as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+      return c.json({ error: "file field is required (the skill .zip)" }, 400);
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let parsed: ParsedSkillZip;
+    try {
+      parsed = parseSkillZipBytes(bytes);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : "Failed to read zip" },
+        400,
+      );
+    }
+
+    const displayTitle =
+      typeof formData.get("display_title") === "string"
+        ? (formData.get("display_title") as string)
+        : undefined;
+
+    const result = await persistNewSkill(services.kv, bucket, t, {
+      files: parsed.files,
+      name: parsed.name,
+      description: parsed.description,
+      display_title: displayTitle,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
+    return c.json({ ...toApiSkill(result.skill), files: result.files }, 201);
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /v1/skills — list skills (custom + builtin)
+  // ---------------------------------------------------------------------------
+
+  app.get("/", async (c) => {
+    const services = resolveServices(deps.services, c);
+    // source: enum filter. Whitelist strictly — anything other than
+    // anthropic|custom|any is a 400, NOT a silent fallback. Lets the
+    // console drive a single-select chip without the server quietly
+    // ignoring typos. Output `source` is always normalized to `anthropic`
+    // via toApiSkill(), so the input enum doesn't need to know about the
+    // legacy `builtin` storage value.
+    const sourceRaw = c.req.query("source");
+    let source: "anthropic" | "custom" | "any" | undefined;
+    if (sourceRaw !== undefined) {
+      if (sourceRaw === "anthropic" || sourceRaw === "custom" || sourceRaw === "any") {
+        source = sourceRaw;
+      } else {
+        return c.json(
+          {
+            error: {
+              type: "invalid_request_error",
+              code: "invalid_source",
+              message: `Invalid source '${sourceRaw}'; expected one of anthropic|custom|any.`,
+            },
+          },
+          400,
+        );
+      }
+    }
+    const onlyBuiltin = source === "anthropic";
+    let customs: SkillMeta[] = [];
+    if (!onlyBuiltin) {
+      const t = c.get("tenant_id");
+      const list = await kvListAll(services.kv, kvPrefix(t, "skill"));
+      customs = (
+        await Promise.all(
+          list.map(async (k) => {
+            const data = await services.kv.get(k.name);
+            if (!data) return null;
+            try {
+              return JSON.parse(data) as SkillMeta;
+            } catch (err) {
+              logWarn(
+                { op: "skills.list.parse", tenant_id: t, kv_key: k.name, err },
+                "skill metadata JSON parse failed; skipping entry",
+              );
+              return null;
+            }
+          }),
+        )
+      ).filter((s): s is SkillMeta => s !== null);
+    }
+    const builtins = source === "custom" ? [] : BUILTIN_SKILLS;
+    // Skills LIST returns all builtins + all tenant customs in one shot — no
+    // pagination today. Emit the Anthropic-required `has_more` + `next_page`
+    // fields explicitly: BetaListSkillsResponse marks both required even when
+    // there's only one page.
+    return c.json({
+      data: [...builtins, ...customs].map(toApiSkill),
+      has_more: false,
+      next_page: null,
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /v1/skills/:id — metadata only
+  // ---------------------------------------------------------------------------
+
+  app.get("/:id", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const id = c.req.param("id");
+    const builtin = BUILTIN_SKILLS.find((s) => s.id === id);
+    if (builtin) return c.json(toApiSkill(builtin));
+    const data = await services.kv.get(kvKey(c.get("tenant_id"), "skill", id));
+    if (!data) return c.json({ error: "Skill not found" }, 404);
+    return c.json(toApiSkill(JSON.parse(data) as SkillMeta));
+  });
+
+  // ---------------------------------------------------------------------------
+  // DELETE /v1/skills/:id — delete skill, all versions, and all R2 objects
+  // ---------------------------------------------------------------------------
+
+  app.delete("/:id", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const id = c.req.param("id");
+    if (id.startsWith("builtin_")) {
+      return c.json({ error: "Cannot delete built-in skills" }, 403);
+    }
     const t = c.get("tenant_id");
-    const list = await kvListAll(c.var.services.kv, kvPrefix(t, "skill"));
-    customs = (
+    const data = await services.kv.get(kvKey(t, "skill", id));
+    if (!data) return c.json({ error: "Skill not found" }, 404);
+
+    const versionKeys = await kvListAll(services.kv, kvPrefix(t, "skillver", id));
+
+    const bucket = services.filesBlob ?? null;
+    if (bucket) {
+      for (const k of versionKeys) {
+        const verData = await services.kv.get(k.name);
+        if (!verData) continue;
+        try {
+          const v = JSON.parse(verData) as SkillVersion;
+          await deleteFilesFromR2(bucket, t, id, v.version, v.files);
+        } catch (err) {
+          logWarn(
+            { op: "skills.delete.r2_cleanup", tenant_id: t, skill_id: id, kv_key: k.name, err },
+            "skill version R2 cleanup failed; KV row will still be deleted",
+          );
+        }
+      }
+    }
+
+    await Promise.all([
+      services.kv.delete(kvKey(t, "skill", id)),
+      ...versionKeys.map((k) => services.kv.delete(k.name)),
+    ]);
+
+    return c.json({ type: "skill_deleted", id });
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /v1/skills/:id/versions — create a new version (JSON)
+  // ---------------------------------------------------------------------------
+
+  app.post("/:id/versions", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const t = c.get("tenant_id");
+    const sizeCheck = deps.checkUploadSize?.(c.req.raw) ?? null;
+    if (sizeCheck) return sizeCheck;
+    const freqCheck = deps.checkUploadFreq ? await deps.checkUploadFreq(t) : null;
+    if (freqCheck) return freqCheck;
+
+    const bucket = services.filesBlob ?? null;
+    if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+    const id = c.req.param("id");
+    const body = await c.req.json<PersistArgs>();
+    const result = await persistNewVersion(services.kv, bucket, t, id, body);
+    if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 403 | 404 | 500);
+    return c.json(result.version, 201);
+  });
+
+  // ---------------------------------------------------------------------------
+  // POST /v1/skills/:id/versions/upload — new version from a packaged .zip
+  // ---------------------------------------------------------------------------
+
+  app.post("/:id/versions/upload", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const t = c.get("tenant_id");
+    const sizeCheck = deps.checkUploadSize?.(c.req.raw) ?? null;
+    if (sizeCheck) return sizeCheck;
+    const freqCheck = deps.checkUploadFreq ? await deps.checkUploadFreq(t) : null;
+    if (freqCheck) return freqCheck;
+
+    const bucket = services.filesBlob ?? null;
+    if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+    const contentType = c.req.header("content-type") || "";
+    if (!contentType.includes("multipart/form-data")) {
+      return c.json({ error: "expected multipart/form-data" }, 400);
+    }
+
+    let formData: FormData;
+    try {
+      formData = await c.req.formData();
+    } catch (err) {
+      return c.json(
+        { error: `Invalid multipart body: ${err instanceof Error ? err.message : "unknown"}` },
+        400,
+      );
+    }
+    const file = formData.get("file") as File | null;
+    if (!file || typeof (file as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+      return c.json({ error: "file field is required (the skill .zip)" }, 400);
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let parsed: ParsedSkillZip;
+    try {
+      parsed = parseSkillZipBytes(bytes);
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : "Failed to read zip" },
+        400,
+      );
+    }
+
+    const displayTitle =
+      typeof formData.get("display_title") === "string"
+        ? (formData.get("display_title") as string)
+        : undefined;
+
+    const id = c.req.param("id");
+    const result = await persistNewVersion(services.kv, bucket, t, id, {
+      files: parsed.files,
+      display_title: displayTitle,
+      description: parsed.description,
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 403 | 404 | 500);
+    return c.json(result.version, 201);
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /v1/skills/:id/versions — list all versions (manifests only)
+  // ---------------------------------------------------------------------------
+
+  app.get("/:id/versions", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const id = c.req.param("id");
+    const t = c.get("tenant_id");
+    const skillData = await services.kv.get(kvKey(t, "skill", id));
+    if (!skillData) return c.json({ error: "Skill not found" }, 404);
+
+    const list = await kvListAll(services.kv, kvPrefix(t, "skillver", id));
+
+    const versions = (
       await Promise.all(
         list.map(async (k) => {
-          const data = await c.var.services.kv.get(k.name);
+          const data = await services.kv.get(k.name);
           if (!data) return null;
           try {
-            return JSON.parse(data) as SkillMeta;
+            const v = JSON.parse(data) as SkillVersion;
+            return {
+              version: v.version,
+              file_count: v.files.length,
+              created_at: v.created_at,
+            };
           } catch (err) {
             logWarn(
-              { op: "skills.list.parse", tenant_id: t, kv_key: k.name, err },
-              "skill metadata JSON parse failed; skipping entry",
+              { op: "skills.versions.parse", kv_key: k.name, err },
+              "skill version JSON parse failed; skipping",
             );
             return null;
           }
         }),
       )
-    ).filter((s): s is SkillMeta => s !== null);
-  }
-  const builtins = source === "custom" ? [] : BUILTIN_SKILLS;
-  // Skills LIST returns all builtins + all tenant customs in one shot — no
-  // pagination today. Emit the Anthropic-required `has_more` + `next_page`
-  // fields explicitly: BetaListSkillsResponse marks both required even when
-  // there's only one page.
-  return c.json({
-    data: [...builtins, ...customs].map(toApiSkill),
-    has_more: false,
-    next_page: null,
+    ).filter(Boolean);
+
+    versions.sort((a, b) => {
+      const ta = parseInt((a as { version: string }).version, 10);
+      const tb = parseInt((b as { version: string }).version, 10);
+      return tb - ta;
+    });
+
+    return c.json({ data: versions });
   });
-});
 
-// ---------------------------------------------------------------------------
-// GET /v1/skills/:id — metadata only
-// ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // GET /v1/skills/:id/versions/:version — get a specific version with files
+  // ---------------------------------------------------------------------------
 
-app.get("/:id", async (c) => {
-  const id = c.req.param("id");
-  const builtin = BUILTIN_SKILLS.find((s) => s.id === id);
-  if (builtin) return c.json(toApiSkill(builtin));
-  const data = await c.var.services.kv.get(kvKey(c.get("tenant_id"), "skill", id));
-  if (!data) return c.json({ error: "Skill not found" }, 404);
-  return c.json(toApiSkill(JSON.parse(data) as SkillMeta));
-});
+  app.get("/:id/versions/:version", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const id = c.req.param("id");
+    const version = c.req.param("version");
+    const t = c.get("tenant_id");
 
-// ---------------------------------------------------------------------------
-// DELETE /v1/skills/:id — delete skill, all versions, and all R2 objects
-// ---------------------------------------------------------------------------
+    const data = await services.kv.get(kvKey(t, "skillver", id, version));
+    if (!data) return c.json({ error: "Version not found" }, 404);
 
-app.delete("/:id", async (c) => {
-  const id = c.req.param("id");
-  if (id.startsWith("builtin_")) {
-    return c.json({ error: "Cannot delete built-in skills" }, 403);
-  }
-  const t = c.get("tenant_id");
-  const data = await c.var.services.kv.get(kvKey(t, "skill", id));
-  if (!data) return c.json({ error: "Skill not found" }, 404);
+    const v = JSON.parse(data) as SkillVersion;
+    const bucket = services.filesBlob ?? null;
+    if (!bucket) return c.json(v); // metadata-only fallback when no bucket
 
-  const versionKeys = await kvListAll(c.var.services.kv, kvPrefix(t, "skillver", id));
+    const filesOut = await readFilesFromR2(bucket, t, id, version, v.files);
+    return c.json({ ...v, files: filesOut });
+  });
 
-  const bucket = ensureBucket(c);
-  if (bucket) {
-    for (const k of versionKeys) {
-      const verData = await c.var.services.kv.get(k.name);
-      if (!verData) continue;
-      try {
-        const v = JSON.parse(verData) as SkillVersion;
-        await deleteFilesFromR2(bucket, t, id, v.version, v.files);
-      } catch (err) {
-        logWarn(
-          { op: "skills.delete.r2_cleanup", tenant_id: t, skill_id: id, kv_key: k.name, err },
-          "skill version R2 cleanup failed; KV row will still be deleted",
+  // ---------------------------------------------------------------------------
+  // DELETE /v1/skills/:id/versions/:version
+  // ---------------------------------------------------------------------------
+
+  app.delete("/:id/versions/:version", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const id = c.req.param("id");
+    const version = c.req.param("version");
+    const t = c.get("tenant_id");
+
+    const skillRaw = await services.kv.get(kvKey(t, "skill", id));
+    if (!skillRaw) return c.json({ error: "Skill not found" }, 404);
+
+    const key = kvKey(t, "skillver", id, version);
+    const data = await services.kv.get(key);
+    if (!data) return c.json({ error: "Version not found" }, 404);
+
+    const skill: SkillMeta = JSON.parse(skillRaw);
+    const v = JSON.parse(data) as SkillVersion;
+
+    if (skill.latest_version === version) {
+      const allVersions = await kvListAll(services.kv, kvPrefix(t, "skillver", id));
+      const remaining = allVersions
+        .filter((k) => k.name !== key)
+        .map((k) => k.name.split(":").pop()!)
+        .sort((a, b) => parseInt(b, 10) - parseInt(a, 10));
+
+      if (remaining.length === 0) {
+        return c.json(
+          { error: "Cannot delete the last version. Delete the skill instead." },
+          400,
         );
       }
+      skill.latest_version = remaining[0];
+      await services.kv.put(kvKey(t, "skill", id), JSON.stringify(skill));
     }
-  }
 
-  await Promise.all([
-    c.var.services.kv.delete(kvKey(t, "skill", id)),
-    ...versionKeys.map((k) => c.var.services.kv.delete(k.name)),
-  ]);
+    const bucket = services.filesBlob ?? null;
+    if (bucket) await deleteFilesFromR2(bucket, t, id, version, v.files);
 
-  return c.json({ type: "skill_deleted", id });
-});
+    await services.kv.delete(key);
 
-// ---------------------------------------------------------------------------
-// POST /v1/skills/:id/versions — create a new version (JSON)
-// ---------------------------------------------------------------------------
-
-app.post("/:id/versions", async (c) => {
-  const t = c.get("tenant_id");
-  const sizeCheck = checkUploadSize(c.env, c.req.raw);
-  if (sizeCheck) return sizeCheck;
-  const freqCheck = await checkUploadFreq(c.env, t);
-  if (freqCheck) return freqCheck;
-
-  const bucket = ensureBucket(c);
-  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
-
-  const id = c.req.param("id");
-  const body = await c.req.json<PersistArgs>();
-  const result = await persistNewVersion(c.env, bucket, t, id, body);
-  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 403 | 404 | 500);
-  return c.json(result.version, 201);
-});
-
-// ---------------------------------------------------------------------------
-// POST /v1/skills/:id/versions/upload — new version from a packaged .zip
-// ---------------------------------------------------------------------------
-
-app.post("/:id/versions/upload", async (c) => {
-  const t = c.get("tenant_id");
-  const sizeCheck = checkUploadSize(c.env, c.req.raw);
-  if (sizeCheck) return sizeCheck;
-  const freqCheck = await checkUploadFreq(c.env, t);
-  if (freqCheck) return freqCheck;
-
-  const bucket = ensureBucket(c);
-  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
-
-  const contentType = c.req.header("content-type") || "";
-  if (!contentType.includes("multipart/form-data")) {
-    return c.json({ error: "expected multipart/form-data" }, 400);
-  }
-
-  let formData: FormData;
-  try {
-    formData = await c.req.formData();
-  } catch (err) {
-    return c.json(
-      { error: `Invalid multipart body: ${err instanceof Error ? err.message : "unknown"}` },
-      400,
-    );
-  }
-  const file = formData.get("file") as File | null;
-  if (!file || typeof (file as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
-    return c.json({ error: "file field is required (the skill .zip)" }, 400);
-  }
-
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let parsed: ParsedSkillZip;
-  try {
-    parsed = parseSkillZipBytes(bytes);
-  } catch (err) {
-    return c.json(
-      { error: err instanceof Error ? err.message : "Failed to read zip" },
-      400,
-    );
-  }
-
-  const displayTitle =
-    typeof formData.get("display_title") === "string"
-      ? (formData.get("display_title") as string)
-      : undefined;
-
-  const id = c.req.param("id");
-  const result = await persistNewVersion(c.env, bucket, t, id, {
-    files: parsed.files,
-    display_title: displayTitle,
-    description: parsed.description,
-  });
-  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 403 | 404 | 500);
-  return c.json(result.version, 201);
-});
-
-// ---------------------------------------------------------------------------
-// GET /v1/skills/:id/versions — list all versions (manifests only)
-// ---------------------------------------------------------------------------
-
-app.get("/:id/versions", async (c) => {
-  const id = c.req.param("id");
-  const t = c.get("tenant_id");
-  const skillData = await c.var.services.kv.get(kvKey(t, "skill", id));
-  if (!skillData) return c.json({ error: "Skill not found" }, 404);
-
-  const list = await kvListAll(c.var.services.kv, kvPrefix(t, "skillver", id));
-
-  const versions = (
-    await Promise.all(
-      list.map(async (k) => {
-        const data = await c.var.services.kv.get(k.name);
-        if (!data) return null;
-        try {
-          const v = JSON.parse(data) as SkillVersion;
-          return {
-            version: v.version,
-            file_count: v.files.length,
-            created_at: v.created_at,
-          };
-        } catch (err) {
-          logWarn(
-            { op: "skills.versions.parse", kv_key: k.name, err },
-            "skill version JSON parse failed; skipping",
-          );
-          return null;
-        }
-      }),
-    )
-  ).filter(Boolean);
-
-  versions.sort((a, b) => {
-    const ta = parseInt((a as { version: string }).version, 10);
-    const tb = parseInt((b as { version: string }).version, 10);
-    return tb - ta;
+    return c.json({ type: "skill_version_deleted", id, version });
   });
 
-  return c.json({ data: versions });
-});
-
-// ---------------------------------------------------------------------------
-// GET /v1/skills/:id/versions/:version — get a specific version with files
-// ---------------------------------------------------------------------------
-
-app.get("/:id/versions/:version", async (c) => {
-  const id = c.req.param("id");
-  const version = c.req.param("version");
-  const t = c.get("tenant_id");
-
-  const data = await c.var.services.kv.get(kvKey(t, "skillver", id, version));
-  if (!data) return c.json({ error: "Version not found" }, 404);
-
-  const v = JSON.parse(data) as SkillVersion;
-  const bucket = ensureBucket(c);
-  if (!bucket) return c.json(v); // metadata-only fallback when no bucket
-
-  const filesOut = await readFilesFromR2(bucket, t, id, version, v.files);
-  return c.json({ ...v, files: filesOut });
-});
-
-// ---------------------------------------------------------------------------
-// DELETE /v1/skills/:id/versions/:version
-// ---------------------------------------------------------------------------
-
-app.delete("/:id/versions/:version", async (c) => {
-  const id = c.req.param("id");
-  const version = c.req.param("version");
-  const t = c.get("tenant_id");
-
-  const skillRaw = await c.var.services.kv.get(kvKey(t, "skill", id));
-  if (!skillRaw) return c.json({ error: "Skill not found" }, 404);
-
-  const key = kvKey(t, "skillver", id, version);
-  const data = await c.var.services.kv.get(key);
-  if (!data) return c.json({ error: "Version not found" }, 404);
-
-  const skill: SkillMeta = JSON.parse(skillRaw);
-  const v = JSON.parse(data) as SkillVersion;
-
-  if (skill.latest_version === version) {
-    const allVersions = await kvListAll(c.var.services.kv, kvPrefix(t, "skillver", id));
-    const remaining = allVersions
-      .filter((k) => k.name !== key)
-      .map((k) => k.name.split(":").pop()!)
-      .sort((a, b) => parseInt(b, 10) - parseInt(a, 10));
-
-    if (remaining.length === 0) {
-      return c.json(
-        { error: "Cannot delete the last version. Delete the skill instead." },
-        400,
-      );
-    }
-    skill.latest_version = remaining[0];
-    await c.var.services.kv.put(kvKey(t, "skill", id), JSON.stringify(skill));
-  }
-
-  const bucket = ensureBucket(c);
-  if (bucket) await deleteFilesFromR2(bucket, t, id, version, v.files);
-
-  await c.var.services.kv.delete(key);
-
-  return c.json({ type: "skill_version_deleted", id, version });
-});
-
-export default app;
+  return app;
+}

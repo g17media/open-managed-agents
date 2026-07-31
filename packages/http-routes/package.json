@@ -11,6 +11,7 @@
     "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/blob-store": "workspace:*",
     "@open-managed-agents/browser-harness": "workspace:*",
+    "@open-managed-agents/cap": "workspace:*",
     "@open-managed-agents/credentials-store": "workspace:*",
     "@open-managed-agents/dreams-pipeline": "workspace:*",
     "@open-managed-agents/dreams-store": "workspace:*",
@@ -20,6 +21,7 @@
     "@open-managed-agents/integrations-core": "workspace:*",
     "@open-managed-agents/kv-store": "workspace:*",
     "@open-managed-agents/memory-store": "workspace:*",
+    "@open-managed-agents/model-cards-store": "workspace:*",
     "@open-managed-agents/observability": "workspace:*",
     "@open-managed-agents/quotas": "workspace:*",
     "@open-managed-agents/session-runtime": "workspace:*",
@@ -28,6 +30,7 @@
     "@open-managed-agents/sql-client": "workspace:*",
     "@open-managed-agents/vault-forward": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
+    "fflate": "^0.8.2",
     "hono": "^4.7.0",
     "nanoid": "^5.1.0"
   }

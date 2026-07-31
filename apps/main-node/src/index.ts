@@ -50,13 +50,19 @@ import { createSqliteSessionService } from "@open-managed-agents/sessions-store"
 import { createSqliteFileService } from "@open-managed-agents/files-store";
 import { createSqliteEvalRunService } from "@open-managed-agents/evals-store";
 import { createSqliteEnvironmentService } from "@open-managed-agents/environments-store";
+import { createSqliteModelCardService } from "@open-managed-agents/model-cards-store";
+import { buildMemoryGates } from "@open-managed-agents/rate-limit/adapters/memory";
+import {
+  resolveProxyTargetByTenant,
+  forwardWithRefresh,
+} from "@open-managed-agents/vault-forward/proxy";
 import { toFileRecord } from "@open-managed-agents/files-store";
 import { SqlEventLog } from "@open-managed-agents/event-log/sql";
 import type { SessionEvent } from "@open-managed-agents/shared";
-import { generateEventId } from "@open-managed-agents/shared";
+import { generateEventId, generateFileId, fileR2Key } from "@open-managed-agents/shared";
 import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
-import { resolveModel } from "@open-managed-agents/agent/harness/provider";
+import { resolveModel, type ApiCompat } from "@open-managed-agents/agent/harness/provider";
 import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
@@ -72,6 +78,15 @@ import {
   buildMeRoutes,
   buildApiKeyRoutes,
   buildEvalRoutes,
+  buildEnvironmentRoutes,
+  buildModelCardRoutes,
+  buildModelsRoutes,
+  buildSkillRoutes,
+  buildStatsRoutes,
+  buildClawhubRoutes,
+  buildOAuthRoutes,
+  buildCapCliOauthRoutes,
+  validateAgentLimits,
   buildIntegrationsRoutes,
   buildIntegrationsGatewayRoutes,
   type RouteServices,
@@ -275,6 +290,12 @@ const sessionsService = createSqliteSessionService({ db: drizzleDb });
 const filesService = createSqliteFileService({ db: drizzleDb });
 const evalsService = createSqliteEvalRunService({ db: drizzleDb });
 const environmentsService = createSqliteEnvironmentService({ db: drizzleDb });
+const modelCardsService = createSqliteModelCardService(
+  { db: drizzleDb },
+  platformRootSecret
+    ? { crypto: new WebCryptoAesGcm(platformRootSecret, "model.cards.keys") }
+    : undefined,
+);
 
 let memoryBlobs: import("@open-managed-agents/memory-store").BlobStore;
 let memoryBlobDescription: string;
@@ -474,6 +495,48 @@ async function buildSandbox(
 
 // ─── Session registry ───────────────────────────────────────────────────
 
+const mcpProxyServices = { sessions: sessionsService, credentials: credentialService };
+
+async function mcpBindingFetch(request: Request): Promise<Response> {
+  const tenantId = request.headers.get("x-oma-tenant");
+  const sessionId = request.headers.get("x-oma-session");
+  const serverName = request.headers.get("x-oma-mcp-server");
+  if (!tenantId || !sessionId || !serverName) {
+    return new Response(
+      '{"error":"missing x-oma-tenant / x-oma-session / x-oma-mcp-server header"}',
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+  const target = await resolveProxyTargetByTenant(
+    mcpProxyServices,
+    tenantId,
+    sessionId,
+    serverName,
+  );
+  if (!target) {
+    return new Response('{"error":"forbidden"}', {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const inboundHeaders = new Headers(request.headers);
+  inboundHeaders.delete("x-oma-tenant");
+  inboundHeaders.delete("x-oma-session");
+  inboundHeaders.delete("x-oma-mcp-server");
+  const body = ["GET", "HEAD"].includes(request.method)
+    ? null
+    : await request.arrayBuffer();
+  return forwardWithRefresh(
+    mcpProxyServices,
+    tenantId,
+    target,
+    request.method,
+    inboundHeaders,
+    body,
+    { sessionId, serverName, callerKind: "rpc-mcp" },
+  );
+}
+
 const sessionRegistry = new SessionRegistry({
   sql,
   hub,
@@ -484,24 +547,56 @@ const sessionRegistry = new SessionRegistry({
   buildSandbox,
   sandboxWorkdirRoot: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
   sqlDialect: dialect,
-  buildModel: (agent) => {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
-    return resolveModel(
-      agent.model,
-      apiKey,
-      process.env.ANTHROPIC_BASE_URL,
-      undefined,
-      parseCustomHeaders(process.env.ANTHROPIC_CUSTOM_HEADERS),
-    );
+  buildModel: async (agent, tenantId) => {
+    // Card-first credential resolution, env fallback — mirrors the CF
+    // SessionDO's resolveModelCardCredentials.
+    let apiKey = process.env.ANTHROPIC_API_KEY;
+    let baseURL = process.env.ANTHROPIC_BASE_URL;
+    let provider: string | undefined;
+    let customHeaders = parseCustomHeaders(process.env.ANTHROPIC_CUSTOM_HEADERS);
+    const handle = typeof agent.model === "string" ? agent.model : agent.model.id;
+    let wireModel: string | { id: string; speed?: "standard" | "fast" } = agent.model;
+
+    const card = await modelCardsService.findByModelId({ tenantId, modelId: handle });
+    if (card && !card.archived_at) {
+      const key = await modelCardsService.getApiKey({ tenantId, cardId: card.id });
+      if (key) {
+        apiKey = key;
+        provider = card.provider;
+        wireModel = card.model;
+        if (card.base_url) baseURL = card.base_url;
+        if (card.custom_headers) customHeaders = card.custom_headers;
+      }
+    }
+    if (!apiKey) {
+      throw new Error(
+        `No model card matches "${handle}" and ANTHROPIC_API_KEY env var is unset`,
+      );
+    }
+
+    const OAI_PROVIDERS = new Set(["oai", "oai-compatible"]);
+    const ANT_PROVIDERS = new Set(["ant", "ant-compatible"]);
+    let apiCompat: ApiCompat = "ant";
+    if (provider && (OAI_PROVIDERS.has(provider) || ANT_PROVIDERS.has(provider))) {
+      apiCompat = provider as ApiCompat;
+    }
+    return resolveModel(wireModel, apiKey, baseURL, apiCompat, customHeaders);
   },
-  buildTools: async (agent, sandbox) => {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+  buildTools: async (agent, sandbox, sessionId, tenantId) => {
+    // Optional here — only gates callable_agents in tools.ts; model
+    // credentials come from buildModel's card-first resolution.
+    const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
     return buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: apiKey,
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
       toMarkdown: toMarkdownProvider,
+      tenantId,
+      sessionId,
+      // In-process equivalent of CF's MAIN_MCP service binding
+      // (McpProxyRpc.fetch): resolve the vault credential by server
+      // name, swap Authorization, forward with 401-refresh-and-retry.
+      // Credentials stay in this process; the sandbox never sees them.
+      mcpBinding: { fetch: mcpBindingFetch },
     });
   },
   buildHarness: () => {
@@ -509,8 +604,7 @@ const sessionRegistry = new SessionRegistry({
     return { run: (ctx: unknown) => h.run(ctx as HarnessContext) };
   },
   buildHarnessContext: async (input) => {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+    const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
     const runtime = new NodeHarnessRuntime({
       sessionId: input.sessionId,
       log: input.eventLog,
@@ -550,6 +644,9 @@ const services: RouteServices = {
   memory: memoryService,
   sessions: sessionsService,
   dreams: dreamsService,
+  environments: environmentsService,
+  modelCards: modelCardsService,
+  filesBlob,
   kv,
   newEventLog,
   hub: {
@@ -726,6 +823,50 @@ app.get("/auth-info", (c) =>
   }),
 );
 
+// In-memory rate-limit gates — same five buckets + limits as CF's
+// Workers Rate Limiting bindings (see apps/main/src/rate-limit.ts).
+// Single-process only; multi-replica deploys need Postgres/Redis-backed
+// gates behind the same interface.
+const rateLimitGates = buildMemoryGates();
+
+function clientIp(c: { req: { header: (n: string) => string | undefined } }): string {
+  return c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "anonymous";
+}
+
+const EMAIL_SEND_PATHS = new Set([
+  "/auth/sign-up/email",
+  "/auth/sign-in/email",
+  "/auth/forget-password",
+  "/auth/email-otp/send-verification-otp",
+  "/auth/email-otp/reset-password",
+]);
+
+// /auth/* limiter — same three layers as CF, minus the Turnstile gate
+// (no bot challenge on self-host).
+app.use("/auth/*", async (c, next) => {
+  if (authDisabled) return next();
+  const ip = clientIp(c);
+  const path = new URL(c.req.url).pathname;
+
+  if (!(await rateLimitGates.authIp.consume(ip)).ok) {
+    return c.json({ error: "Too many requests" }, 429);
+  }
+  if (!EMAIL_SEND_PATHS.has(path)) return next();
+
+  if (!(await rateLimitGates.authSendIp.consume(ip)).ok) {
+    return c.json({ error: "Too many email requests from this IP" }, 429);
+  }
+  let email = "";
+  try {
+    const body = (await c.req.raw.clone().json()) as { email?: string };
+    email = (body?.email ?? "").toLowerCase().trim();
+  } catch { /* no body / not JSON */ }
+  if (email && !(await rateLimitGates.authSendEmail.consume(email)).ok) {
+    return c.json({ error: "Please wait a minute before requesting another email" }, 429);
+  }
+  return next();
+});
+
 if (auth) {
   app.on(["GET", "POST"], "/auth/*", (c) => auth!.handler(c.req.raw));
 }
@@ -778,9 +919,51 @@ const v1 = new Hono<{
   Variables: { tenant_id: string; user_id?: string };
 }>();
 v1.use("*", authMw);
+// /v1/* write limiter — keyed by authenticated principal (api key > user >
+// IP), writes only, mirroring CF's rateLimitMiddleware.
+v1.use("*", async (c, next) => {
+  if (authDisabled) return next();
+  const m = c.req.method;
+  if (m !== "POST" && m !== "PUT" && m !== "DELETE") return next();
+  const apiKey = c.req.header("x-api-key");
+  const userId = c.get("user_id" as never) as string | undefined;
+  const principal = apiKey
+    ? `apikey:${apiKey.slice(0, 16)}`
+    : userId
+      ? `user:${userId}`
+      : `ip:${clientIp(c)}`;
+  const r = await rateLimitGates.apiWrite.consume(principal);
+  if (!r.ok) {
+    if (r.retryAfter !== undefined) c.header("Retry-After", String(r.retryAfter));
+    return c.json({ error: "Rate limit exceeded" }, 429);
+  }
+  return next();
+});
 
 // Mount route bundles. Same paths CF uses; behavior preserved.
-v1.route("/agents", buildAgentRoutes({ services }));
+v1.route("/agents", buildAgentRoutes({
+  services,
+  validateModel: async (tenantId, model) => {
+    const cards = await modelCardsService.list({ tenantId });
+    const active = cards.filter((card) => card.archived_at === null);
+    if (active.length === 0) return { valid: true };
+    const modelId = typeof model === "string" ? model : model.id;
+    const match = active.find((card) => card.model_id === modelId);
+    if (!match) {
+      return {
+        valid: false,
+        error: `No model card with model_id "${modelId}". Create a card with that handle, or set agent.model to an existing card's model_id.`,
+      };
+    }
+    return { valid: true };
+  },
+  validateAgentLimits: (body) =>
+    validateAgentLimits(body as Parameters<typeof validateAgentLimits>[0]),
+  hasActiveSessionsByAgent: (tenantId, agentId) =>
+    sessionsService.hasActiveByAgent({ tenantId, agentId }),
+  hasActiveEvalsByAgent: (tenantId, agentId) =>
+    evalsService.hasActiveByAgent({ tenantId, agentId }),
+}));
 const sessionRouter = new NodeSessionRouter({
   sql,
   hub,
@@ -791,7 +974,15 @@ v1.route("/sessions", buildSessionRoutes({
   services,
   router: sessionRouter,
   outputs: nodeOutputsAdapter(outputsRoot),
-  lifecycle: nodeSessionLifecycle({ files: filesService, filesBlob }),
+  lifecycle: {
+    ...nodeSessionLifecycle({ files: filesService, filesBlob }),
+    preCreateRateLimit: async ({ tenantId }) => {
+      const r = await rateLimitGates.sessionsTenant.consume(`tenant:${tenantId}`);
+      return r.ok
+        ? null
+        : { status: 429, body: { error: "Too many session creations — wait a minute" } };
+    },
+  },
   // Node has no per-tenant cloud environments yet — every agent is treated
   // as a local runtime. The package's loadEnvironment hook returns a
   // synthetic snapshot so session create doesn't 404 on missing env_id.
@@ -848,6 +1039,14 @@ v1.route("/me", buildMeRoutes({
 }));
 v1.route("/tenants", buildTenantRoutes({ services }));
 v1.route("/api_keys", buildApiKeyRoutes({ storage: apiKeyStorage }));
+v1.route("/environments", buildEnvironmentRoutes({ services }));
+v1.route("/model_cards", buildModelCardRoutes({ services }));
+v1.route("/models", buildModelsRoutes());
+v1.route("/skills", buildSkillRoutes({ services }));
+v1.route("/stats", buildStatsRoutes({ services }));
+v1.route("/clawhub", buildClawhubRoutes({ services }));
+v1.route("/oauth", buildOAuthRoutes({ services, env: process.env }));
+v1.route("/cap-cli/oauth", buildCapCliOauthRoutes({ services }));
 v1.route("/evals", buildEvalRoutes({
   evals: evalsService,
   agents: agentsService,
@@ -856,10 +1055,7 @@ v1.route("/evals", buildEvalRoutes({
 }));
 
 // Stubs for routes the console hits but main-node doesn't yet implement.
-v1.get("/environments", (c) => c.json({ data: [] }));
 v1.get("/runtimes", (c) => c.json({ data: [] }));
-v1.get("/skills", (c) => c.json({ data: [] }));
-v1.get("/model_cards", (c) => c.json({ data: [] }));
 v1.get("/models/list", (c) =>
   c.json({
     data: [
@@ -956,11 +1152,81 @@ if (platformRootSecret) {
 // ── Files API (subset of apps/main/src/routes/files.ts) ──
 //
 // CF mounts a richer files surface with synthesized session-output ids
-// and multipart upload; Node ships the read-side equivalent so the SDK
-// + console can list, download, and delete files. Uploads still go via
-// POST /v1/sessions/:id/files (lifecycle.promoteSandboxFile) and the
-// CF-only POST /v1/files (multipart upload from the browser) — that
-// route can be ported when console upload UX needs it.
+// (R2-prefix listing); Node skips those — session outputs are served via
+// the outputsRoot adapter on /v1/sessions/:id/outputs instead.
+v1.post("/files", async (c) => {
+  const t = c.var.tenant_id;
+
+  let filename: string;
+  let mediaType: string;
+  let body: ArrayBuffer;
+  let scopeId: string | undefined;
+  let downloadable = false;
+
+  const contentType = c.req.header("content-type") || "";
+
+  if (contentType.includes("multipart/form-data")) {
+    const formData = await c.req.formData();
+    const file = formData.get("file") as File | null;
+    if (!file) {
+      return c.json({ error: "file field is required in multipart upload" }, 400);
+    }
+    filename = file.name;
+    mediaType = file.type || "application/octet-stream";
+    body = await file.arrayBuffer();
+    const sc = formData.get("scope_id");
+    if (typeof sc === "string") scopeId = sc;
+    const d = formData.get("downloadable");
+    if (typeof d === "string") downloadable = d === "true" || d === "1";
+  } else {
+    // JSON body upload — content is base64-encoded for binary, raw text for text/*
+    const json = await c.req.json<{
+      filename: string;
+      content: string;
+      media_type?: string;
+      scope_id?: string;
+      encoding?: "base64" | "utf8";
+      downloadable?: boolean;
+    }>();
+
+    if (!json.filename || json.content === undefined || json.content === null) {
+      return c.json({ error: "filename and content are required" }, 400);
+    }
+    filename = json.filename;
+    mediaType = json.media_type || "application/octet-stream";
+    scopeId = json.scope_id;
+    downloadable = json.downloadable === true;
+
+    const encoding = json.encoding || (mediaType.startsWith("text/") ? "utf8" : "base64");
+    if (encoding === "base64") {
+      const bin = atob(json.content);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      body = bytes.buffer;
+    } else {
+      body = new TextEncoder().encode(json.content).buffer as ArrayBuffer;
+    }
+  }
+
+  const id = generateFileId();
+  const r2Key = fileR2Key(t, id);
+  // Blob PUT first, then metadata insert — same failure semantics as CF
+  // (orphan blob on metadata failure, never the reverse).
+  await filesBlob.put(r2Key, body, { httpMetadata: { contentType: mediaType } });
+
+  const row = await filesService.create({
+    id,
+    tenantId: t,
+    sessionId: scopeId,
+    filename,
+    mediaType,
+    sizeBytes: body.byteLength,
+    r2Key,
+    downloadable,
+  });
+
+  return c.json(toFileRecord(row), 201);
+});
 v1.get("/files", async (c) => {
   const t = c.var.tenant_id;
   const scopeId = c.req.query("scope_id") ?? undefined;
@@ -1049,6 +1315,9 @@ app.route("/v1/oma/me", buildMeRoutes({
 }));
 app.route("/v1/oma/tenants", buildTenantRoutes({ services }));
 app.route("/v1/oma/api_keys", buildApiKeyRoutes({ storage: apiKeyStorage }));
+app.route("/v1/oma/model_cards", buildModelCardRoutes({ services }));
+app.route("/v1/oma/clawhub", buildClawhubRoutes({ services }));
+app.route("/v1/oma/oauth", buildOAuthRoutes({ services, env: process.env }));
 app.route("/v1/oma/evals", buildEvalRoutes({
   evals: evalsService,
   agents: agentsService,

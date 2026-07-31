@@ -524,6 +524,9 @@ importers:
       '@open-managed-agents/tenant-dbs-store':
         specifier: workspace:*
         version: link:../../packages/tenant-dbs-store
+      '@open-managed-agents/vault-forward':
+        specifier: workspace:*
+        version: link:../../packages/vault-forward
       '@open-managed-agents/vaults-store':
         specifier: workspace:*
         version: link:../../packages/vaults-store
@@ -617,6 +620,9 @@ importers:
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../../packages/memory-store
+      '@open-managed-agents/model-cards-store':
+        specifier: workspace:*
+        version: link:../../packages/model-cards-store
       '@open-managed-agents/observability':
         specifier: workspace:*
         version: link:../../packages/observability
@@ -1070,6 +1076,9 @@ importers:
       '@open-managed-agents/browser-harness':
         specifier: workspace:*
         version: link:../browser-harness
+      '@open-managed-agents/cap':
+        specifier: workspace:*
+        version: link:../cap
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../credentials-store
@@ -1097,6 +1106,9 @@ importers:
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../memory-store
+      '@open-managed-agents/model-cards-store':
+        specifier: workspace:*
+        version: link:../model-cards-store
       '@open-managed-agents/observability':
         specifier: workspace:*
         version: link:../observability
@@ -1121,6 +1133,9 @@ importers:
       '@open-managed-agents/vaults-store':
         specifier: workspace:*
         version: link:../vaults-store
+      fflate:
+        specifier: ^0.8.2
+        version: 0.8.2
       hono:
         specifier: ^4.7.0
         version: 4.12.12
@@ -1571,6 +1586,9 @@ importers:
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../credentials-store
+      '@open-managed-agents/sessions-store':
+        specifier: workspace:*
+        version: link:../sessions-store
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
