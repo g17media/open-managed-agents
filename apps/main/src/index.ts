@@ -14,6 +14,13 @@ import {
   buildApiKeyRoutes,
   buildMeRoutes,
   buildTenantRoutes,
+  buildEnvironmentRoutes,
+  buildModelCardRoutes,
+  buildSkillRoutes,
+  buildStatsRoutes,
+  buildClawhubRoutes,
+  buildOAuthRoutes,
+  buildCapCliOauthRoutes,
   mintApiKeyOnStorage,
 } from "@open-managed-agents/http-routes";
 import {
@@ -144,22 +151,16 @@ import {
   fetchVaultCredentials,
 } from "./lib/cf-session-lifecycle";
 import { validateAgentLimits } from "./lib/limits";
+import { checkUploadFreq, checkUploadSize } from "./quotas";
 import { listMemberships, hasMembership } from "./auth-config";
-import legacyEnvironmentsRoutes from "./routes/environments";
-import oauthRoutes from "./routes/oauth";
-import capCliOauthRoutes from "./routes/cap-cli-oauth";
 import legacyMemoryRoutes from "./routes/memory";
 import dreamsRoutes from "./routes/dreams";
 import legacyFilesRoutes from "./routes/files";
-import legacySkillsRoutes from "./routes/skills";
-import modelCardsRoutes from "./routes/model-cards";
-import clawhubRoutes from "./routes/clawhub";
 import evalsRoutes from "./routes/evals";
 import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
-import statsRoutes from "./routes/stats";
 import mcpProxyRoutes, {
   resolveProxyTargetByTenant,
   resolveOutboundCredentialByHost,
@@ -552,6 +553,55 @@ const managedCredentialsRoutes = buildManagedCredentialRoutes((context) => {
 const managedUserProfilesRoutes = buildManagedUserProfileRoutes((context) => {
   return managedCoreApplicationFor(context)
     .port(managedAgentsPortTokens.userProfiles);
+});
+
+const legacyEnvironmentsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const app = buildEnvironmentRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
+  return invokePackage(c, app);
+});
+
+const modelCardsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const app = buildModelCardRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
+  return invokePackage(c, app);
+});
+
+const legacySkillsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const app = buildSkillRoutes({
+    services: () => cfRouteServicesFromCtx(ctx),
+    checkUploadSize: (req) => checkUploadSize(c.env, req),
+    checkUploadFreq: (tenantId) => checkUploadFreq(c.env, tenantId),
+  });
+  return invokePackage(c, app);
+});
+
+const statsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const app = buildStatsRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
+  return invokePackage(c, app);
+});
+
+const clawhubRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const app = buildClawhubRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
+  return invokePackage(c, app);
+});
+
+const oauthRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const app = buildOAuthRoutes({
+    services: () => cfRouteServicesFromCtx(ctx),
+    env: ctx.env as unknown as Partial<Record<string, string>>,
+  });
+  return invokePackage(c, app);
+});
+
+const capCliOauthRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const app = buildCapCliOauthRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
+  return invokePackage(c, app);
 });
 
 const apiKeysRoutes = new Hono<{
@@ -1068,7 +1118,7 @@ function invokePackage(
   const url = new URL(c.req.url);
   // Strip the outer mount prefix so e.g. `/v1/agents/abc` becomes `/abc`
   // before the package's `app.get("/:id")` sees it.
-  const knownPrefixes = ["/v1/oma/", "/v1/"];
+  const knownPrefixes = ["/v1/oma/", "/v1/cap-cli/", "/v1/"];
   let stripped = url.pathname;
   for (const p of knownPrefixes) {
     if (stripped.startsWith(p)) {
@@ -1387,7 +1437,6 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
   }> {
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
     const target = await resolveProxyTargetByTenant(
-      this.env,
       services,
       opts.tenantId,
       opts.sessionId,
@@ -1463,7 +1512,6 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     }
     const services = await getCfServicesForTenant(this.env, tenantId);
     const target = await resolveProxyTargetByTenant(
-      this.env,
       services,
       tenantId,
       sessionId,
