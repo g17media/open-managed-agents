@@ -1,23 +1,25 @@
-// Model cards — CRUD + capability probe.
-//
-// Sourced from apps/main/src/routes/model-cards.ts. Same wire shape so the
-// Console Model Cards page works against CF and main-node without branching.
-
 import { Hono } from "hono";
 import {
   ModelCardDuplicateModelIdError,
   ModelCardNotFoundError,
   type ModelCardRow,
-  type ModelCardService,
 } from "@open-managed-agents/model-cards-store";
+import type { RouteServicesArg } from "../types";
+import { resolveServices } from "../types";
+import { jsonPage, parsePageQuery } from "../lib/list-page";
 import { modelCardProbeUrl } from "./probe-url";
 
 export { modelCardProbeUrl } from "./probe-url";
 
-interface Vars {
-  Variables: { tenant_id: string };
+export interface ModelCardRoutesDeps {
+  services: RouteServicesArg;
 }
 
+/**
+ * Adapt a `ModelCardRow` to the public API shape. Drops the row's internal
+ * `tenant_id` and converts NULL → undefined for optional fields. Field names
+ * are 1:1 with the row otherwise.
+ */
 function toApiShape(card: ModelCardRow) {
   return {
     id: card.id,
@@ -41,7 +43,16 @@ function toApiShape(card: ModelCardRow) {
  * base_url / custom_headers and returns ok=true on 2xx, otherwise ok=false
  * with the upstream's own error message.
  *
- * Bounded to 6s. Failures NEVER roll back the card (it's already persisted).
+ * Bounded to 6s. Failures NEVER roll back the card (it's already persisted)
+ * — purpose is "tell the user upfront whether their key / endpoint works"
+ * rather than discovering at first agent run.
+ *
+ * Provider routing:
+ *   - "ant" / "anthropic" / "ant-compatible"  → POST {base}/v1/messages with
+ *       max_tokens: 1, model: <model>, messages: [{role:user, content:"hi"}]
+ *   - "oai" / "openai" / "oai-compatible"     → POST {base}/v1/chat/completions
+ *       with max_completion_tokens: 1, model: <model>
+ *   - anything else                            → ok=null (skipped, can't probe)
  */
 async function probeModelCard(opts: {
   provider: string;
@@ -89,6 +100,7 @@ async function probeModelCard(opts: {
     }
     if (res.status >= 200 && res.status < 300) return { ok: true };
     const upstream = await res.text().catch(() => "");
+    // Try to extract the structured error.message; fall back to raw body.
     let detail = upstream.slice(0, 240).trim();
     try {
       const j = JSON.parse(upstream) as { error?: { message?: string } | string };
@@ -112,38 +124,24 @@ async function probeModelCard(opts: {
   }
 }
 
-function parsePageQuery(c: {
-  req: { query: (k: string) => string | undefined };
-}): {
-  limit?: number;
-  cursor?: string;
-  q?: string;
-} {
-  const limitParam = c.req.query("limit");
-  const cursor = c.req.query("cursor") || c.req.query("page") || undefined;
-  const limit = limitParam ? parseInt(limitParam, 10) : undefined;
-  const qRaw = c.req.query("q");
-  const q = qRaw && qRaw.trim() ? qRaw.trim() : undefined;
-  return {
-    limit: limit !== undefined && !isNaN(limit) ? limit : undefined,
-    cursor,
-    q,
-  };
-}
-
-export interface ModelCardRoutesDeps {
-  modelCards: ModelCardService;
-}
-
 export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
-  const app = new Hono<Vars>();
-  const { modelCards } = deps;
+  const app = new Hono<{ Variables: { tenant_id: string } }>();
 
-  // POST / — create
+  const notConfigured = (c: Parameters<typeof resolveServices>[1]) =>
+    c.json(
+      { error: { type: "api_error", message: "Model cards service is not configured" } },
+      501,
+    );
+
+  // POST /v1/oma/model_cards — create
   app.post("/", async (c) => {
-    const t = c.var.tenant_id;
+    const services = resolveServices(deps.services, c);
+    if (!services.modelCards) return notConfigured(c);
+    const t = c.get("tenant_id");
     const body = await c.req.json<{
+      /** User-facing handle, UNIQUE per tenant. */
       model_id: string;
+      /** LLM string sent to provider. Defaults to model_id when omitted. */
       model?: string;
       provider: string;
       api_key: string;
@@ -163,7 +161,7 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
       return c.json({ error: "pi_config must be a JSON object" }, 400);
     }
     try {
-      const card = await modelCards.create({
+      const card = await services.modelCards.create({
         tenantId: t,
         modelId: body.model_id,
         provider: body.provider,
@@ -174,6 +172,11 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
         piConfig: body.pi_config ?? null,
         makeDefault: !!body.is_default,
       });
+      // Probe the model with a minimal request so the user finds out NOW
+      // whether the api_key + base_url + custom_headers actually work,
+      // instead of at first agent run. Probe is best-effort: card is
+      // already persisted and never rolled back. Result rides on the API
+      // response so the Console can toast immediately.
       const probe = await probeModelCard({
         provider: body.provider,
         model: body.model ?? body.model_id,
@@ -190,13 +193,18 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
     }
   });
 
-  // GET / — list (cursor-paginated)
+  // GET /v1/oma/model_cards — list (cursor-paginated)
   app.get("/", async (c) => {
+    const services = resolveServices(deps.services, c);
+    if (!services.modelCards) return notConfigured(c);
     // Pi provider ids are open: built-ins and custom providers share the
     // same exact-match filter. OpenMA does not own an enum here.
     const providerRaw = c.req.query("provider");
     const provider = providerRaw?.trim() || undefined;
 
+    // created_after / created_before: ISO timestamps → epoch ms. Reject
+    // unparseable values explicitly so the client knows it's a malformed
+    // request, not just "no results".
     const parseMs = (
       raw: string | undefined,
       field: string,
@@ -225,8 +233,8 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
     const createdBeforeRes = parseMs(c.req.query("created_before"), "created_before");
     if (createdBeforeRes.err) return createdBeforeRes.err;
 
-    const page = await modelCards.listPage({
-      tenantId: c.var.tenant_id,
+    const page = await services.modelCards.listPage({
+      tenantId: c.get("tenant_id"),
       ...parsePageQuery(c),
       ...(provider !== undefined ? { provider } : {}),
       ...(createdAfterRes.value !== undefined
@@ -236,28 +244,30 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
         ? { createdBefore: createdBeforeRes.value }
         : {}),
     });
+    // Hide archived cards (forward-compat with soft-delete; today archived_at
+    // is always null but the legacy KV path also filtered, so preserve parity).
     const filteredItems = page.items.filter((card) => card.archived_at === null);
-    const data = filteredItems.map(toApiShape);
-    if (!page.nextCursor) return c.json({ data });
-    return c.json({
-      data,
-      next_page: page.nextCursor,
-      next_cursor: page.nextCursor,
-    });
+    return jsonPage(c, { items: filteredItems, nextCursor: page.nextCursor }, toApiShape);
   });
 
-  // GET /:id
+  // GET /v1/oma/model_cards/:id — get single
   app.get("/:id", async (c) => {
-    const card = await modelCards.get({
-      tenantId: c.var.tenant_id,
+    const services = resolveServices(deps.services, c);
+    if (!services.modelCards) return notConfigured(c);
+    const t = c.get("tenant_id");
+    const card = await services.modelCards.get({
+      tenantId: t,
       cardId: c.req.param("id"),
     });
     if (!card) return c.json({ error: "Model card not found" }, 404);
     return c.json(toApiShape(card));
   });
 
-  // POST /:id — update
+  // POST /v1/oma/model_cards/:id — update
   app.post("/:id", async (c) => {
+    const services = resolveServices(deps.services, c);
+    if (!services.modelCards) return notConfigured(c);
+    const t = c.get("tenant_id");
     const id = c.req.param("id");
     const body = await c.req.json<{
       model_id?: string;
@@ -277,8 +287,8 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
       return c.json({ error: "pi_config must be a JSON object or null" }, 400);
     }
     try {
-      const updated = await modelCards.update({
-        tenantId: c.var.tenant_id,
+      const updated = await services.modelCards.update({
+        tenantId: t,
         cardId: id,
         modelId: body.model_id,
         model: body.model,
@@ -305,11 +315,14 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
     }
   });
 
-  // DELETE /:id
+  // DELETE /v1/oma/model_cards/:id — delete
   app.delete("/:id", async (c) => {
+    const services = resolveServices(deps.services, c);
+    if (!services.modelCards) return notConfigured(c);
+    const t = c.get("tenant_id");
     const id = c.req.param("id");
     try {
-      await modelCards.delete({ tenantId: c.var.tenant_id, cardId: id });
+      await services.modelCards.delete({ tenantId: t, cardId: id });
       return c.json({ type: "model_card_deleted", id });
     } catch (err) {
       if (err instanceof ModelCardNotFoundError) {
@@ -319,12 +332,13 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
     }
   });
 
-  // GET /:id/key — cleartext key (agent / internal consumers)
+  // GET /v1/oma/model_cards/:id/key — internal: get actual API key (used by agent worker)
   app.get("/:id/key", async (c) => {
-    const apiKey = await modelCards.getApiKey({
-      tenantId: c.var.tenant_id,
-      cardId: c.req.param("id"),
-    });
+    const services = resolveServices(deps.services, c);
+    if (!services.modelCards) return notConfigured(c);
+    const t = c.get("tenant_id");
+    const id = c.req.param("id");
+    const apiKey = await services.modelCards.getApiKey({ tenantId: t, cardId: id });
     if (apiKey === null) return c.json({ error: "Key not found" }, 404);
     return c.json({ api_key: apiKey });
   });
