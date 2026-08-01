@@ -54,6 +54,7 @@ import {
   SqlMemoryRepo,
 } from "@open-managed-agents/memory-store";
 import { createSqliteDreamService } from "@open-managed-agents/dreams-store";
+import { createSqliteDeploymentService } from "@open-managed-agents/deployments-store";
 import { LocalFsBlobStore as MemoryLocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
 import {
   S3BlobStore as FilesS3BlobStore,
@@ -109,6 +110,7 @@ import {
   buildSessionRoutes,
   buildMemoryRoutes as buildLegacyMemoryRoutes,
   buildDreamRoutes,
+  buildDeploymentRoutes,
   buildTenantRoutes,
   buildMeRoutes,
   buildApiKeyRoutes,
@@ -655,6 +657,16 @@ if (
 const memoryService = createSqliteMemoryStoreService({
   db: drizzleDb,
   blobs: memoryBlobs,
+});
+const deploymentsService = createSqliteDeploymentService({
+  client: sql,
+  verifyAgentExists: async (tenantId, agentId) => {
+    const row = await sql
+      .prepare("SELECT 1 FROM agents WHERE id = ? AND tenant_id = ?")
+      .bind(agentId, tenantId)
+      .first();
+    return !!row;
+  },
 });
 const dreamsService = createSqliteDreamService({
   client: sql,
@@ -2088,6 +2100,7 @@ const services: RouteServices = {
   memory: memoryService,
   sessions: sessionsService,
   dreams: dreamsService,
+  deployments: deploymentsService,
   environments: environmentsService,
   modelCards: modelCardsService,
   filesBlob,
@@ -3095,6 +3108,20 @@ app.route("/openai", buildNodeOpenAIAgentsRoutes({
   },
 }));
 
+app.route("/v1/oma/deployments", buildDeploymentRoutes({
+  services,
+  router: sessionRouter,
+  localRuntimeEnvId: "env-local-runtime",
+  // Same synthetic env snapshot as the sessions mount — Node has no
+  // per-tenant cloud environments yet.
+  loadEnvironment: async ({ environmentId }) => {
+    return {
+      id: environmentId,
+      runtime: "local",
+      sandbox_template: null,
+    } as unknown as import("@open-managed-agents/shared").EnvironmentConfig;
+  },
+}));
 // ─── Integrations gateway (OAuth callbacks, setup pages, Linear MCP,
 // GitHub internal refresh, webhooks) — mounted on `app` (NOT under /v1)
 // because the upstream OAuth/webhook URLs are at /linear/oauth/...,
@@ -3191,6 +3218,22 @@ const scheduler = buildNodeScheduler({
   },
   memory: memoryService,
   integrationsSql: platformRootSecret ? sql : null,
+  deployments: {
+    services: {
+      deployments: deploymentsService,
+      sessions: sessionsService,
+      agents: agentsService,
+    },
+    router: sessionRouter,
+    localRuntimeEnvId: "env-local-runtime",
+    loadEnvironment: async ({ environmentId }) => {
+      return {
+        id: environmentId,
+        runtime: "local",
+        sandbox_template: null,
+      } as unknown as import("@open-managed-agents/shared").EnvironmentConfig;
+    },
+  },
 });
 
 export const shutdownNodeApp = async (signal = "dispose") => {
