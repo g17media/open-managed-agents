@@ -747,6 +747,9 @@ importers:
       '@open-managed-agents/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@open-managed-agents/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared

@@ -35,6 +35,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
+import { sessionVaultProxyUrl } from "../vault-proxy";
 import { getLogger } from "@open-managed-agents/observability";
 
 const moduleLogger = getLogger("local-sandbox");
@@ -187,20 +188,23 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     this.commandSecrets.push({ prefix: commandPrefix, secrets });
   }
 
-  async setOutboundContext(_opts?: { tenantId: string; sessionId: string }): Promise<void> {
+  async setOutboundContext(opts?: { tenantId: string; sessionId: string }): Promise<void> {
     // Wire outbound credential injection through the oma-vault sidecar
     // (apps/oma-vault). The sidecar runs a mockttp HTTPS MITM proxy with a
     // self-signed CA; we point the subprocess at it via standard
     // HTTP(S)_PROXY env vars + tell node/curl/python to trust the local CA.
+    // Session attribution rides in the proxy URL's userinfo (vault-proxy.ts)
+    // so oma-vault can scope credentials to this session's vaults.
     //
     // Both env vars are read from the host process — they're set in
     // docker-compose.yml (or the operator's env) and shared between
     // main-node and the sandbox subprocess. If either is missing the agent
     // just talks to upstreams directly with no credential injection — same
     // as the CF path with no oma-vault binding.
-    const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
+    const baseProxyUrl = process.env.OMA_VAULT_PROXY_URL;
     const caCertPath = process.env.OMA_VAULT_CA_CERT;
-    if (!proxyUrl || !caCertPath) return;
+    if (!baseProxyUrl || !caCertPath) return;
+    const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
 
     const env: Record<string, string> = {
       HTTP_PROXY: proxyUrl,

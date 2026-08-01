@@ -19,6 +19,7 @@
 
 import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
 import { readS3MemoryBucket } from "../ports";
+import { sessionVaultProxyUrl } from "../vault-proxy";
 
 // Structural types so this file compiles without `e2b` installed. The
 // driver shape is matched at runtime; mismatches surface as adapter
@@ -161,22 +162,23 @@ export class E2BSandboxExecutor implements SandboxExecutor {
     this.commandSecrets.push({ prefix: commandPrefix, secrets });
   }
 
-  async setOutboundContext(_opts?: { tenantId: string; sessionId: string }): Promise<void> {
+  async setOutboundContext(opts?: { tenantId: string; sessionId: string }): Promise<void> {
     // Wire HTTPS_PROXY → oma-vault sidecar + upload its self-signed CA so
     // node/curl/python trust the MITM cert. Requires (a) OMA_VAULT_PROXY_URL
     // reachable from the E2B sandbox network — set to a public URL or a
     // tunnel host; localhost won't resolve from inside the microVM —
     // and (b) a sandbox template that lets `sudo` install / write a CA
     // (most ubuntu-based templates do).
-    const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
+    const baseProxyUrl = process.env.OMA_VAULT_PROXY_URL;
     const caCertPath = process.env.OMA_VAULT_CA_CERT;
-    if (!proxyUrl || !caCertPath) return;
-    if (proxyUrl.startsWith("http://localhost") || proxyUrl.startsWith("http://127.")) {
+    if (!baseProxyUrl || !caCertPath) return;
+    if (baseProxyUrl.startsWith("http://localhost") || baseProxyUrl.startsWith("http://127.")) {
       this.logger.warn(
-        `E2B: OMA_VAULT_PROXY_URL points at localhost (${proxyUrl}) — ` +
+        `E2B: OMA_VAULT_PROXY_URL points at localhost (${baseProxyUrl}) — ` +
         `unreachable from inside the E2B sandbox. Use a public URL or tunnel.`,
       );
     }
+    const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
     this.pendingCaUpload = { hostPath: caCertPath };
     const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
     await this.setEnvVars({

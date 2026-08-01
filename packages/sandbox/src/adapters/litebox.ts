@@ -24,6 +24,7 @@
 // once true, mutating ops that affect ctor opts throw.
 
 import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
+import { sessionVaultProxyUrl } from "../vault-proxy";
 import { promises as fs, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -123,13 +124,14 @@ export class LiteBoxSandbox implements SandboxExecutor {
     this.commandSecrets.push({ prefix: commandPrefix, secrets });
   }
 
-  async setOutboundContext(_opts?: { tenantId: string; sessionId: string }): Promise<void> {
+  async setOutboundContext(opts?: { tenantId: string; sessionId: string }): Promise<void> {
     // BoxLite supports network — we route via env vars same as the
     // LocalSubprocess path. The CA cert lives on the host though, so
     // copy it into the box on first exec via ensureBox.
-    const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
+    const baseProxyUrl = process.env.OMA_VAULT_PROXY_URL;
     const caCertPath = process.env.OMA_VAULT_CA_CERT;
-    if (!proxyUrl || !caCertPath) return;
+    if (!baseProxyUrl || !caCertPath) return;
+    const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
 
     const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
     await this.setEnvVars({
