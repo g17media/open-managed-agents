@@ -29,10 +29,25 @@ import {
   type EvalRunnerServices,
   type SandboxFetcher,
 } from "@open-managed-agents/evals-runner";
+import {
+  deploymentsTick,
+  type DeploymentRunContext,
+  type DeploymentRunServices,
+} from "@open-managed-agents/http-routes";
+import type { SessionRouter } from "@open-managed-agents/session-runtime";
 
 export interface NodeSchedulerDeps {
   evalServices: EvalRunnerServices;
   memory: MemoryStoreService;
+  /** Deployments sweep — fires due scheduled deployments through the same
+   *  runDeployment path as POST /v1/oma/deployments/:id/run. Skip when
+   *  null (route-less fixtures). */
+  deployments?: {
+    services: DeploymentRunServices;
+    router: SessionRouter;
+    loadEnvironment?: DeploymentRunContext["loadEnvironment"];
+    localRuntimeEnvId?: string;
+  } | null;
   /** Optional integrations DB SqlClient. Pass null to skip the
    *  webhook-events retention sweep on Node. */
   integrationsSql?: SqlClient | null;
@@ -94,6 +109,28 @@ export function buildNodeScheduler(deps: NodeSchedulerDeps) {
       cron: cron("WEBHOOK_EVENTS_RETENTION_CRON", "* * * * *"),
       handler: webhookEventsRetentionTick({
         resolveIntegrationsDb: () => integrationsSql,
+      }),
+    });
+  }
+
+  // Deployments sweep — due scheduled deployments fire a session each.
+  if (deps.deployments) {
+    const d = deps.deployments;
+    scheduler.register({
+      name: "deployments-tick",
+      cron: cron("DEPLOYMENTS_TICK_CRON", "* * * * *"),
+      handler: deploymentsTick({
+        forEachShard: async (fn) => [
+          await fn({
+            services: d.services,
+            routerForTenant: () => d.router,
+            loadEnvironment: d.loadEnvironment,
+            localRuntimeEnvId: d.localRuntimeEnvId,
+          }),
+        ],
+        logger: {
+          warn: (msg) => log.warn({ op: "scheduler.deployments_tick" }, msg),
+        },
       }),
     });
   }

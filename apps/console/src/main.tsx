@@ -33,6 +33,7 @@ import { VaultsList } from "./pages/VaultsList";
 import { VaultDetail } from "./pages/VaultDetail";
 import { SkillsList } from "./pages/SkillsList";
 import { MemoryStoresList } from "./pages/MemoryStoresList";
+import { DeploymentsList } from "./pages/DeploymentsList";
 import { MemoryStoreDetail } from "./pages/MemoryStoreDetail";
 import { ModelCardsList } from "./pages/ModelCardsList";
 import { ApiKeysList } from "./pages/ApiKeysList";
@@ -151,6 +152,11 @@ const protectedRoutes: RouteObject[] = [
         handle: { crumb: (m: UIMatch) => (m.params.id as string | undefined) ?? "Vault" },
       },
     ],
+  },
+  {
+    path: "deployments",
+    handle: { crumb: "Deployments" },
+    children: [{ index: true, element: <DeploymentsList /> }],
   },
   {
     path: "memory",

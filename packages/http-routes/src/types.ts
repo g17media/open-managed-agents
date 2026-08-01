@@ -14,6 +14,7 @@ import type { CredentialService } from "@open-managed-agents/credentials-store";
 import type { MemoryStoreService } from "@open-managed-agents/memory-store";
 import type { SessionService } from "@open-managed-agents/sessions-store";
 import type { DreamService } from "@open-managed-agents/dreams-store";
+import type { DeploymentService } from "@open-managed-agents/deployments-store";
 import type { EnvironmentService } from "@open-managed-agents/environments-store";
 import type { ModelCardService } from "@open-managed-agents/model-cards-store";
 import type { SqlClient } from "@open-managed-agents/sql-client";
@@ -110,6 +111,8 @@ export interface RouteServices {
   /** File/skill blob storage (CF: R2, Node: local FS or S3). Null when the
    *  deployment has no bucket configured — routes 500 with a clear message. */
   filesBlob?: BlobStore | null;
+  /** Optional like dreams — buildDeploymentRoutes requires it at runtime. */
+  deployments?: DeploymentService;
 }
 
 /** Per-request services accessor. CF passes a callback that resolves
