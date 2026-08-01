@@ -37,7 +37,7 @@ one that matches your hosting story:
 |---|---|---|
 | Where it lives | Your VPS / Mac / Docker host / fly.io / your k8s | Cloudflare Workers + DO + Containers |
 | Storage | SQLite or Postgres + local FS | D1 + KV + R2 |
-| Sandbox | LocalSubprocess / LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox (Containers) |
+| Sandbox | LocalSubprocess / LiteBox / Daytona / E2B / BoxRun / Belljar | Cloudflare Sandbox (Containers) |
 | Time to running | `docker compose up` (~2 min) | wrangler deploy (~10 min once configured) |
 | Best for | OSS users, on-prem, no CF account, data-resident deploys | Edge scale, no host management, already on CF |
 
@@ -649,7 +649,7 @@ open-managed-agents/
 │   ├── api-types/                 # Shared TypeScript types (config schemas, events)
 │   ├── http-routes/               # Public REST route definitions (shared by main + main-node)
 │   ├── session-runtime/           # Harness runtime — event log, broadcast, recovery
-│   ├── sandbox/                   # Sandbox adapters (subprocess / litebox / daytona / e2b / boxrun)
+│   ├── sandbox/                   # Sandbox adapters (subprocess / litebox / daytona / e2b / boxrun / belljar)
 │   ├── credentials-store/         # Encrypted credentials (AES-GCM under PLATFORM_ROOT_SECRET)
 │   ├── model-cards-store/         # Encrypted model-card API keys
 │   ├── vaults-store/              # Vault definitions + outbound auth wiring
@@ -676,7 +676,7 @@ The variables that gate boot and at-rest safety:
 | `ANTHROPIC_API_KEY` | No | Fallback LLM credential used when a tenant has not added a Model Card. **In production, add a Model Card per tenant from the Console** — the key is encrypted at rest under `PLATFORM_ROOT_SECRET`, scoped to the tenant, and rotatable without redeploy. |
 | `ANTHROPIC_BASE_URL` | No | Override for Anthropic-compatible proxies. |
 | `PUBLIC_BASE_URL` | No (dev) / Yes (prod) | Cookie domain + OAuth redirect base. Defaults to `*` trusted-origins — only safe for local dev. |
-| `SANDBOX_PROVIDER` | No | `subprocess` (default, no isolation), `litebox` (Firecracker), `daytona`, `e2b`, or `boxrun`. Use an isolated backend for untrusted agents. |
+| `SANDBOX_PROVIDER` | No | `subprocess` (default, no isolation), `litebox` (Firecracker), `daytona`, `e2b`, `boxrun`, or `belljar` (Cloudflare sandbox containers on your own Docker/Podman host, `BELLJAR_URL` + `BELLJAR_TOKEN`). Use an isolated backend for untrusted agents. |
 | `TAVILY_API_KEY` | No | Backend for the `web_search` built-in tool. |
 
 Full list (integrations OAuth credentials, Postgres URL, sandbox tunables, memory-bucket config, Google sign-in, etc.) — see **[docs.openma.dev/reference/configuration](https://docs.openma.dev/reference/configuration/)** and `.env.example` / `.dev.vars.example`.

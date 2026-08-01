@@ -10,6 +10,7 @@
     "./adapters/daytona": "./src/adapters/daytona.ts",
     "./adapters/litebox": "./src/adapters/litebox.ts",
     "./adapters/boxrun": "./src/adapters/boxrun.ts",
+    "./adapters/belljar": "./src/adapters/belljar.ts",
     "./orchestrator": "./src/orchestrator.ts"
   },
   "scripts": {
