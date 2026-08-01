@@ -153,8 +153,8 @@ export class SessionService {
 
   /**
    * Patch a session: title, metadata (merge with per-key delete on null),
-   * status, snapshots. Bumps updated_at. Mirrors POST /v1/sessions/:id behavior
-   * (sessions.ts:477-504).
+   * status, vault set, snapshots. Bumps updated_at. Mirrors POST /v1/sessions/:id
+   * behavior (sessions.ts:477-504).
    */
   async update(opts: {
     tenantId: string;
@@ -163,6 +163,9 @@ export class SessionService {
     /** Per-key merge — pass `{ key: null }` to drop a key. Pass undefined to skip. */
     metadata?: Record<string, unknown>;
     status?: SessionStatus;
+    /** Full replacement of the session's vault set — swaps take effect on
+     *  the next outbound call (injection reads the row live). */
+    vaultIds?: string[];
     agentSnapshot?: AgentConfig;
     environmentSnapshot?: EnvironmentConfig;
   }): Promise<SessionRow> {
@@ -170,6 +173,7 @@ export class SessionService {
     const update: SessionUpdateFields = { updatedAt: this.clock.nowMs() };
     if (opts.title !== undefined) update.title = opts.title;
     if (opts.status !== undefined) update.status = opts.status;
+    if (opts.vaultIds !== undefined) update.vaultIds = opts.vaultIds;
     if (opts.agentSnapshot !== undefined) update.agentSnapshot = opts.agentSnapshot;
     if (opts.environmentSnapshot !== undefined) update.environmentSnapshot = opts.environmentSnapshot;
     if (opts.metadata !== undefined) {
