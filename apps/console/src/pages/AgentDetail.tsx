@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useApiQuery } from "../lib/useApiQuery";
@@ -6,7 +6,9 @@ import { GitHubIcon, LinearIcon, SlackIcon } from "../components/icons";
 import { Page } from "../components/Page";
 import { PageHeader } from "../components/PageHeader";
 import { Button } from "@/components/ui/button";
+import type { ModelCard } from "@open-managed-agents/api-types";
 import type { AgentRecord as Agent } from "../types/agent";
+import { AgentFormDialog, type AgentFormDialogProps } from "./agents/AgentFormDialog";
 
 /** Shared publication shape across Linear / GitHub / Slack — they all
  *  expose the same id / status / mode / persona / workspace_name fields. */
@@ -29,16 +31,36 @@ export function AgentDetail() {
   // (404 / not-installed) don't block the agent detail render, same as
   // the previous behavior where each had its own .catch.
   const enabled = !!id;
-  const { data: agent, error: agentError } = useApiQuery<Agent>(
+  const { data: agent, error: agentError, refetch: refetchAgent } = useApiQuery<Agent>(
     id ? `/v1/agents/${id}` : null,
     undefined,
     { enabled },
   );
-  const { data: versionsRes } = useApiQuery<{ data: Agent[] }>(
+  const { data: versionsRes, refetch: refetchVersions } = useApiQuery<{ data: Agent[] }>(
     id ? `/v1/agents/${id}/versions` : null,
     undefined,
     { enabled },
   );
+
+  // Edit dialog + the aux data its pickers need — fetched lazily on the
+  // first open so the read-only detail view stays cheap.
+  const [showEdit, setShowEdit] = useState(false);
+  const { data: allAgentsRes } = useApiQuery<{ data: Agent[] }>(
+    "/v1/agents",
+    { limit: "200", status: "any" },
+    { enabled: showEdit },
+  );
+  const { data: skillsRes } = useApiQuery<{
+    data: Array<{ id: string; name: string; description: string }>;
+  }>("/v1/skills", undefined, { enabled: showEdit });
+  const { data: modelCardsRes } = useApiQuery<{ data: ModelCard[] }>(
+    "/v1/model_cards",
+    { limit: "200" },
+    { enabled: showEdit },
+  );
+  const { data: runtimesRes } = useApiQuery<{
+    runtimes: AgentFormDialogProps["runtimes"];
+  }>("/v1/runtimes", undefined, { enabled: showEdit });
   // Reverse-lookup publications per provider. Each endpoint exists thanks
   // to the /linear/agents/:id/publications + /slack/agents/:id/publications
   // + /github/agents/:id/publications routes added on the main worker.
@@ -99,6 +121,9 @@ export function AgentDetail() {
           title={agent.name}
           actions={
             <>
+              <Button variant="outline" size="sm" onClick={() => setShowEdit(true)}>
+                Edit
+              </Button>
               <Button variant="outline" size="sm" onClick={archive}>
                 Archive
               </Button>
@@ -202,6 +227,20 @@ export function AgentDetail() {
         </div>
       )}
       </div>
+
+      <AgentFormDialog
+        open={showEdit}
+        onClose={() => setShowEdit(false)}
+        agent={agent}
+        onSaved={() => {
+          void refetchAgent();
+          void refetchVersions();
+        }}
+        allAgents={allAgentsRes?.data ?? []}
+        customSkills={skillsRes?.data ?? []}
+        modelCards={modelCardsRes?.data ?? []}
+        runtimes={runtimesRes?.runtimes ?? []}
+      />
     </Page>
   );
 }

@@ -19,6 +19,9 @@ interface McpEntry {
   name: string;
   type: string;
   url: string;
+  /** Extra wire fields the form doesn't render (authorization_token,
+   *  stdio config, …) survive edits because updateMcp spreads entries. */
+  [key: string]: unknown;
 }
 interface SkillEntry {
   type: "anthropic" | "custom";
@@ -87,13 +90,134 @@ const INITIAL_FORM = {
   enableGeneralSubagent: false,
 };
 
-interface AgentFormDialogProps {
+/** Config state the Form view doesn't model — captured when seeding an
+ *  edit (or parsing pasted code) and merged back into every payload so a
+ *  round-trip through the form can't silently drop it. */
+interface Passthrough {
+  /** tools[] entries other than the built-in toolset and the mcp_toolset
+   *  rows the form regenerates (i.e. custom tools). */
+  extraTools: unknown[];
+  metadata?: Record<string, unknown>;
+  /** Non-standard model speed — the form only tracks the model id. */
+  modelSpeed?: string;
+  auxModel?: unknown;
+  appendablePrompts?: string[];
+  /** Harness other than the form-managed "acp-proxy". */
+  harness?: string;
+}
+
+function extractPassthrough(config: Record<string, unknown>): Passthrough {
+  const tools = Array.isArray(config.tools)
+    ? (config.tools as Array<{ type?: string }>)
+    : [];
+  const oma = (config._oma ?? {}) as {
+    aux_model?: unknown;
+    harness?: string;
+    appendable_prompts?: string[];
+  };
+  const model = config.model as string | { speed?: string } | undefined;
+  const metadata = config.metadata as Record<string, unknown> | undefined;
+  return {
+    extraTools: tools.filter(
+      (t) => t?.type !== "agent_toolset_20260401" && t?.type !== "mcp_toolset",
+    ),
+    metadata: metadata && Object.keys(metadata).length > 0 ? metadata : undefined,
+    modelSpeed:
+      typeof model === "object" && model?.speed && model.speed !== "standard"
+        ? model.speed
+        : undefined,
+    auxModel: oma.aux_model,
+    appendablePrompts: oma.appendable_prompts,
+    harness: oma.harness && oma.harness !== "acp-proxy" ? oma.harness : undefined,
+  };
+}
+
+/** Extract the Tools-tab policy state from a wire-format tools array. */
+function parseToolPolicy(tools: unknown) {
+  const toolset = Array.isArray(tools)
+    ? (tools as Array<Record<string, unknown>>).find(
+        (t) => t?.type === "agent_toolset_20260401",
+      )
+    : undefined;
+  const dc = (toolset?.default_config ?? {}) as {
+    enabled?: boolean;
+    permission_policy?: { type?: string };
+  };
+  const cfgs = (toolset?.configs ?? []) as Array<{
+    name?: string;
+    enabled?: boolean;
+    permission_policy?: { type?: string };
+  }>;
+  const overrides: Record<string, ToolOverride> = {};
+  for (const c of cfgs) {
+    if (!c?.name) continue;
+    if (c.enabled === false) overrides[c.name] = "disabled";
+    else if (c.permission_policy?.type === "always_ask") overrides[c.name] = "always_ask";
+    else if (c.permission_policy?.type === "always_allow") overrides[c.name] = "always_allow";
+  }
+  return {
+    toolDefaultEnabled: dc.enabled ?? true,
+    toolDefaultPermission:
+      dc.permission_policy?.type === "always_ask"
+        ? ("always_ask" as const)
+        : ("always_allow" as const),
+    toolOverrides: overrides,
+  };
+}
+
+/** The editable subset of an agent record in request shape — server-stamped
+ *  fields (id, version, timestamps) stripped. Seeds the code editor and the
+ *  clear-detection diff on code-mode saves. */
+function agentToConfig(a: Agent): Record<string, unknown> {
+  const model =
+    typeof a.model === "string"
+      ? a.model
+      : a.model?.speed && a.model.speed !== "standard"
+        ? { id: a.model.id, speed: a.model.speed }
+        : (a.model?.id ?? "");
+  const config: Record<string, unknown> = { name: a.name, model };
+  if (a.system) config.system = a.system;
+  if (a.description) config.description = a.description;
+  config.tools = a.tools ?? [];
+  if (a.mcp_servers?.length) config.mcp_servers = a.mcp_servers;
+  if (a.skills?.length) config.skills = a.skills;
+  if (a.multiagent) config.multiagent = a.multiagent;
+  if (a.metadata && Object.keys(a.metadata).length > 0) config.metadata = a.metadata;
+  if (a.enable_general_subagent) config.enable_general_subagent = true;
+  if (a._oma) config._oma = a._oma;
+  return config;
+}
+
+function agentToForm(a: Agent): FormState {
+  const rb = a._oma?.runtime_binding;
+  return {
+    ...INITIAL_FORM,
+    name: a.name,
+    model: typeof a.model === "string" ? a.model : (a.model?.id ?? ""),
+    system: a.system ?? "",
+    description: a.description ?? "",
+    mcpServers: Array.isArray(a.mcp_servers) ? (a.mcp_servers as McpEntry[]) : [],
+    skills: Array.isArray(a.skills) ? (a.skills as SkillEntry[]) : [],
+    callableAgents: (a.multiagent?.agents ?? []) as CallableEntry[],
+    runtimeId: rb?.runtime_id ?? "",
+    acpAgentId: rb?.acp_agent_id ?? INITIAL_FORM.acpAgentId,
+    localSkillBlocklist: rb?.local_skill_blocklist ?? [],
+    ...parseToolPolicy(a.tools),
+    enableGeneralSubagent: a.enable_general_subagent === true,
+  };
+}
+
+export interface AgentFormDialogProps {
   open: boolean;
   onClose: () => void;
-  /** Called after the agent is created successfully. Parent uses this
-   *  to refresh the list. The dialog handles its own navigation to the
-   *  new agent's detail page. */
-  onCreated?: () => void;
+  /** Edit mode: when set, the dialog opens directly on the form step
+   *  seeded from this agent, and Save issues PUT /v1/agents/:id (with an
+   *  optimistic `version` guard) instead of creating. */
+  agent?: Agent | null;
+  /** Called after the agent is created or updated successfully. Parent
+   *  uses this to refresh its data. On create the dialog also navigates
+   *  to the new agent's detail page. */
+  onSaved?: () => void;
   /** Data sets the form's pickers pull from. The parent fetches these
    *  on mount (loadAux) and passes them down so the dialog doesn't have
    *  to re-fetch on every open. */
@@ -113,10 +237,10 @@ interface AgentFormDialogProps {
 }
 
 /**
- * Create-agent dialog. Multi-step (template → form) with three editor
- * modes (form / yaml / json). Owns all of its own state — `form`,
- * `createStep`, `createMode`, etc. — so the parent `AgentsList` just
- * mounts it and forwards data lists + an `onCreated` hook for the
+ * Create/edit-agent dialog. Multi-step (template → form; edit mode skips
+ * templates) with three editor modes (form / yaml / json). Owns all of
+ * its own state — `form`, `createStep`, `createMode`, etc. — so parents
+ * just mount it and forward data lists + an `onSaved` hook for the
  * post-save refresh.
  *
  * Stays hand-rolled rather than wrapping `Modal` because the
@@ -128,7 +252,8 @@ interface AgentFormDialogProps {
 export function AgentFormDialog({
   open,
   onClose,
-  onCreated,
+  agent,
+  onSaved,
   allAgents,
   customSkills,
   modelCards,
@@ -136,6 +261,7 @@ export function AgentFormDialog({
 }: AgentFormDialogProps) {
   const { api } = useApi();
   const nav = useNavigate();
+  const editing = !!agent;
 
   const [createError, setCreateError] = useState("");
   const [createStep, setCreateStep] = useState<"template" | "form">("template");
@@ -148,13 +274,28 @@ export function AgentFormDialog({
 
   const createDialogRef = useRef<HTMLDivElement>(null);
   const createPreviousFocus = useRef<HTMLElement | null>(null);
+  const passthrough = useRef<Passthrough>({ extraTools: [] });
+
+  // Edit mode: seed form + passthrough from the agent each time the
+  // dialog opens (or the target agent changes) and jump straight to the
+  // form step — templates only make sense for create.
+  useEffect(() => {
+    if (!open || !agent) return;
+    setForm(agentToForm(agent));
+    passthrough.current = extractPassthrough(agentToConfig(agent));
+    setCreateStep("form");
+    setCreateMode("form");
+    setTab("basic");
+    setCodeValue("");
+    setCreateError("");
+  }, [open, agent]);
 
   // Pre-select default model card when entering the form step. (tenant_id,
   // model_id) is UNIQUE in DB, so picking a card uniquely determines the
   // model. Skip if user/paste already set model. Re-runs when modelCards
   // arrives if the dialog opened before the aux fetch.
   useEffect(() => {
-    if (createStep !== "form") return;
+    if (editing || createStep !== "form") return;
     if (form.modelCardId || form.model) return;
     if (modelCards.length === 0) return;
     const def = modelCards.find((mc) => mc.is_default) ?? modelCards[0];
@@ -172,6 +313,7 @@ export function AgentFormDialog({
     setCreateError("");
     setCreateMode("form");
     setCodeValue("");
+    passthrough.current = { extraTools: [] };
     onClose();
   };
 
@@ -259,52 +401,84 @@ export function AgentFormDialog({
         ...(overrides.length > 0 ? { configs: overrides } : {}),
       },
       ...mcpToolsets,
+      ...passthrough.current.extraTools,
     ];
   };
 
-  const create = async () => {
-    setCreateError("");
-    try {
-      const payload: Record<string, unknown> = {
-        name: form.name,
-        model: form.model,
-        system: form.system || undefined,
-        description: form.description || undefined,
-        tools: buildToolsField(),
-      };
+  // Serialize form state (+ passthrough) into a request payload. Update
+  // mode emits explicit clears — an emptied field must delete server-side,
+  // not fall through as "unchanged".
+  const buildPayload = (mode: "create" | "update"): Record<string, unknown> => {
+    const p = passthrough.current;
+    const payload: Record<string, unknown> = {
+      name: form.name,
+      model: p.modelSpeed ? { id: form.model, speed: p.modelSpeed } : form.model,
+      tools: buildToolsField(),
+    };
+    if (mode === "create") {
+      if (form.system) payload.system = form.system;
+      if (form.description) payload.description = form.description;
       if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
       if (form.skills.length) payload.skills = form.skills;
       if (form.callableAgents.length) {
         payload.multiagent = { type: "coordinator", agents: form.callableAgents };
       }
-      if (form.enableGeneralSubagent) {
-        payload.enable_general_subagent = true;
-      }
-      // Local-runtime agent: opt into acp-proxy harness when both runtimeId
-      // and acpAgentId are set. Partial config silently falls back to the
-      // default cloud loop — same semantics as the CLI flag pair.
-      if (form.runtimeId && form.acpAgentId) {
-        payload._oma = {
-          harness: "acp-proxy",
-          runtime_binding: {
-            runtime_id: form.runtimeId,
-            acp_agent_id: form.acpAgentId,
-            ...(form.localSkillBlocklist.length > 0
-              ? { local_skill_blocklist: form.localSkillBlocklist }
-              : {}),
-          },
-        };
-      }
+      if (form.enableGeneralSubagent) payload.enable_general_subagent = true;
+    } else {
+      payload.system = form.system || null;
+      payload.description = form.description || null;
+      payload.mcp_servers = form.mcpServers;
+      payload.skills = form.skills;
+      payload.multiagent = form.callableAgents.length
+        ? { type: "coordinator", agents: form.callableAgents }
+        : null;
+      payload.enable_general_subagent = form.enableGeneralSubagent;
+    }
+    if (p.metadata) payload.metadata = p.metadata;
 
-      const agent = await api<Agent>("/v1/agents", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
+    const oma: Record<string, unknown> = {};
+    if (p.auxModel !== undefined) oma.aux_model = p.auxModel;
+    if (p.appendablePrompts?.length) oma.appendable_prompts = p.appendablePrompts;
+    // Local-runtime agent: opt into acp-proxy harness when both runtimeId
+    // and acpAgentId are set. Partial config silently falls back to the
+    // default cloud loop — same semantics as the CLI flag pair.
+    if (form.runtimeId && form.acpAgentId) {
+      oma.harness = "acp-proxy";
+      oma.runtime_binding = {
+        runtime_id: form.runtimeId,
+        acp_agent_id: form.acpAgentId,
+        ...(form.localSkillBlocklist.length > 0
+          ? { local_skill_blocklist: form.localSkillBlocklist }
+          : {}),
+      };
+    } else if (mode === "update" && agent?._oma?.runtime_binding) {
+      // Detached from the local runtime in this edit.
+      oma.harness = p.harness ?? "default";
+      oma.runtime_binding = null;
+    } else if (p.harness) {
+      oma.harness = p.harness;
+    }
+    if (Object.keys(oma).length > 0) payload._oma = oma;
+    return payload;
+  };
+
+  const save = async () => {
+    setCreateError("");
+    try {
+      const saved = agent
+        ? await api<Agent>(`/v1/agents/${agent.id}`, {
+            method: "PUT",
+            body: JSON.stringify({ ...buildPayload("update"), version: agent.version }),
+          })
+        : await api<Agent>("/v1/agents", {
+            method: "POST",
+            body: JSON.stringify(buildPayload("create")),
+          });
       closeCreate();
-      onCreated?.();
-      nav(`/agents/${agent.id}`);
+      onSaved?.();
+      if (!agent) nav(`/agents/${saved.id}`);
     } catch (e: any) {
-      setCreateError(e?.message || "Failed to create agent");
+      setCreateError(e?.message || (agent ? "Failed to update agent" : "Failed to create agent"));
     }
   };
 
@@ -368,32 +542,13 @@ export function AgentFormDialog({
     setTab("basic");
   };
 
-  // Convert current form state to a config object
-  const formToConfig = () => {
-    const config: Record<string, unknown> = {
-      name: form.name,
-      model: form.model,
-    };
-    if (form.system) config.system = form.system;
-    if (form.description) config.description = form.description;
-    config.tools = buildToolsField();
-    if (form.mcpServers.length) config.mcp_servers = form.mcpServers;
-    if (form.skills.length) config.skills = form.skills;
-    if (form.callableAgents.length) {
-      config.multiagent = { type: "coordinator", agents: form.callableAgents };
-    }
-    if (form.enableGeneralSubagent) {
-      config.enable_general_subagent = true;
-    }
-    return config;
-  };
-
   // Switch between form/yaml/json modes
   const switchMode = (mode: "form" | "yaml" | "json") => {
     if (mode === createMode) return;
     if (createMode === "form") {
-      // form → code: serialize current form
-      const config = formToConfig();
+      // form → code: serialize current form (+ passthrough). Update mode
+      // shows the explicit clears the save will send.
+      const config = buildPayload(editing ? "update" : "create");
       setCodeValue(
         mode === "yaml" ? yaml.dump(config, { lineWidth: -1 }) : JSON.stringify(config, null, 2),
       );
@@ -404,34 +559,19 @@ export function AgentFormDialog({
           createMode === "yaml"
             ? (yaml.load(codeValue) as Record<string, unknown>)
             : JSON.parse(codeValue);
-        const rb = parsed.runtime_binding as
+        // The API only reads runtime_binding from the `_oma` envelope;
+        // keep the top-level read as a paste-compat fallback.
+        const parsedOma = (parsed._oma ?? {}) as { runtime_binding?: unknown };
+        const rb = (parsedOma.runtime_binding ?? parsed.runtime_binding) as
           | { runtime_id?: string; acp_agent_id?: string; local_skill_blocklist?: string[] }
+          | null
           | undefined;
+        const model = parsed.model as string | { id?: string } | null | undefined;
         // Tool policy round-trip: extract default + per-tool overrides
         // from the first agent_toolset_20260401 entry. Custom tools and
-        // MCP toolsets pass through untouched in YAML/JSON view but
-        // can't currently be edited in the Form view.
-        const toolset = Array.isArray(parsed.tools)
-          ? (parsed.tools as Array<Record<string, unknown>>).find(
-              (t) => t?.type === "agent_toolset_20260401",
-            )
-          : undefined;
-        const dc = (toolset?.default_config ?? {}) as {
-          enabled?: boolean;
-          permission_policy?: { type?: string };
-        };
-        const cfgs = (toolset?.configs ?? []) as Array<{
-          name?: string;
-          enabled?: boolean;
-          permission_policy?: { type?: string };
-        }>;
-        const overrides: Record<string, ToolOverride> = {};
-        for (const c of cfgs) {
-          if (!c?.name) continue;
-          if (c.enabled === false) overrides[c.name] = "disabled";
-          else if (c.permission_policy?.type === "always_ask") overrides[c.name] = "always_ask";
-          else if (c.permission_policy?.type === "always_allow") overrides[c.name] = "always_allow";
-        }
+        // metadata land in `passthrough` so they survive the form trip
+        // even though the Form view can't edit them.
+        passthrough.current = extractPassthrough(parsed);
         setForm({
           ...INITIAL_FORM,
           name: String(parsed.name || ""),
@@ -439,7 +579,7 @@ export function AgentFormDialog({
           // claude-sonnet-4-6 is a real, current Anthropic model id (not
           // a placeholder), so it's a reasonable default. The form
           // dropdown does its own dynamic option set from modelCards.
-          model: String(parsed.model || "claude-sonnet-4-6"),
+          model: String((typeof model === "object" ? model?.id : model) || "claude-sonnet-4-6"),
           system: String(parsed.system || ""),
           description: String(parsed.description || ""),
           mcpServers: Array.isArray(parsed.mcp_servers)
@@ -454,10 +594,7 @@ export function AgentFormDialog({
           localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist)
             ? rb.local_skill_blocklist
             : [],
-          toolDefaultEnabled: dc.enabled ?? true,
-          toolDefaultPermission:
-            dc.permission_policy?.type === "always_ask" ? "always_ask" : "always_allow",
-          toolOverrides: overrides,
+          ...parseToolPolicy(parsed.tools),
           enableGeneralSubagent: parsed.enable_general_subagent === true,
         });
       } catch {
@@ -479,8 +616,8 @@ export function AgentFormDialog({
     setCreateMode(mode);
   };
 
-  // Create agent from code editor
-  const createFromCode = async () => {
+  // Save agent from code editor
+  const saveFromCode = async () => {
     setCreateError("");
     try {
       const parsed =
@@ -491,14 +628,51 @@ export function AgentFormDialog({
         setCreateError("name is required");
         return;
       }
-      if (!parsed.tools) parsed.tools = [{ type: "agent_toolset_20260401" }];
-      const agent = await api<Agent>("/v1/agents", {
-        method: "POST",
-        body: JSON.stringify(parsed),
-      });
-      closeCreate();
-      onCreated?.();
-      nav(`/agents/${agent.id}`);
+      if (agent) {
+        // Deleting a key in the editor means "clear it" — translate absent
+        // keys into the explicit nulls (or per-key metadata deletes) the
+        // update API needs, so removals don't silently no-op.
+        const orig = agentToConfig(agent);
+        const payload: Record<string, unknown> = { ...parsed, version: agent.version };
+        for (const key of ["system", "description", "mcp_servers", "skills", "multiagent"]) {
+          if (key in orig && !(key in parsed)) payload[key] = null;
+        }
+        const origMeta = orig.metadata as Record<string, unknown> | undefined;
+        if (origMeta) {
+          const nextMeta = (parsed.metadata ?? {}) as Record<string, unknown>;
+          const drops = Object.keys(origMeta).filter((k) => !(k in nextMeta));
+          if (drops.length) {
+            payload.metadata = {
+              ...Object.fromEntries(drops.map((k) => [k, null])),
+              ...nextMeta,
+            };
+          }
+        }
+        const origOma = orig._oma as Record<string, unknown> | undefined;
+        if (origOma) {
+          const nextOma = (parsed._oma ?? {}) as Record<string, unknown>;
+          const clears: Record<string, unknown> = {};
+          for (const key of ["aux_model", "runtime_binding", "appendable_prompts"]) {
+            if (key in origOma && !(key in nextOma)) clears[key] = null;
+          }
+          if (Object.keys(clears).length) payload._oma = { ...clears, ...nextOma };
+        }
+        await api<Agent>(`/v1/agents/${agent.id}`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+        closeCreate();
+        onSaved?.();
+      } else {
+        if (!parsed.tools) parsed.tools = [{ type: "agent_toolset_20260401" }];
+        const created = await api<Agent>("/v1/agents", {
+          method: "POST",
+          body: JSON.stringify(parsed),
+        });
+        closeCreate();
+        onSaved?.();
+        nav(`/agents/${created.id}`);
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Invalid config";
       setCreateError(msg);
@@ -543,12 +717,12 @@ export function AgentFormDialog({
           ref={createDialogRef}
           role="dialog"
           aria-modal="true"
-          aria-label="New Agent"
+          aria-label={editing ? "Edit Agent" : "New Agent"}
           className="bg-bg rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col"
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Template selection step */}
-          {createStep === "template" && (
+          {/* Template selection step (create only) */}
+          {createStep === "template" && !editing && (
             <>
               <div className="px-6 pt-6 pb-4 border-b border-border">
                 <h2 className="font-display text-lg font-semibold text-fg">New Agent</h2>
@@ -608,20 +782,24 @@ export function AgentFormDialog({
           )}
 
           {/* Form step */}
-          {createStep === "form" && (
+          {(createStep === "form" || editing) && (
             <>
               <div className="px-6 pt-6 pb-4 border-b border-border">
                 <div className="flex items-center justify-between mb-1">
-                  <button
-                    onClick={() => {
-                      setCreateStep("template");
-                      setTemplateSearch("");
-                      setCreateMode("form");
-                    }}
-                    className="inline-flex items-center min-h-11 sm:min-h-0 text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
-                  >
-                    &larr; Templates
-                  </button>
+                  {editing ? (
+                    <span />
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setCreateStep("template");
+                        setTemplateSearch("");
+                        setCreateMode("form");
+                      }}
+                      className="inline-flex items-center min-h-11 sm:min-h-0 text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                    >
+                      &larr; Templates
+                    </button>
+                  )}
                   <div className="flex items-center gap-0.5 bg-bg-surface rounded-md p-0.5">
                     {(["form", "yaml", "json"] as const).map((m) => (
                       <button
@@ -638,7 +816,9 @@ export function AgentFormDialog({
                     ))}
                   </div>
                 </div>
-                <h2 className="font-display text-lg font-semibold text-fg">New Agent</h2>
+                <h2 className="font-display text-lg font-semibold text-fg">
+                  {editing ? "Edit Agent" : "New Agent"}
+                </h2>
                 {createMode === "form" && (
                   <div
                     role="tablist"
@@ -799,12 +979,12 @@ export function AgentFormDialog({
                     Cancel
                   </Button>
                   {createMode === "form" ? (
-                    <Button onClick={create} disabled={!form.name}>
-                      Create Agent
+                    <Button onClick={save} disabled={!form.name}>
+                      {editing ? "Save Changes" : "Create Agent"}
                     </Button>
                   ) : (
-                    <Button onClick={createFromCode} disabled={!codeValue.trim()}>
-                      Create Agent
+                    <Button onClick={saveFromCode} disabled={!codeValue.trim()}>
+                      {editing ? "Save Changes" : "Create Agent"}
                     </Button>
                   )}
                 </div>
