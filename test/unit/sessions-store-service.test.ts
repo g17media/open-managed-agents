@@ -230,6 +230,30 @@ describe("SessionService — update", () => {
     expect(updated.metadata).toEqual({ stays: true });
   });
 
+  it("swaps vault_ids as a full replacement, leaving them untouched when omitted", async () => {
+    const { service } = createInMemorySessionService();
+    const { session } = await service.create({
+      tenantId: TENANT,
+      agentId: AGENT,
+      environmentId: ENV_ID,
+      vaultIds: ["vlt-old"],
+      metadata: { stays: true },
+    });
+    const updated = await service.update({
+      tenantId: TENANT,
+      sessionId: session.id,
+      vaultIds: ["vlt-new-1", "vlt-new-2"],
+    });
+    expect(updated.vault_ids).toEqual(["vlt-new-1", "vlt-new-2"]);
+    expect(updated.metadata).toEqual({ stays: true });
+    const again = await service.update({
+      tenantId: TENANT,
+      sessionId: session.id,
+      title: "t",
+    });
+    expect(again.vault_ids).toEqual(["vlt-new-1", "vlt-new-2"]);
+  });
+
   it("throws SessionNotFoundError for missing id", async () => {
     const { service } = createInMemorySessionService();
     await expect(
