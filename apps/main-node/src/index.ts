@@ -954,6 +954,7 @@ const sessionRegistry = new SessionRegistry({
   hub,
   agentsService,
   memoryService,
+  sessionsService,
   sandboxOrchestrator,
   newEventLog,
   buildSandbox,
@@ -2581,6 +2582,9 @@ v1.route("/oma/sessions", buildSessionRoutes({
         ? null
         : { status: 429, body: { error: "Too many session creations — wait a minute" } };
     },
+    onResourceAttached: async ({ tenantId, sessionId }) => {
+      await sessionRegistry.syncMemoryMounts(sessionId, tenantId);
+    },
   },
   // Node has no per-tenant cloud environments yet — every agent is treated
   // as a local runtime. The package's loadEnvironment hook returns a
@@ -3060,6 +3064,13 @@ v1.post("/oma/sessions/:id/memory_stores", async (c) => {
     )
     .bind(sid, body.store_id, access, Date.now())
     .run();
+  // Live-mount into an already-provisioned sandbox — same sync the
+  // standard resources route triggers via lifecycle.onResourceAttached.
+  await sessionRegistry
+    .syncMemoryMounts(sid, c.var.tenant_id)
+    .catch((err) =>
+      logger.warn({ err, op: "main-node.memory_bind.sync_failed", session_id: sid }, "live memory mount failed"),
+    );
   return c.json({ session_id: sid, store_id: body.store_id, access }, 201);
 });
 v1.get("/oma/sessions/:id/memory_stores", async (c) => {
