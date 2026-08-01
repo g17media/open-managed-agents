@@ -3,6 +3,10 @@ export const SANDBOX_PROVIDER_PATHS = {
   litebox: "@open-managed-agents/sandbox-adapter-litebox",
   boxlite: "@open-managed-agents/sandbox-adapter-litebox",
   boxrun: "@open-managed-agents/sandbox-adapter-boxrun",
+  // Fork-only provider: Cloudflare sandbox containers, self-hosted.
+  // Lives in packages/sandbox rather than its own sandbox-adapter-*
+  // package because it has no upstream counterpart to align with.
+  belljar: "@open-managed-agents/sandbox/adapters/belljar",
   daytona: "@open-managed-agents/sandbox-adapter-daytona",
   e2b: "@open-managed-agents/sandbox-adapter-e2b",
 } as const;
