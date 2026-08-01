@@ -3961,6 +3961,15 @@ export class SessionDO extends DurableObject<Env> {
    *   - `apiKey`, `baseURL`, `provider`, `customHeaders` — Pi model runtime
    *     inputs whose source depends on whether a card was matched.
    */
+  /** Per-deployment tool-result cap (chars) from the OMA_TOOL_RESULT_MAX_CHARS
+   *  worker var; undefined = buildTools' 50k default. */
+  private toolResultMaxChars(): number | undefined {
+    const raw = (this.env as unknown as { OMA_TOOL_RESULT_MAX_CHARS?: string })
+      .OMA_TOOL_RESULT_MAX_CHARS;
+    const n = parseInt(raw ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+
   private async resolveModelCardCredentials(
     handle: string,
   ): Promise<ResolvedModelCardCredentials> {
@@ -4081,6 +4090,7 @@ export class SessionDO extends DurableObject<Env> {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+          toolResultMaxChars: this.toolResultMaxChars(),
           toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
           environmentConfig,
           mcpBinding: this.env.MAIN_MCP,
@@ -4523,6 +4533,7 @@ export class SessionDO extends DurableObject<Env> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+      toolResultMaxChars: this.toolResultMaxChars(),
       toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
       environmentConfig: subEnvironment?.config,
       mcpBinding: this.env.MAIN_MCP,
