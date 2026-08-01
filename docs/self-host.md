@@ -440,6 +440,17 @@ The CA at `./data/oma-vault-ca/ca.crt` is regenerated on first vault
 start and persisted across restarts. Sandboxes mounted with the shared
 `./data` volume pick it up automatically through `OMA_VAULT_CA_CERT`.
 
+Credential lookup is session-scoped: sandbox adapters tag the proxy URL
+with the session id (mockttp socket metadata via proxy auth), and the
+vault resolves that session's `vault_ids` live from the DB on every
+request — so vault swaps mid-session (`POST /v1/sessions/:id` with
+`vault_ids`) apply on the next outbound call, matching the cloud path.
+A session with no vaults gets no injection. Requests with no session
+tag (operator curl, pre-upgrade sandboxes) fall back to host-wide
+matching scoped by `OMA_TENANT`. Set `OMA_VAULT_PROXY_KEY` to the same
+value on both main-node and oma-vault to HMAC-sign the attribution so
+a sandbox can't claim another session's identity.
+
 ## Architecture
 
 ```
