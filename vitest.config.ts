@@ -47,6 +47,8 @@ export default defineConfig({
       { find: "@open-managed-agents/memory-store", replacement: "./packages/memory-store/src/index.ts" },
       { find: "@open-managed-agents/dreams-store/test-fakes", replacement: "./packages/dreams-store/src/test-fakes.ts" },
       { find: "@open-managed-agents/dreams-store", replacement: "./packages/dreams-store/src/index.ts" },
+      { find: "@open-managed-agents/deployments-store/test-fakes", replacement: "./packages/deployments-store/src/test-fakes.ts" },
+      { find: "@open-managed-agents/deployments-store", replacement: "./packages/deployments-store/src/index.ts" },
       { find: "@open-managed-agents/dreams-pipeline", replacement: "./packages/dreams-pipeline/src/index.ts" },
       { find: "@open-managed-agents/credentials-store/test-fakes", replacement: "./packages/credentials-store/src/test-fakes.ts" },
       { find: "@open-managed-agents/credentials-store", replacement: "./packages/credentials-store/src/index.ts" },

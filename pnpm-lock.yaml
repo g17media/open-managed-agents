@@ -464,6 +464,9 @@ importers:
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../../packages/credentials-store
+      '@open-managed-agents/deployments-store':
+        specifier: workspace:*
+        version: link:../../packages/deployments-store
       '@open-managed-agents/dreams-pipeline':
         specifier: workspace:*
         version: link:../../packages/dreams-pipeline
@@ -590,6 +593,9 @@ importers:
       '@open-managed-agents/db-schema':
         specifier: workspace:*
         version: link:../../packages/db-schema
+      '@open-managed-agents/deployments-store':
+        specifier: workspace:*
+        version: link:../../packages/deployments-store
       '@open-managed-agents/dreams-store':
         specifier: workspace:*
         version: link:../../packages/dreams-store
@@ -966,6 +972,18 @@ importers:
         specifier: '*'
         version: 3.4.9
 
+  packages/deployments-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
+      croner:
+        specifier: ^9.0.0
+        version: 9.1.0
+
   packages/dreams-pipeline:
     dependencies:
       '@open-managed-agents/dreams-store':
@@ -1119,6 +1137,9 @@ importers:
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../credentials-store
+      '@open-managed-agents/deployments-store':
+        specifier: workspace:*
+        version: link:../deployments-store
       '@open-managed-agents/dreams-pipeline':
         specifier: workspace:*
         version: link:../dreams-pipeline
@@ -1483,6 +1504,9 @@ importers:
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../credentials-store
+      '@open-managed-agents/deployments-store':
+        specifier: workspace:*
+        version: link:../deployments-store
       '@open-managed-agents/dreams-store':
         specifier: workspace:*
         version: link:../dreams-store

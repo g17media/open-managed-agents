@@ -28,6 +28,7 @@ import {
   LinearIcon,
   MemoryIcon,
   ModelCardsIcon,
+  RocketIcon,
   SessionsIcon,
   SkillsIcon,
   SlackIcon,
@@ -61,6 +62,7 @@ function useNavGroups(): NavGroup[] {
       label: t.nav.managedAgents,
       items: [
         { to: "/agents", label: t.nav.agents, icon: AgentIcon },
+        { to: "/deployments", label: t.nav.deployments, icon: RocketIcon },
         { to: "/sessions", label: t.nav.sessions, icon: SessionsIcon },
         { to: "/files", label: t.nav.files, icon: FilesIcon },
         { to: "/evals", label: t.nav.evalRuns, icon: SessionsIcon },

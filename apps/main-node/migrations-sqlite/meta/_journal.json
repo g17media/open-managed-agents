@@ -29,6 +29,13 @@
       "when": 1786626001758,
       "tag": "0003_feishu_publication_first",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1786700000000,
+      "tag": "0004_deployments",
+      "breakpoints": true
     }
   ]
 }

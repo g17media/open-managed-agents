@@ -6,6 +6,7 @@ import {
   buildAgentRoutes,
   buildVaultRoutes,
   buildSessionRoutes,
+  buildDeploymentRoutes,
   buildApiKeyRoutes,
   buildMeRoutes,
   buildTenantRoutes,
@@ -361,6 +362,29 @@ const sessionsRoutes = new Hono<{
   return invokePackage(c, app);
 });
 
+const deploymentsRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; user_id?: string };
+}>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const env = ctx.env;
+  const services = ctx.var.services;
+  const tenantId = ctx.var.tenant_id;
+  const app = buildDeploymentRoutes({
+    services: () => cfRouteServicesFromCtx(ctx),
+    router: new CfSessionRouter({ env, services, tenantId }),
+    localRuntimeEnvId: LOCAL_RUNTIME_ENV_ID,
+    loadEnvironment: async ({ tenantId, environmentId }) => {
+      if (environmentId === LOCAL_RUNTIME_ENV_ID) return null;
+      const row = await services.environments.get({ tenantId, environmentId });
+      return row ? toEnvironmentConfig(row) : null;
+    },
+    fetchVaultCredentials: ({ tenantId, vaultIds }) =>
+      fetchVaultCredentials(services, tenantId, vaultIds),
+  });
+  return invokePackage(c, app);
+});
+
 /**
  * Forward the outer Hono request into a freshly-built package app while
  * preserving (a) auth/tenant vars set by middleware (passed via per-call
@@ -508,6 +532,7 @@ app.route("/v1/oma/integrations", integrationsRoutes);
 app.route("/v1/oma/runtimes", runtimesRoutes);
 app.route("/v1/oma/oauth", oauthRoutes);
 app.route("/v1/oma/model_cards", modelCardsRoutes);
+app.route("/v1/oma/deployments", deploymentsRoutes);
 // /v1/mcp-proxy is intentionally NOT aliased: auth.ts path-prefix skip is
 // scoped to that exact prefix, and the proxy does its own session-ownership
 // check downstream. Re-mounting under /v1/oma/mcp-proxy would route through
