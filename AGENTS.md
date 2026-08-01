@@ -433,6 +433,41 @@ session detail page.
 
 ---
 
+## Deployments
+
+A **deployment** is a stored launch recipe — agent + environment + vaults +
+memory stores + an initial message — fired manually or on a cron schedule.
+Every run creates a regular session (tagged `metadata.deployment_id`) and
+sends the initial message; the deployment records `last_session_id` /
+`last_run_at`. OMA-only extension, mounted at `/v1/oma/deployments`.
+
+```bash
+# Create a scheduled deployment (daily at 09:00 UTC)
+curl -s $BASE/v1/oma/deployments \
+  -H "x-api-key: $KEY" -H "content-type: application/json" \
+  -d '{
+    "name": "Morning triage",
+    "agent_id": "agent_xxx",
+    "environment_id": "env_xxx",
+    "initial_message": "Triage new issues and summarize.",
+    "vault_ids": ["vlt_xxx"],
+    "memory_store_ids": ["memstore_xxx"],
+    "trigger": { "type": "schedule", "cron": "0 9 * * *" }
+  }'
+
+# Fire one on demand — returns the spawned session id
+curl -s $BASE/v1/oma/deployments/$DPL_ID/run -X POST \
+  -H "x-api-key: $KEY" -H "content-type: application/json" -d '{}'
+```
+
+Scheduled deployments are swept by the `deployments-tick` cron job (every
+minute on both runtimes; override with `DEPLOYMENTS_TICK_CRON`). A failed
+run defers `next_run_at` to the next cron slot rather than retrying every
+tick. The console exposes deployments under **Managed Agents →
+Deployments** with a "Run now" action.
+
+---
+
 ## Memory Stores
 
 Memory stores provide persistent storage for agents across sessions, aligned

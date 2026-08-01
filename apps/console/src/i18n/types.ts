@@ -55,6 +55,7 @@ export interface Messages {
     managedAgents: string;
     dashboard: string;
     agents: string;
+    deployments: string;
     sessions: string;
     files: string;
     evalRuns: string;

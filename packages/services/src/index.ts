@@ -75,6 +75,10 @@ import {
   createCfDreamService,
 } from "@open-managed-agents/dreams-store";
 import {
+  DeploymentService,
+  createCfDeploymentService,
+} from "@open-managed-agents/deployments-store";
+import {
   OutboundSnapshotService,
   createCfOutboundSnapshotService,
 } from "@open-managed-agents/outbound-snapshots-store";
@@ -130,6 +134,7 @@ export interface Services {
   agents: AgentService;
   environments: EnvironmentService;
   dreams: DreamService;
+  deployments: DeploymentService;
   outboundSnapshots: OutboundSnapshotService;
   sessionSecrets: SessionSecretService;
   /** Control-plane: tenant_id → binding_name assignment. Hot-path read on
@@ -320,6 +325,16 @@ export function buildServices(env: Env, db: D1Database): Services {
         const row = await db
           .prepare("SELECT 1 FROM sessions WHERE id = ? AND tenant_id = ?")
           .bind(sessionId, tenantId)
+          .first();
+        return !!row;
+      },
+    }),
+    deployments: createCfDeploymentService({
+      db,
+      verifyAgentExists: async (tenantId, agentId) => {
+        const row = await db
+          .prepare("SELECT 1 FROM agents WHERE id = ? AND tenant_id = ?")
+          .bind(agentId, tenantId)
           .first();
         return !!row;
       },

@@ -44,6 +44,7 @@ export const en: Messages = {
     managedAgents: "Managed Agents",
     dashboard: "Dashboard",
     agents: "Agents",
+    deployments: "Deployments",
     sessions: "Sessions",
     files: "Files",
     evalRuns: "Eval Runs",

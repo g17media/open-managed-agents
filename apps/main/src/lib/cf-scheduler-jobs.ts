@@ -13,8 +13,13 @@ import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 import { createCfScheduler, type CfScheduler } from "@open-managed-agents/scheduler/cf";
 import { memoryRetentionTick } from "@open-managed-agents/scheduler/jobs/memory-retention";
 import { webhookEventsRetentionTick } from "@open-managed-agents/scheduler/jobs/webhook-events-retention";
+import { deploymentsTick } from "@open-managed-agents/http-routes";
+import { LOCAL_RUNTIME_ENV_ID } from "@open-managed-agents/shared";
+import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { tickEvalRuns } from "../eval-runner";
 import { dreamRecoveryTick } from "../cron/dream-recovery";
+import { CfSessionRouter } from "./cf-session-router";
+import { fetchVaultCredentials } from "./cf-session-lifecycle";
 
 // Cron expressions are env-overridable so ops can shift sweeps without a
 // code deploy. Defaults match the pre-extract behaviour exactly.
@@ -71,6 +76,32 @@ export function buildCfScheduler(env: Env): CfScheduler {
     name: "dream-recovery",
     cron: dreamsCron,
     handler: () => dreamRecoveryTick(env),
+  });
+
+  scheduler.register({
+    name: "deployments-tick",
+    cron: envCron(env, "DEPLOYMENTS_TICK_CRON", "* * * * *"),
+    handler: deploymentsTick({
+      forEachShard: (fn) =>
+        forEachShardServices(env, (s) =>
+          fn({
+            services: s,
+            routerForTenant: (tenantId) =>
+              new CfSessionRouter({ env, services: s, tenantId }),
+            localRuntimeEnvId: LOCAL_RUNTIME_ENV_ID,
+            loadEnvironment: async ({ tenantId, environmentId }) => {
+              if (environmentId === LOCAL_RUNTIME_ENV_ID) return null;
+              const row = await s.environments.get({ tenantId, environmentId });
+              return row ? toEnvironmentConfig(row) : null;
+            },
+            fetchVaultCredentials: ({ tenantId, vaultIds }) =>
+              fetchVaultCredentials(s, tenantId, vaultIds),
+          }),
+        ),
+      logger: {
+        warn: (msg) => logError({ op: "cron.deployments_tick" }, msg),
+      },
+    }),
   });
 
   return scheduler;
