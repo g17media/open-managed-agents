@@ -35,11 +35,12 @@ export interface AgentRecord {
     type: "coordinator";
     agents: Array<{ type: "agent"; id: string; version: number }>;
   } | null;
-  enable_general_subagent?: boolean;
+  callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
   metadata?: Record<string, unknown>;
+  enable_general_subagent?: boolean;
   created_at: string;
   updated_at?: string;
-  archived_at?: string;
+  archived_at?: string | null;
   /** Console-only enrichment from the OMA control plane: scratch/aux model
    *  selection, harness binding, appendable prompt presets. Not on the
    *  wire-format AgentConfig (those fields live in OMA-private storage). */

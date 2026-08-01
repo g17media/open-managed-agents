@@ -170,6 +170,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       multiagent?: { type: "coordinator"; agents: unknown[] } | null;
       metadata?: Record<string, unknown>;
       harness?: string;
+      enable_general_subagent?: boolean;
       _oma?: {
         aux_model?: string | { id: string; speed?: "standard" | "fast" };
         harness?: string;
@@ -228,8 +229,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
         aux_model: body.aux_model,
         appendable_prompts: body.appendable_prompts,
         runtime_binding: body.runtime_binding,
-        enable_general_subagent: (body as { enable_general_subagent?: boolean })
-          .enable_general_subagent,
+        enable_general_subagent: body.enable_general_subagent,
       },
     });
     return c.json(toApiAgent(row), 201);
@@ -369,6 +369,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       metadata?: Record<string, unknown>;
       version?: number;
       harness?: string;
+      enable_general_subagent?: boolean | null;
       _oma?: {
         aux_model?: string | { id: string; speed?: "standard" | "fast" } | null;
         harness?: string;
@@ -396,6 +397,10 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       runtime_binding: raw._oma?.runtime_binding,
       appendable_prompts: raw._oma?.appendable_prompts,
     };
+
+    if (body.name !== undefined && !body.name) {
+      return c.json({ error: "name cannot be empty" }, 400);
+    }
 
     if (deps.validateAgentLimits) {
       const limitCheck = deps.validateAgentLimits(body);
@@ -441,8 +446,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
           aux_model: body.aux_model,
           appendable_prompts: body.appendable_prompts,
           runtime_binding: body.runtime_binding,
-          enable_general_subagent: (body as { enable_general_subagent?: boolean })
-            .enable_general_subagent,
+          enable_general_subagent: body.enable_general_subagent,
         },
       });
       return c.json(toApiAgent(row));
