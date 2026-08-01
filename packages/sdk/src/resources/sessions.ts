@@ -16,6 +16,15 @@ export interface CreateSessionInput {
   resources?: unknown[];
 }
 
+export interface UpdateSessionInput {
+  title?: string;
+  /** Per-key merge — pass `{ key: null }` to drop a key. */
+  metadata?: Record<string, unknown>;
+  /** Full replacement of the session's vault set. Takes effect on the
+   *  session's next outbound call — credentials resolve live per call. */
+  vault_ids?: string[];
+}
+
 export interface ListSessionsOptions {
   agent_id?: string;
   status?: "idle" | "running" | "error";
@@ -25,6 +34,10 @@ export interface ListSessionsOptions {
 
 export interface ChatOptions {
   signal?: AbortSignal;
+  /** Swap the session's vault set for this interaction onward. Persisted
+   *  before the message dispatches, so the turn's outbound calls already
+   *  resolve against the new credentials. */
+  vault_ids?: string[];
 }
 
 export interface ChatCompleteOptions extends ChatOptions {
@@ -104,6 +117,12 @@ export class SessionsResource {
     return this.client.request<SessionSummary>("POST", "/v1/sessions", { body: input });
   }
 
+  async update(sessionId: string, input: UpdateSessionInput): Promise<SessionSummary> {
+    return this.client.request<SessionSummary>("POST", `/v1/sessions/${sessionId}`, {
+      body: input,
+    });
+  }
+
   async archive(sessionId: string): Promise<void> {
     await this.client.request("POST", `/v1/sessions/${sessionId}/archive`);
   }
@@ -126,12 +145,19 @@ export class SessionsResource {
    * separately via `tail()` if you want the response. Use `chat()` for
    * the common "post + stream the reply in one call" pattern.
    */
-  async message(sessionId: string, content: string | ContentBlock[]): Promise<void> {
+  async message(
+    sessionId: string,
+    content: string | ContentBlock[],
+    opts: { vault_ids?: string[] } = {},
+  ): Promise<void> {
     const blocks: ContentBlock[] = typeof content === "string"
       ? [{ type: "text", text: content }]
       : content;
     await this.client.request("POST", `/v1/sessions/${sessionId}/events`, {
-      body: { events: [{ type: "user.message", content: blocks }] },
+      body: {
+        events: [{ type: "user.message", content: blocks }],
+        ...(opts.vault_ids !== undefined ? { vault_ids: opts.vault_ids } : {}),
+      },
     });
   }
 
@@ -157,7 +183,10 @@ export class SessionsResource {
       ? [{ type: "text", text: content }]
       : content;
     const res = await this.client.raw("POST", `/v1/sessions/${sessionId}/messages`, {
-      body: JSON.stringify({ content: blocks }),
+      body: JSON.stringify({
+        content: blocks,
+        ...(opts.vault_ids !== undefined ? { vault_ids: opts.vault_ids } : {}),
+      }),
       headers: { "content-type": "application/json", accept: "text/event-stream" },
       signal: opts.signal,
     });
@@ -183,7 +212,10 @@ export class SessionsResource {
       events: [],
     };
     let activeThinking = "";
-    for await (const ev of this.chat(sessionId, content, { signal: opts.signal })) {
+    for await (const ev of this.chat(sessionId, content, {
+      signal: opts.signal,
+      vault_ids: opts.vault_ids,
+    })) {
       result.events.push(ev);
       switch (ev.type) {
         case "agent.message_chunk":

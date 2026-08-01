@@ -282,6 +282,52 @@ function toApiSession(row: {
 export function buildSessionRoutes(deps: SessionRoutesDeps) {
   const app = new Hono<Vars>();
 
+  // Vault swapping. Persisting the row is all it takes for a swap to bite:
+  // credential injection re-reads session.vault_ids from the DB on every
+  // outbound call (mcp-proxy resolveOutboundCredentialByHost, vault-forward
+  // resolveProxyTargetByTenant, cap resolver), so the next interaction runs
+  // against the new set with no runtime invalidation. On top of the row
+  // write we re-run the provider-credential refresh hook (same as create)
+  // so swapped-in OAuth tokens are fresh; warnings land in the event log.
+  const refreshSwappedVaultCredentials = async (opts: {
+    router: SessionRouter;
+    tenantId: string;
+    sessionId: string;
+    agentId: string;
+    vaultIds: string[];
+  }): Promise<void> => {
+    if (!deps.lifecycle?.refreshSessionCredentials) return;
+    const events = await deps.lifecycle
+      .refreshSessionCredentials({
+        tenantId: opts.tenantId,
+        agentId: opts.agentId,
+        vaultIds: opts.vaultIds,
+      })
+      .catch(() => [] as SessionEvent[]);
+    for (const ev of events) {
+      await opts.router.appendEvent(opts.sessionId, ev).catch(() => undefined);
+    }
+  };
+
+  const swapSessionVaults = async (opts: {
+    services: ReturnType<typeof resolveServices>;
+    router: SessionRouter;
+    tenantId: string;
+    sessionId: string;
+    agentId: string;
+    vaultIds: string[];
+  }): Promise<void> => {
+    await opts.services.sessions.update({
+      tenantId: opts.tenantId,
+      sessionId: opts.sessionId,
+      vaultIds: opts.vaultIds,
+    });
+    await refreshSwappedVaultCredentials(opts);
+  };
+
+  const isStringArray = (v: unknown): v is string[] =>
+    Array.isArray(v) && v.every((x) => typeof x === "string");
+
   // ── Create ────────────────────────────────────────────────────────────
   app.post("/", async (c) => {
     const services = resolveServices(deps.services, c);
@@ -596,17 +642,32 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
 
   app.post("/:id", async (c) => {
     const services = resolveServices(deps.services, c);
+    const router = resolveRouter(deps.router, c);
     const body = await c.req.json<{
       title?: string;
       metadata?: Record<string, unknown>;
+      vault_ids?: string[];
     }>();
+    if (body.vault_ids !== undefined && !isStringArray(body.vault_ids)) {
+      return c.json({ error: "vault_ids must be an array of strings" }, 400);
+    }
     try {
       const updated = await services.sessions.update({
         tenantId: c.var.tenant_id,
         sessionId: c.req.param("id"),
         title: body.title,
         metadata: body.metadata,
+        vaultIds: body.vault_ids,
       });
+      if (body.vault_ids !== undefined) {
+        await refreshSwappedVaultCredentials({
+          router,
+          tenantId: c.var.tenant_id,
+          sessionId: c.req.param("id"),
+          agentId: updated.agent_id ?? "",
+          vaultIds: body.vault_ids,
+        });
+      }
       return c.json(toApiSession(updated as never));
     } catch (err) {
       return mapSessionError(c, err);
@@ -659,13 +720,33 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
     if ((sess as unknown as { archived_at?: string | null }).archived_at) {
       return c.json({ error: "Session is archived and cannot receive new events" }, 409);
     }
-    const body = await c.req.json<{ events: SessionEvent[] }>();
+    const body = await c.req.json<{ events: SessionEvent[]; vault_ids?: string[] }>();
     if (!Array.isArray(body.events) || body.events.length === 0) {
       return c.json({ error: "events array is required" }, 400);
     }
     for (const ev of body.events) {
       if (!ALLOWED_EVENT_TYPES.has(ev.type)) {
         return c.json({ error: `Unsupported event type: ${ev.type}` }, 400);
+      }
+    }
+
+    // Per-interaction vault swap — persisted before the events dispatch so
+    // this turn's outbound calls already resolve against the new set.
+    if (body.vault_ids !== undefined) {
+      if (!isStringArray(body.vault_ids)) {
+        return c.json({ error: "vault_ids must be an array of strings" }, 400);
+      }
+      try {
+        await swapSessionVaults({
+          services,
+          router,
+          tenantId: t,
+          sessionId: id,
+          agentId: (sess as unknown as { agent_id: string }).agent_id,
+          vaultIds: body.vault_ids,
+        });
+      } catch (err) {
+        return mapSessionError(c, err);
       }
     }
 
@@ -713,13 +794,32 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
     const sess = await services.sessions.get({ tenantId: t, sessionId: id });
     if (!sess) return c.json({ error: "Session not found" }, 404);
     const body = await c.req
-      .json<{ content: string | ContentBlock[] }>()
-      .catch(() => ({ content: "" as string | ContentBlock[] }));
+      .json<{ content: string | ContentBlock[]; vault_ids?: string[] }>()
+      .catch(() => ({ content: "" as string | ContentBlock[], vault_ids: undefined }));
     const content: ContentBlock[] = typeof body.content === "string"
       ? [{ type: "text", text: body.content } as ContentBlock]
       : Array.isArray(body.content) ? body.content : [];
     if (content.length === 0) {
       return c.json({ error: "content is required (string or ContentBlock[])" }, 400);
+    }
+    // Per-interaction vault swap — persisted before the message dispatches
+    // so this turn's outbound calls already resolve against the new set.
+    if (body.vault_ids !== undefined) {
+      if (!isStringArray(body.vault_ids)) {
+        return c.json({ error: "vault_ids must be an array of strings" }, 400);
+      }
+      try {
+        await swapSessionVaults({
+          services,
+          router,
+          tenantId: t,
+          sessionId: id,
+          agentId: (sess as unknown as { agent_id: string }).agent_id,
+          vaultIds: body.vault_ids,
+        });
+      } catch (err) {
+        return mapSessionError(c, err);
+      }
     }
     const userMessageId = generateEventId();
     const ev = {
