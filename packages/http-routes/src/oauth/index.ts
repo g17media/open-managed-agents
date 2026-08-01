@@ -260,6 +260,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     authorization_server: string;
     redirect_uri: string;
     resource_uri: string;
+    scope?: string;
   }
 
   // ─── Routes ───
@@ -275,6 +276,11 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
    *   - vault_id (required): Vault to store the credential in
    *   - credential_id (optional): Update existing credential instead of creating new
    *   - redirect_uri (optional): Where to redirect after auth (defaults to console)
+   *   - scope (optional): Space-delimited scopes to request IN ADDITION to
+   *     whatever the server's Protected Resource Metadata advertises — e.g.
+   *     `offline_access` for auth servers that only issue refresh tokens
+   *     when it's requested. Persisted on the credential and reused as the
+   *     default on re-authorization.
    */
   app.get("/authorize", async (c) => {
     const services = resolveServices(deps.services, c);
@@ -282,6 +288,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     const vaultId = c.req.query("vault_id");
     const credentialId = c.req.query("credential_id");
     const clientRedirectUri = c.req.query("redirect_uri");
+    let extraScope = c.req.query("scope")?.trim() ?? "";
 
     if (!mcpServerUrl || !vaultId) {
       return c.json({ error: "mcp_server_url and vault_id are required" }, 400);
@@ -295,6 +302,17 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     const vault = await services.vaults.get({ tenantId: t, vaultId });
     if (!vault) {
       return c.json({ error: "Vault not found" }, 404);
+    }
+
+    // Re-authorization of an existing credential with no explicit scope
+    // override: reuse the scopes stored on the credential so user-added
+    // scopes survive reconnects.
+    if (!extraScope && credentialId) {
+      const existing = await services.credentials
+        .get({ tenantId: t, vaultId, credentialId })
+        .catch(() => null);
+      const storedScope = (existing?.auth as { scope?: string } | undefined)?.scope;
+      if (storedScope) extraScope = storedScope;
     }
 
     const baseUrl = getBaseUrl(c);
@@ -479,6 +497,18 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     // Generate state
     const state = randomString(32);
 
+    // Requested scope = PRM-advertised scopes ∪ caller-supplied extras.
+    // Order-preserving dedupe; empty → no scope param at all (server
+    // default), matching prior behavior.
+    const requestedScopes: string[] = [];
+    for (const s of [
+      ...(meta.resource.scopes_supported ?? []),
+      ...extraScope.split(/\s+/).filter(Boolean),
+    ]) {
+      if (!requestedScopes.includes(s)) requestedScopes.push(s);
+    }
+    const requestedScope = requestedScopes.join(" ");
+
     // Store state in KV (10 minute TTL)
     const oauthState: OAuthState = {
       tenant_id: t,
@@ -492,6 +522,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       authorization_server: meta.authServer.issuer,
       redirect_uri: clientRedirectUri || `${baseUrl}/`,
       resource_uri: meta.resource.resource,
+      scope: requestedScope || undefined,
     };
 
     await services.kv.put(
@@ -509,8 +540,8 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     authUrl.searchParams.set("code_challenge", codeChallenge);
     authUrl.searchParams.set("code_challenge_method", "S256");
     authUrl.searchParams.set("resource", meta.resource.resource);
-    if (meta.resource.scopes_supported?.length) {
-      authUrl.searchParams.set("scope", meta.resource.scopes_supported.join(" "));
+    if (requestedScope) {
+      authUrl.searchParams.set("scope", requestedScope);
     }
 
     return c.redirect(authUrl.toString());
@@ -584,6 +615,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       refresh_token?: string;
       expires_in?: number;
       token_type?: string;
+      scope?: string;
     };
 
     // Calculate expiry
@@ -606,6 +638,9 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       client_secret: oauthState.client_secret,
       expires_at: expiresAt,
       authorization_server: oauthState.authorization_server,
+      // Granted scope when the token response reports it (RFC 6749 §5.1),
+      // else what we requested — the default for future re-authorizations.
+      scope: tokens.scope || oauthState.scope,
     };
 
     if (oauthState.credential_id) {
