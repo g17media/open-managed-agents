@@ -39,6 +39,7 @@
 // POST /exec auto-starts the VM if needed. Cached `boxId` per-instance.
 
 import type { SandboxExecutor, SandboxFactory } from "../ports";
+import { sessionVaultProxyUrl } from "../vault-proxy";
 import { getLogger } from "@open-managed-agents/observability";
 
 const moduleLogger = getLogger("boxrun-sandbox");
@@ -197,13 +198,14 @@ export class BoxRunSandbox implements SandboxExecutor {
     this.envVars = { ...this.envVars, ...envVars };
   }
 
-  async setOutboundContext(_opts?: { tenantId: string; sessionId: string }): Promise<void> {
+  async setOutboundContext(opts?: { tenantId: string; sessionId: string }): Promise<void> {
     // BoxRun: VM-level network — same env-var pattern as LocalSubprocess /
     // LiteBox. CA cert is uploaded into the box on the first writeFile —
     // we stash the host path here and apply on box creation.
-    const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
+    const baseProxyUrl = process.env.OMA_VAULT_PROXY_URL;
     const caCertPath = process.env.OMA_VAULT_CA_CERT;
-    if (!proxyUrl || !caCertPath) return;
+    if (!baseProxyUrl || !caCertPath) return;
+    const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
     const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
     await this.setEnvVars({
       HTTP_PROXY: proxyUrl,

@@ -10,7 +10,10 @@
  *       ▼
  *   oma-vault (this process)
  *     - mockttp HTTPS proxy with self-signed CA (regenerated per install)
- *     - on incoming request: lookup credentials by host
+ *     - on incoming request: attribute to a session via proxy-auth socket
+ *       metadata (tags set by the sandbox adapters), then lookup
+ *       credentials scoped to that session's live vault_ids — falling
+ *       back to host-wide match for unattributed traffic
  *     - inject Authorization / x-api-key / etc. header
  *     - forward to upstream
  *       │
@@ -35,6 +38,11 @@ import {
   createPostgresSqlClient,
   type SqlClient,
 } from "@open-managed-agents/sql-client";
+import {
+  parseVaultProxyTags,
+  verifyVaultProxyAttribution,
+  type VaultProxyAttribution,
+} from "@open-managed-agents/sandbox/vault-proxy";
 import type { CredentialAuth } from "@open-managed-agents/shared";
 import { createNodeLogger } from "@open-managed-agents/observability/logger/node";
 import { setRootLogger, type Logger } from "@open-managed-agents/observability";
@@ -59,6 +67,10 @@ const port = Number(process.env.OMA_VAULT_PORT ?? 14322);
 // for multi-user prod deploys, since cross-tenant matching can leak a
 // credential between tenants when both register the same host.
 const scopeTenantId = process.env.OMA_TENANT ?? "*";
+// Optional HMAC key shared with main-node (same env var there). When set,
+// session attribution tags must carry a valid signature — a sandbox can't
+// claim another session's identity. When unset, tags are trusted as-is.
+const proxyKey = process.env.OMA_VAULT_PROXY_KEY ?? "";
 
 mkdirSync(resolve(caDir), { recursive: true });
 
@@ -176,47 +188,78 @@ interface MatchedCred {
  * Today's matcher: exact hostname match against
  * URL(credential.mcp_server_url).host. Wildcards / suffix match TBD when
  * we hit a use case (e.g. `*.googleapis.com` for google credentials).
+ *
+ * Session attribution: sandbox adapters embed `oma-tenant:` / `oma-session:`
+ * tags in the proxy URL's userinfo (packages/sandbox/src/vault-proxy.ts);
+ * mockttp surfaces them on every intercepted request. When present, the
+ * lookup reads the session row's vault_ids LIVE and only credentials from
+ * those vaults (in the session's tenant) are eligible — matching the CF
+ * path's per-call resolve, so mid-session vault swaps apply on the next
+ * outbound request. A session with no vaults gets no injection.
+ *
+ * Unattributed requests (operator curl, pre-upgrade sandboxes) fall back
+ * to the legacy host-wide match. SECURITY LIMITATION on that path: if two
+ * tenants both register a credential for the same host, the second
+ * tenant's request can pick up the first tenant's token. Setting
+ * OMA_TENANT to a specific tenant id locks all lookup to that tenant.
+ * Set OMA_VAULT_PROXY_KEY (both processes) to make session attribution
+ * unforgeable from inside the sandbox.
  */
-/**
- * Find the active credential whose mcp_server_url host matches the request
- * host. Returns the header to inject, or null when no credential applies.
- *
- * Today's matcher: exact hostname match against
- * URL(credential.mcp_server_url).host. Wildcards / suffix match TBD when
- * we hit a use case (e.g. `*.googleapis.com` for google credentials).
- *
- * Cross-tenant note: with better-auth multi-tenant, credentials live under
- * per-user tenants (tn_xxx), not under a static OMA_TENANT. The proxy
- * intercepts traffic from any sandbox and has no way to attribute the
- * request to a specific tenant from its hostname alone — we'd need a
- * per-session port or a sandbox-side header tag for that.
- *
- * For the PoC we look across ALL tenants by host, matching the first
- * active credential. SECURITY LIMITATION: if two tenants both register a
- * credential for the same host (e.g. `https://api.github.com`), the
- * second tenant's request can pick up the first tenant's token. Not OK
- * for shared multi-tenant deploys; OK for single-operator self-host
- * (every credential ultimately belongs to "me"). Document the limit.
- *
- * Setting OMA_TENANT to a specific tenant id locks lookup to that tenant
- * only — recommended for prod multi-user deploys until per-session
- * attribution lands.
- */
-async function findCredentialForUrl(url: string): Promise<MatchedCred | null> {
+async function findCredentialForUrl(
+  url: string,
+  attr: VaultProxyAttribution,
+): Promise<MatchedCred | null> {
   let host: string;
   try {
     host = new URL(url).host;
   } catch {
     return null;
   }
-  // Cross-tenant lookup against the partial unique index
-  // idx_credentials_mcp_url_active. The index contains hostname-as-substring
-  // (LIKE) is unindexed; we materialize candidates by parsing mcp_server_url.
-  // Acceptable cost: typical deploys have O(10) credentials.
   type Row = { id: string; tenant_id: string; vault_id: string; auth: string };
-  // Cross-tenant lookup. When OMA_TENANT="*" we accept any tenant; when
-  // it's a specific tenant id we filter to that one (recommended for
-  // multi-user prod deploys).
+
+  if (attr.sessionId) {
+    // Session-scoped path: live vault_ids read → strictly that vault set.
+    type SessRow = { tenant_id: string; vault_ids: string | null };
+    const sess = await sql
+      .prepare(`SELECT tenant_id, vault_ids FROM sessions WHERE id = ?`)
+      .bind(attr.sessionId)
+      .all<SessRow>();
+    const row = (sess.results ?? [])[0];
+    if (!row) {
+      logger.debug(
+        { op: "oma_vault.session_unknown", session_id: attr.sessionId },
+        `no session row for ${attr.sessionId} — no injection`,
+      );
+      return null;
+    }
+    if (scopeTenantId !== "*" && row.tenant_id !== scopeTenantId) return null;
+    let vaultIds: string[] = [];
+    try {
+      vaultIds = row.vault_ids ? (JSON.parse(row.vault_ids) as string[]) : [];
+    } catch {
+      /* malformed column — treat as no vaults */
+    }
+    if (vaultIds.length === 0) return null;
+    const placeholders = vaultIds.map(() => "?").join(",");
+    const result = await sql
+      .prepare(
+        `SELECT id, tenant_id, vault_id, auth
+           FROM credentials
+          WHERE archived_at IS NULL
+            AND mcp_server_url IS NOT NULL
+            AND tenant_id = ?
+            AND vault_id IN (${placeholders})`,
+      )
+      .bind(row.tenant_id, ...vaultIds)
+      .all<Row>();
+    return matchRowsByHost(result.results ?? [], host);
+  }
+
+  // Legacy host-wide lookup. When OMA_TENANT="*" we accept any tenant;
+  // when it's a specific tenant id we filter to that one (recommended for
+  // multi-user prod deploys). Candidates are materialized by parsing
+  // mcp_server_url — acceptable cost: typical deploys have O(10)
+  // credentials.
   const result = await sql
     .prepare(
       `SELECT id, tenant_id, vault_id, auth
@@ -227,7 +270,14 @@ async function findCredentialForUrl(url: string): Promise<MatchedCred | null> {
     )
     .bind(scopeTenantId, scopeTenantId)
     .all<Row>();
-  for (const row of result.results ?? []) {
+  return matchRowsByHost(result.results ?? [], host);
+}
+
+function matchRowsByHost(
+  rows: Array<{ id: string; tenant_id: string; vault_id: string; auth: string }>,
+  host: string,
+): MatchedCred | null {
+  for (const row of rows) {
     let auth: CredentialAuth;
     try { auth = JSON.parse(row.auth) as CredentialAuth; } catch { continue; }
     if (!auth.mcp_server_url) continue;
@@ -281,7 +331,19 @@ const proxy = getLocal({
 // same handler thanks to mockttp's TLS termination.
 proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   const url = req.url;
-  const matched = await findCredentialForUrl(url);
+  // Session attribution rides in via mockttp socket metadata (proxy auth
+  // set by the sandbox adapters). Invalid signature with a configured key
+  // means someone inside a sandbox is forging attribution — fail closed.
+  const attr = parseVaultProxyTags(req.tags ?? []);
+  let matched: MatchedCred | null = null;
+  if (attr.sessionId && proxyKey && !verifyVaultProxyAttribution(attr, proxyKey)) {
+    logger.warn(
+      { op: "oma_vault.bad_attribution", session_id: attr.sessionId, url },
+      `rejecting unverified session attribution for ${url}`,
+    );
+  } else {
+    matched = await findCredentialForUrl(url, attr);
+  }
 
   // Strip any incoming Authorization headers — the agent must not be able
   // to override the injected value or smuggle a stolen token. Mirrors the
@@ -323,7 +385,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   if (matched) {
     headers[matched.injectHeader.name] = matched.injectHeader.value;
     logger.info(
-      { op: "oma_vault.inject", header: matched.injectHeader.name, url, credential_id: matched.credentialId },
+      { op: "oma_vault.inject", header: matched.injectHeader.name, url, credential_id: matched.credentialId, session_id: attr.sessionId },
       `inject ${matched.injectHeader.name} for ${url}`,
     );
   } else {
@@ -381,7 +443,7 @@ logger.info(
 // User-facing copy/paste env block — kept on stdout intentionally so first
 // run shows operators what to configure for sandbox processes.
 const caCert = resolve(caDir, "ca.crt");
-process.stdout.write(`\n# OMA vault sandbox env (copy into sandbox process):\nHTTPS_PROXY=http://localhost:${port}\nHTTP_PROXY=http://localhost:${port}\nNODE_EXTRA_CA_CERTS=${caCert}\nSSL_CERT_FILE=${caCert}\n\n`);
+process.stdout.write(`\n# OMA vault sandbox env (copy into sandbox process):\nHTTPS_PROXY=http://localhost:${port}\nHTTP_PROXY=http://localhost:${port}\nNODE_EXTRA_CA_CERTS=${caCert}\nSSL_CERT_FILE=${caCert}\n# Optional: set OMA_VAULT_PROXY_KEY (same value here and on main-node) to\n# make per-session vault attribution unforgeable from inside sandboxes.\n\n`);
 
 const shutdown = (signal: string) => {
   logger.info({ op: "oma_vault.shutdown", signal }, `received ${signal}, stopping proxy`);
