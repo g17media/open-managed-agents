@@ -299,6 +299,11 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     "host",
     "content-length",
     "connection",
+    // curl adds `Expect: 100-continue` on large uploads; undici's fetch
+    // refuses to forward it (NotSupportedError). The 100-continue dance
+    // already happened between client and mockttp (body is fully
+    // buffered here), so dropping it is semantically correct.
+    "expect",
     "keep-alive",
     "proxy-authorization",
     "proxy-connection",
