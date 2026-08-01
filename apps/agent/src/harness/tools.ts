@@ -37,7 +37,15 @@ export const OPT_IN_TOOLS = ["browser"];
 /** Backwards-compat union — used as the recognised-tool-name set for
  *  validation. New callers should prefer DEFAULT_TOOLS or OPT_IN_TOOLS. */
 export const ALL_TOOLS = [...DEFAULT_TOOLS, ...OPT_IN_TOOLS];
-const MAX_TOOL_RESULT_CHARS = 50000;
+// Default cap for tool-result text. Override per deployment with
+// OMA_TOOL_RESULT_MAX_CHARS (wired through buildTools' env param by both
+// runtimes) — buildTools stamps the module-level value below.
+const DEFAULT_MAX_TOOL_RESULT_CHARS = 50000;
+let MAX_TOOL_RESULT_CHARS = DEFAULT_MAX_TOOL_RESULT_CHARS;
+// Binary (image/document) results can't be truncated without corrupting
+// them — over this ceiling the read tool refuses with an error instead.
+// Scales with the text cap so one env var governs both.
+const binaryResultMaxChars = () => Math.max(MAX_TOOL_RESULT_CHARS * 40, 2_000_000);
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
 // Cap MCP client init + tools/list. Without this, a hung upstream
@@ -409,8 +417,15 @@ export async function buildTools(
       prompt: string;
       kind: "one_shot" | "cron";
     }>;
+    /** Tool-result text cap override (chars). Runtimes wire this from the
+     *  OMA_TOOL_RESULT_MAX_CHARS env var; unset = 50k default. */
+    toolResultMaxChars?: number;
   }
 ): Promise<Record<string, any>> {
+  MAX_TOOL_RESULT_CHARS =
+    env?.toolResultMaxChars && Number.isFinite(env.toolResultMaxChars) && env.toolResultMaxChars > 0
+      ? env.toolResultMaxChars
+      : DEFAULT_MAX_TOOL_RESULT_CHARS;
   const enabled = getEnabledTools(agentConfig.tools);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools: Record<string, any> = {};
@@ -491,12 +506,35 @@ export async function buildTools(
           const raw = await sandbox.exec(
             `(base64 -w0 ${shellQuote(file_path)} 2>/dev/null || base64 ${shellQuote(file_path)} | tr -d '\\n')`,
           );
+          // Exec output format differs per runtime: the CF sandbox prefixes
+          // "exit=N\n"; node adapters return bare stdout with an
+          // "[exit ...]" / "[error: ...]" suffix only on failure. The old
+          // prefix-only parse fell through to `return raw` on node —
+          // megabytes of base64 escaped as uncapped TEXT into the event
+          // log and every later prompt (sess-k6ouq0bukadsb27u: one PNG
+          // read → 1.99M tokens → every turn 400s "prompt is too long").
           const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
-          if (!m) return raw;
-          const code = parseInt(m[1], 10);
-          if (code !== 0) return `Error reading file (exit=${code}): ${m[2].slice(0, 200)}`;
-          const data = m[2].trimEnd();
+          let code: number;
+          let payload: string;
+          if (m) {
+            code = parseInt(m[1], 10);
+            payload = m[2];
+          } else if (/\[(?:exit [^\]]+|error: [^\]]*)\]\s*$/.test(raw)) {
+            return `Error reading file: ${raw.slice(-300)}`;
+          } else {
+            code = 0;
+            payload = raw;
+          }
+          if (code !== 0) return `Error reading file (exit=${code}): ${payload.slice(0, 200)}`;
+          const data = payload.trim();
           if (!data) return "Error: file is empty or unreadable";
+          if (data.length > binaryResultMaxChars()) {
+            return (
+              `Error: file is too large to inline (${Math.round(data.length / 1024)}KB base64, ` +
+              `limit ${Math.round(binaryResultMaxChars() / 1024)}KB). ` +
+              `Resize or crop it first (e.g. with ImageMagick), or work with it on disk instead of reading it.`
+            );
+          }
 
           if (imageMedia) {
             return {

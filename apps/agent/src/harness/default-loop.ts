@@ -373,6 +373,11 @@ export class DefaultHarness implements HarnessInterface {
       // TTFT vs generation in the timeline. `stepSawFirstChunk` is the
       // per-step latch; reset on each onStepStart.
       let stepStartId: string | null = null;
+      // Last stream error captured by onError — consumeStream() swallows
+      // stream failures, so this is the only place the actual provider
+      // diagnostic (e.g. a 400 "prompt is too long") survives to the
+      // post-stream finishReason check below.
+      let lastStreamErrorMessage: string | null = null;
       let stepSawFirstChunk = false;
 
       const streamStartedAt = Date.now();
@@ -628,6 +633,7 @@ export class DefaultHarness implements HarnessInterface {
             message = `${message} [${e.statusCode ?? "?"}] ${e.responseBody ?? ""}`;
           }
         }
+        lastStreamErrorMessage = message;
         runtime.broadcast({
           type: "span.model_request_end",
           model: modelId,
@@ -725,6 +731,24 @@ export class DefaultHarness implements HarnessInterface {
       const toolCalls = await r.toolCalls;
       const toolResults = await r.toolResults;
       const usage = await r.usage;
+
+      // Stream errored (provider 4xx/5xx mid-stream). consumeStream()
+      // swallowed the exception and the finish* reads above resolve
+      // normally with finishReason="error" — without this check the turn
+      // "completes" having emitted nothing: no agent.message, no
+      // session.error, the UI just sits there (observed
+      // sess-k6ouq0bukadsb27u: prompt-too-long 400 recorded only as a
+      // span, session looked frozen). Throw so processUserMessage /
+      // the runtime shell surfaces a session.error the user can see.
+      if (finishReason === "error") {
+        if (currentMessageId) {
+          await runtime.broadcastStreamEnd(currentMessageId, "aborted", "stream_error");
+          currentMessageId = null;
+        }
+        throw new ModelError(
+          lastStreamErrorMessage ?? "model stream errored (no diagnostic captured)",
+        );
+      }
 
       // Silent-stop detection: model returned with empty text + no tool
       // calls mid-conversation. Two flavors observed on MiniMax-M2:
