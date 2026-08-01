@@ -119,9 +119,14 @@ The agent's `bash` / `read` / `write` / etc. tools execute in a sandbox.
 | `boxrun` | Multi-host with KVM, OMA pods on managed k8s | `SANDBOX_PROVIDER=boxrun BOXRUN_URL=http://host:8100/v1/default`. Run `boxlite serve` on a separate KVM host; OMA pods reach it over HTTP. |
 | `daytona` | Production / untrusted code | `SANDBOX_PROVIDER=daytona DAYTONA_API_KEY=...` (+ optional `DAYTONA_API_URL`). Daytona-managed Linux VMs, one per session. |
 | `e2b` | E2B SaaS / E2B Infra self-host / Aliyun Agent Sandbox (e2b-compatible) | `SANDBOX_PROVIDER=e2b E2B_API_KEY=...` (+ optional `E2B_API_URL` for non-default endpoint). Firecracker microVMs. |
+| `belljar` | Container isolation on your own Docker/Podman host, no cloud account — same `cloudflare/sandbox` runtime as the CF deploy | `SANDBOX_PROVIDER=belljar BELLJAR_URL=http://belljar:8877 BELLJAR_TOKEN=...`. Run [belljar](https://github.com/g17media/belljar) next to an engine socket. Leave `SANDBOX_IMAGE` unset (must be a `cloudflare/sandbox`-derived image if set). |
 
 **Remote sandboxes** (Daytona, E2B, BoxRun) sharing memory mounts use
 `MEMORY_S3_*` env (any S3-compatible store — AWS / R2 / OSS / MinIO).
+Belljar mounts memory stores and session outputs as Docker binds instead:
+allowlist the data dir's host path with `BELLJAR_ALLOWED_MOUNT_ROOTS` on
+the belljar server, and set `BELLJAR_MOUNT_PATH_MAP=/app/data=<host data
+dir>` on OMA when it runs in a container (see `.env.example`).
 
 ## Vault sidecar (outbound credential injection)
 

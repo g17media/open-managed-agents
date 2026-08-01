@@ -475,6 +475,7 @@ const SANDBOX_PROVIDER_PATHS: Record<string, string> = {
   litebox: "@open-managed-agents/sandbox/adapters/litebox",
   boxlite: "@open-managed-agents/sandbox/adapters/litebox",
   boxrun: "@open-managed-agents/sandbox/adapters/boxrun",
+  belljar: "@open-managed-agents/sandbox/adapters/belljar",
   daytona: "@open-managed-agents/sandbox/adapters/daytona",
   e2b: "@open-managed-agents/sandbox/adapters/e2b",
 };
