@@ -639,6 +639,7 @@ function AddCredentialModal({
       | "none",
     clientId: "",
     clientSecret: "",
+    scopes: "",
   });
   const [tokenSectionOpen, setTokenSectionOpen] = useState(false);
   const [refreshSectionOpen, setRefreshSectionOpen] = useState(false);
@@ -725,7 +726,7 @@ function AddCredentialModal({
 
   const connectMcp = (
     entry: McpRegistryEntry | { name: string; url: string },
-    opts?: { clientId?: string; clientSecret?: string },
+    opts?: { clientId?: string; clientSecret?: string; scopes?: string },
   ) => {
     setConnecting(entry.name);
     const params = new URLSearchParams({
@@ -735,6 +736,7 @@ function AddCredentialModal({
     });
     if (opts?.clientId) params.set("client_id", opts.clientId);
     if (opts?.clientSecret) params.set("client_secret", opts.clientSecret);
+    if (opts?.scopes?.trim()) params.set("scope", opts.scopes.trim());
     window.open(
       `/v1/oauth/authorize?${params.toString()}`,
       "oauth",
@@ -796,7 +798,11 @@ function AddCredentialModal({
             customForm.name || customForm.pickedName || customForm.url,
           url: customForm.url,
         },
-        { clientId: customForm.clientId, clientSecret: customForm.clientSecret },
+        {
+          clientId: customForm.clientId,
+          clientSecret: customForm.clientSecret,
+          scopes: customForm.scopes,
+        },
       );
     }
   };
@@ -1197,13 +1203,14 @@ function AddCredentialModal({
               </div>
             </Disclosure>
           )}
-          {/* OAuth client credentials (Optional) — only shown for the
-              OAuth flow. Lets the user override the server's preset
-              client_id/secret on a per-credential basis (GitHub, Feishu,
-              any provider that doesn't support DCR). */}
+          {/* OAuth options (Optional) — only shown for the OAuth flow.
+              Client id/secret override the server's preset on a
+              per-credential basis (GitHub, Feishu, any provider that
+              doesn't support DCR); scopes are requested in addition to
+              whatever the server's metadata advertises. */}
           {customForm.type === "oauth" && !customForm.token && (
             <Disclosure
-              title="OAuth client credentials"
+              title="OAuth options"
               meta={
                 <span className="px-1.5 py-0.5 rounded bg-bg-surface">
                   Optional
@@ -1239,6 +1246,20 @@ function AddCredentialModal({
                   For OAuth providers that don't support Dynamic Client
                   Registration (GitHub, Feishu) — supply a client_id/secret from
                   a pre-registered app.
+                </div>
+                <input
+                  value={customForm.scopes}
+                  onChange={(e) =>
+                    setCustomForm({ ...customForm, scopes: e.target.value })
+                  }
+                  placeholder="Additional scopes (space-separated)"
+                  aria-label="Additional OAuth scopes"
+                  className={inputCls}
+                />
+                <div className="text-xs text-fg-subtle">
+                  Requested on top of the server's advertised scopes — e.g.{" "}
+                  <span className="font-mono">offline_access</span> for servers
+                  that only issue refresh tokens when it's asked for.
                 </div>
               </div>
             </Disclosure>

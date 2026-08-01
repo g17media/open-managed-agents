@@ -937,6 +937,10 @@ export interface CredentialAuth {
   client_secret?: string;
   expires_at?: string;           // ISO 8601, when access_token expires
   authorization_server?: string; // cached OAuth authorization server URL
+  // Space-delimited OAuth scopes granted (or requested when the token
+  // response omitted `scope`). Reused as the default on re-authorization
+  // so user-added scopes (e.g. offline_access) survive reconnects.
+  scope?: string;
   // static_bearer / cap_cli fields
   token?: string;
   // Provider tag: when set, the outbound proxy can request a token refresh
