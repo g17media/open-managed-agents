@@ -47,6 +47,82 @@ import type { EventStreamHub } from "./lib/event-stream-hub.js";
 
 const log = getLogger("session-registry");
 
+export interface SessionMemoryBinding {
+  storeId: string;
+  storeName: string;
+  readOnly: boolean;
+  description: string | null;
+  /** Per-attachment instructions — only carried by the standard
+   *  session-resources shape; the legacy bind table has none. */
+  instructions: string | null;
+}
+
+/**
+ * Per-session memory bindings from BOTH storage shapes, deduped by
+ * store id:
+ *   - `session_memory_stores` — node-only bind route (legacy, kept
+ *     working)
+ *   - session resources of type 'memory_store' — the standard resources
+ *     route + session-create resources (shared package). Read via the
+ *     SessionService port, NOT raw SQL: the underlying table shape
+ *     differs per dialect (sqlite stores a JSON `config` blob, pg
+ *     flattens typed columns) and the store adapters own that mapping.
+ * Before this union the node mount path only read the legacy table, so
+ * memory stores attached through the standard route never mounted.
+ *
+ * Standalone (not a registry method) because the harness-context builder
+ * resolves the same bindings to describe the mounts in the system prompt
+ * — one source of truth so the prompt can't drift from what's mounted.
+ */
+export async function resolveSessionMemoryBindings(
+  deps: Pick<SessionRegistryDeps, "sql" | "sessionsService" | "memoryService">,
+  sessionId: string,
+  tenantId: string,
+): Promise<SessionMemoryBinding[]> {
+  const bindings: Array<{
+    store_id: string;
+    access: string | null;
+    instructions: string | null;
+  }> = [];
+  const legacy = await deps.sql
+    .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
+    .bind(sessionId)
+    .all<{ store_id: string; access: string }>();
+  for (const b of legacy.results ?? []) {
+    bindings.push({ store_id: b.store_id, access: b.access, instructions: null });
+  }
+  const resourceRows = await deps.sessionsService.listResourcesBySession({ sessionId });
+  for (const row of resourceRows) {
+    if (row.type !== "memory_store" || row.resource.type !== "memory_store") continue;
+    if (!row.resource.memory_store_id) continue;
+    bindings.push({
+      store_id: row.resource.memory_store_id,
+      access: row.resource.access ?? null,
+      instructions:
+        typeof (row.resource as { instructions?: unknown }).instructions === "string"
+          ? (row.resource as { instructions: string }).instructions
+          : null,
+    });
+  }
+
+  const out: SessionMemoryBinding[] = [];
+  const seen = new Set<string>();
+  for (const binding of bindings) {
+    if (seen.has(binding.store_id)) continue;
+    seen.add(binding.store_id);
+    const store = await deps.memoryService.getStore({ tenantId, storeId: binding.store_id });
+    if (!store) continue;
+    out.push({
+      storeId: binding.store_id,
+      storeName: store.name,
+      readOnly: binding.access === "read_only",
+      description: store.description ?? null,
+      instructions: binding.instructions,
+    });
+  }
+  return out;
+}
+
 export interface SessionRegistryDeps {
   sql: SqlClient;
   hub: EventStreamHub;
@@ -250,53 +326,16 @@ export class SessionRegistry {
 
   // ── helpers ─────────────────────────────────────────────────────────
 
-  /**
-   * Per-session memory bindings from BOTH storage shapes, deduped by
-   * store id:
-   *   - `session_memory_stores` — node-only bind route (legacy, kept
-   *     working)
-   *   - session resources of type 'memory_store' — the standard resources
-   *     route + session-create resources (shared package). Read via the
-   *     SessionService port, NOT raw SQL: the underlying table shape
-   *     differs per dialect (sqlite stores a JSON `config` blob, pg
-   *     flattens typed columns) and the store adapters own that mapping.
-   * Before this union the node mount path only read the legacy table, so
-   * memory stores attached through the standard route never mounted.
-   */
   private async resolveMemoryMounts(
     sessionId: string,
     tenantId: string,
   ): Promise<OrchestratorMemoryMount[]> {
-    const bindings: Array<{ store_id: string; access: string | null }> = [];
-    const legacy = await this.deps.sql
-      .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
-      .bind(sessionId)
-      .all<{ store_id: string; access: string }>();
-    bindings.push(...(legacy.results ?? []));
-    const resourceRows = await this.deps.sessionsService.listResourcesBySession({ sessionId });
-    for (const row of resourceRows) {
-      if (row.type !== "memory_store" || row.resource.type !== "memory_store") continue;
-      if (!row.resource.memory_store_id) continue;
-      bindings.push({
-        store_id: row.resource.memory_store_id,
-        access: row.resource.access ?? null,
-      });
-    }
-
-    const memoryMounts: OrchestratorMemoryMount[] = [];
-    const seen = new Set<string>();
-    for (const binding of bindings) {
-      if (seen.has(binding.store_id)) continue;
-      seen.add(binding.store_id);
-      const store = await this.deps.memoryService.getStore({ tenantId, storeId: binding.store_id });
-      if (!store) continue;
-      memoryMounts.push({
-        storeName: store.name,
-        storeId: binding.store_id,
-        readOnly: binding.access === "read_only",
-      });
-    }
-    return memoryMounts;
+    const bindings = await resolveSessionMemoryBindings(this.deps, sessionId, tenantId);
+    return bindings.map((b) => ({
+      storeName: b.storeName,
+      storeId: b.storeId,
+      readOnly: b.readOnly,
+    }));
   }
 
   private async build(

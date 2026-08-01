@@ -150,7 +150,7 @@ import {
 } from "./lib/event-stream-hub";
 import { PgEventStreamHub } from "./lib/pg-event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
-import { SessionRegistry } from "./registry.js";
+import { SessionRegistry, resolveSessionMemoryBindings } from "./registry.js";
 
 const toMarkdownProvider = nodeToMarkdown();
 
@@ -676,6 +676,36 @@ const sessionRegistry = new SessionRegistry({
     // sessions resolve to {} (a safe no-op spread). Token handling lives inside
     // FeishuApiClient — see lib/feishu-agent-tools.ts.
     const feishuTools = await resolveFeishuAgentTools(input.sessionId);
+    // Memory-store mount descriptors → system prompt, mirroring the CF
+    // SessionDO's platformReminders block format. Resolved per turn from
+    // the same binding union the mounter uses, so stores attached
+    // mid-session are announced on the next turn.
+    const memoryReminders: Array<{ source: string; text: string }> = [];
+    try {
+      const bindings = await resolveSessionMemoryBindings(
+        { sql, sessionsService, memoryService },
+        input.sessionId,
+        input.tenantId,
+      );
+      for (const b of bindings) {
+        const accessLabel = b.readOnly ? "read-only" : "read-write";
+        const lines = [
+          `## Memory store: ${b.storeName}`,
+          `Mounted at /mnt/memory/${b.storeName}/ (${accessLabel})`,
+        ];
+        if (b.description) lines.push(b.description);
+        if (b.instructions) lines.push(b.instructions);
+        if (b.readOnly) {
+          lines.push("(read-only mount — write attempts to this directory will fail)");
+        }
+        memoryReminders.push({ source: `memory:${b.storeId}`, text: lines.join("\n") });
+      }
+    } catch (err) {
+      logger.warn(
+        { err, op: "main-node.memory_reminders_failed", session_id: input.sessionId },
+        "memory store metadata fetch failed; prompt omits mount descriptors",
+      );
+    }
     return {
       agent: input.agent,
       userMessage: input.userMessage,
@@ -685,7 +715,7 @@ const sessionRegistry = new SessionRegistry({
         ...feishuTools,
       } as HarnessContext["tools"],
       model: input.model,
-      systemPrompt: composeSystemPrompt(rawSystemPrompt),
+      systemPrompt: composeSystemPrompt(rawSystemPrompt, memoryReminders),
       rawSystemPrompt,
       env: {
         ANTHROPIC_API_KEY: creds.apiKey,
