@@ -35,6 +35,7 @@ import type {
 } from "@open-managed-agents/sandbox/orchestrator";
 import type { AgentService } from "@open-managed-agents/agents-store";
 import type { MemoryStoreService } from "@open-managed-agents/memory-store";
+import type { SessionService } from "@open-managed-agents/sessions-store";
 import type {
   AgentConfig,
   SessionEvent,
@@ -51,6 +52,9 @@ export interface SessionRegistryDeps {
   hub: EventStreamHub;
   agentsService: AgentService;
   memoryService: MemoryStoreService;
+  /** Standard session resources reader — memory_store resources attached
+   *  via the shared routes mount from here (see resolveMemoryMounts). */
+  sessionsService: SessionService;
   /** Sandbox provisioning — vault outbound, mounts, backup-restore.
    *  Replaces the per-runtime buildMemoryMounter / buildSessionOutputsMounter
    *  hooks from before P5. */
@@ -103,6 +107,10 @@ interface SessionEntry {
   machine: SessionStateMachine;
   sandbox: SandboxExecutor;
   eventLog: SqlEventLog;
+  /** Memory store ids already mounted into this entry's sandbox. Lets
+   *  syncMemoryMounts() mount stores attached mid-session without
+   *  re-provisioning (provision runs once per entry lifetime). */
+  mountedStoreIds: Set<string>;
 }
 
 export class SessionRegistry {
@@ -199,7 +207,92 @@ export class SessionRegistry {
     });
   }
 
+  /**
+   * Mount memory stores attached AFTER the session entry was provisioned
+   * (POST /v1/sessions/:id/resources or the node-only memory_stores bind
+   * route). Diffs the live bindings against what this entry already
+   * mounted and mounts only the additions. No-op when the session has no
+   * in-process entry yet — the next getOrCreate provisions from scratch
+   * and picks everything up.
+   */
+  async syncMemoryMounts(sessionId: string, tenantId: string): Promise<void> {
+    const p = this.map.get(sessionId);
+    if (!p) return;
+    const entry = await p;
+    if (!entry.sandbox.mountMemoryStore) return;
+    const mounts = await this.resolveMemoryMounts(sessionId, tenantId);
+    for (const m of mounts) {
+      if (entry.mountedStoreIds.has(m.storeId)) continue;
+      try {
+        await entry.sandbox.mountMemoryStore({
+          storeName: m.storeName,
+          storeId: m.storeId,
+          readOnly: m.readOnly,
+        });
+        entry.mountedStoreIds.add(m.storeId);
+        log.info(
+          { op: "session_registry.memory_mount.synced", session_id: sessionId, store_id: m.storeId },
+          `mounted memory store ${m.storeId} into live session ${sessionId}`,
+        );
+      } catch (err) {
+        log.error(
+          { err, op: "session_registry.memory_mount.sync_failed", session_id: sessionId, store_id: m.storeId },
+          `mid-session memory mount failed for ${m.storeId}`,
+        );
+      }
+    }
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Per-session memory bindings from BOTH storage shapes, deduped by
+   * store id:
+   *   - `session_memory_stores` — node-only bind route (legacy, kept
+   *     working)
+   *   - session resources of type 'memory_store' — the standard resources
+   *     route + session-create resources (shared package). Read via the
+   *     SessionService port, NOT raw SQL: the underlying table shape
+   *     differs per dialect (sqlite stores a JSON `config` blob, pg
+   *     flattens typed columns) and the store adapters own that mapping.
+   * Before this union the node mount path only read the legacy table, so
+   * memory stores attached through the standard route never mounted.
+   */
+  private async resolveMemoryMounts(
+    sessionId: string,
+    tenantId: string,
+  ): Promise<OrchestratorMemoryMount[]> {
+    const bindings: Array<{ store_id: string; access: string | null }> = [];
+    const legacy = await this.deps.sql
+      .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
+      .bind(sessionId)
+      .all<{ store_id: string; access: string }>();
+    bindings.push(...(legacy.results ?? []));
+    const resourceRows = await this.deps.sessionsService.listResourcesBySession({ sessionId });
+    for (const row of resourceRows) {
+      if (row.type !== "memory_store" || row.resource.type !== "memory_store") continue;
+      if (!row.resource.memory_store_id) continue;
+      bindings.push({
+        store_id: row.resource.memory_store_id,
+        access: row.resource.access ?? null,
+      });
+    }
+
+    const memoryMounts: OrchestratorMemoryMount[] = [];
+    const seen = new Set<string>();
+    for (const binding of bindings) {
+      if (seen.has(binding.store_id)) continue;
+      seen.add(binding.store_id);
+      const store = await this.deps.memoryService.getStore({ tenantId, storeId: binding.store_id });
+      if (!store) continue;
+      memoryMounts.push({
+        storeName: store.name,
+        storeId: binding.store_id,
+        readOnly: binding.access === "read_only",
+      });
+    }
+    return memoryMounts;
+  }
 
   private async build(
     sessionId: string,
@@ -212,20 +305,7 @@ export class SessionRegistry {
     // the whole bundle to the orchestrator. The orchestrator owns
     // ordering (vault outbound first, restore second, mounts last) so
     // the registry no longer reasons about it.
-    const memoryBindings = await this.deps.sql
-      .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
-      .bind(sessionId)
-      .all<{ store_id: string; access: string }>();
-    const memoryMounts: OrchestratorMemoryMount[] = [];
-    for (const binding of memoryBindings.results ?? []) {
-      const store = await this.deps.memoryService.getStore({ tenantId, storeId: binding.store_id });
-      if (!store) continue;
-      memoryMounts.push({
-        storeName: store.name,
-        storeId: binding.store_id,
-        readOnly: binding.access === "read_only",
-      });
-    }
+    const memoryMounts = await this.resolveMemoryMounts(sessionId, tenantId);
     await this.deps.sandboxOrchestrator.provision(sandbox, {
       sessionId,
       tenantId,
@@ -271,6 +351,11 @@ export class SessionRegistry {
       publish: (event: SessionEvent) => this.deps.hub.publish(sessionId, event),
     });
 
-    return { machine, sandbox, eventLog };
+    return {
+      machine,
+      sandbox,
+      eventLog,
+      mountedStoreIds: new Set(memoryMounts.map((m) => m.storeId)),
+    };
   }
 }
