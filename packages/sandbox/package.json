@@ -11,7 +11,8 @@
     "./adapters/litebox": "./src/adapters/litebox.ts",
     "./adapters/boxrun": "./src/adapters/boxrun.ts",
     "./adapters/belljar": "./src/adapters/belljar.ts",
-    "./orchestrator": "./src/orchestrator.ts"
+    "./orchestrator": "./src/orchestrator.ts",
+    "./vault-proxy": "./src/vault-proxy.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

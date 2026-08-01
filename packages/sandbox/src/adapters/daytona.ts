@@ -31,6 +31,7 @@
 
 import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
 import { readS3MemoryBucket } from "../ports";
+import { sessionVaultProxyUrl } from "../vault-proxy";
 import { promises as fs } from "node:fs";
 import { getLogger } from "@open-managed-agents/observability";
 
@@ -157,22 +158,23 @@ export class DaytonaSandbox implements SandboxExecutor {
     this.commandSecrets.push({ prefix: commandPrefix, secrets });
   }
 
-  async setOutboundContext(_opts?: { tenantId: string; sessionId: string }): Promise<void> {
-    const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
+  async setOutboundContext(opts?: { tenantId: string; sessionId: string }): Promise<void> {
+    const baseProxyUrl = process.env.OMA_VAULT_PROXY_URL;
     const caCertPath = process.env.OMA_VAULT_CA_CERT;
-    if (!proxyUrl || !caCertPath) return;
+    if (!baseProxyUrl || !caCertPath) return;
     // Defer the actual cert upload until the sandbox is created — we need
     // the box to exist before we can fs.uploadFile into it. The proxy URL
     // must be reachable from inside the Daytona sandbox network; if it's
     // a localhost URL the operator probably wants ngrok / a public URL
     // for remote deploys.
-    if (proxyUrl.startsWith("http://localhost") || proxyUrl.startsWith("http://127.")) {
+    if (baseProxyUrl.startsWith("http://localhost") || baseProxyUrl.startsWith("http://127.")) {
       this.logger.warn(
-        `[daytona] OMA_VAULT_PROXY_URL points at localhost (${proxyUrl}) — ` +
+        `[daytona] OMA_VAULT_PROXY_URL points at localhost (${baseProxyUrl}) — ` +
         `this is unreachable from inside Daytona's network. Set a public URL ` +
         `or tunnel the vault (e.g. ngrok http 14322).`,
       );
     }
+    const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
     this.pendingCaUpload = { hostPath: caCertPath };
     const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
     await this.setEnvVars({

@@ -56,6 +56,7 @@
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
+import { sessionVaultProxyUrl } from "../vault-proxy";
 import { getLogger } from "@open-managed-agents/observability";
 
 const moduleLogger = getLogger("belljar-sandbox");
@@ -171,21 +172,22 @@ export class BelljarSandbox implements SandboxExecutor {
     this.commandSecrets.push({ prefix: commandPrefix, secrets });
   }
 
-  async setOutboundContext(_opts?: { tenantId: string; sessionId: string }): Promise<void> {
+  async setOutboundContext(opts?: { tenantId: string; sessionId: string }): Promise<void> {
     // Same env-var pattern as the other remote adapters: point the
     // container at the oma-vault MITM proxy and trust its CA. The sandbox
     // is a sibling container on the belljar host — a localhost proxy URL
     // resolves to the *sandbox* container, not the OMA host. Use
     // host.docker.internal / a routable address instead.
-    const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
+    const baseProxyUrl = process.env.OMA_VAULT_PROXY_URL;
     const caCertPath = process.env.OMA_VAULT_CA_CERT;
-    if (!proxyUrl || !caCertPath) return;
-    if (proxyUrl.startsWith("http://localhost") || proxyUrl.startsWith("http://127.")) {
+    if (!baseProxyUrl || !caCertPath) return;
+    if (baseProxyUrl.startsWith("http://localhost") || baseProxyUrl.startsWith("http://127.")) {
       this.logger.warn(
-        `belljar: OMA_VAULT_PROXY_URL points at localhost (${proxyUrl}) — ` +
+        `belljar: OMA_VAULT_PROXY_URL points at localhost (${baseProxyUrl}) — ` +
         `unreachable from inside the sandbox container. Use host.docker.internal or a routable host.`,
       );
     }
+    const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
     const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
     await this.setEnvVars({
       HTTP_PROXY: proxyUrl,
