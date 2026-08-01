@@ -61,6 +61,8 @@ services:
     depends_on:
       oma-vault:
         condition: service_started
+      belljar:
+        condition: service_started
     restart: unless-stopped
     # Healthcheck queries /health every 30s. unhealthy after 3 misses
     # (90s grace), at which point Docker / your orchestrator can decide
@@ -71,6 +73,33 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # Sandbox provider (SANDBOX_PROVIDER=belljar) — REST control plane that
+  # creates cloudflare/sandbox containers as SIBLINGS through the mounted
+  # engine socket. Networking: sandboxes attach to this compose network
+  # (BELLJAR_NETWORK), so they reach oma-vault by service name, and
+  # belljar dials their container IPs directly (BELLJAR_NETWORK_MODE=direct
+  # — no per-sandbox published ports). Build the image once with:
+  #   docker build -t belljar:dev <path-to-belljar-checkout>
+  belljar:
+    image: belljar:dev
+    container_name: belljar
+    environment:
+      BELLJAR_TOKEN: ${BELLJAR_TOKEN:-}
+      BELLJAR_NETWORK: open-managed-agents_default
+      BELLJAR_NETWORK_MODE: direct
+      # Host path prefix that sandbox bind mounts (/mnt/memory,
+      # /mnt/session/outputs) may live under — the HOST side of the
+      # ./data:/app/data bind above. Set OMA_DATA_HOST_DIR in .env to the
+      # absolute path of this repo's ./data dir; unset = mounts rejected.
+      BELLJAR_ALLOWED_MOUNT_ROOTS: ${OMA_DATA_HOST_DIR:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      # Host-side debugging only (curl the API, list sandboxes). The
+      # oma-server → belljar path stays on the compose network.
+      - "127.0.0.1:8877:8877"
+    restart: unless-stopped
 
   # Outbound credential injector — mockttp HTTPS MITM proxy. Reads vault
   # credentials from the same sqlite db as oma-server (./data/oma.db) and
@@ -97,3 +126,10 @@ services:
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+
+# Pin the default network's name so BELLJAR_NETWORK can reference it
+# stably. It matches what compose already derives from the project dir,
+# so existing deployments keep their network untouched.
+networks:
+  default:
+    name: open-managed-agents_default
