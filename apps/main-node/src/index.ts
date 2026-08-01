@@ -543,12 +543,20 @@ async function resolveNodeModelCreds(
           OAI.has(card.provider) || ANT.has(card.provider)
             ? (card.provider as "ant" | "ant-compatible" | "oai" | "oai-compatible")
             : undefined;
+        // NULL base_url / custom_headers = provider default. The ANTHROPIC_*
+        // env fallbacks are Anthropic-specific — leaking them onto the OpenAI
+        // path sends gpt-* calls to api.anthropic.com/v1/chat/completions,
+        // which rejects the card's key with 401 "Invalid Anthropic API Key".
+        const isOaiCard = OAI.has(card.provider);
         return {
           wireModel: card.model,
           apiKey: key,
-          baseURL: card.base_url ?? undefined,
+          baseURL:
+            card.base_url ?? (isOaiCard ? undefined : process.env.ANTHROPIC_BASE_URL),
           apiCompat,
-          customHeaders: card.custom_headers ?? undefined,
+          customHeaders:
+            card.custom_headers ??
+            (isOaiCard ? undefined : parseCustomHeaders(process.env.ANTHROPIC_CUSTOM_HEADERS)),
         };
       }
     }

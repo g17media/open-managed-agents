@@ -3522,6 +3522,13 @@ export class SessionDO extends DurableObject<Env> {
             provider = card.provider;
             wireModel = card.model;
             if (card.base_url) baseURL = card.base_url;
+            else if (card.provider === "oai" || card.provider === "oai-compatible") {
+              // NULL base_url = provider default. The ANTHROPIC_BASE_URL env
+              // fallback is Anthropic-specific — leaking it onto the OpenAI
+              // path sends gpt-* calls to api.anthropic.com/v1/chat/completions,
+              // which rejects the card's key with 401 "Invalid Anthropic API Key".
+              baseURL = undefined;
+            }
             if (card.custom_headers) customHeaders = card.custom_headers;
             console.log(`[model-card] resolved from D1: id=${card.id} model_id=${card.model_id} model=${card.model} baseURL=${card.base_url ?? "(default)"} provider=${card.provider}`);
           }
