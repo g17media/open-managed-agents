@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { createSqliteSessionService } from "@open-managed-agents/sessions-store";
 import { DefaultSandboxOrchestrator } from "@open-managed-agents/sandbox/orchestrator";
 import type { SandboxExecutor } from "@open-managed-agents/sandbox";
-import { SessionRegistry } from "../src/registry.js";
+import { SessionRegistry, resolveSessionMemoryBindings } from "../src/registry.js";
 import { bootstrapTestDb, type TestDb } from "./_helpers/bootstrap-test-db.js";
 
 const TENANT = "tn_test";
@@ -131,6 +131,49 @@ describe("SessionRegistry memory mounts", () => {
     // Re-sync is a no-op — already mounted.
     await registry.syncMemoryMounts(session.id, TENANT);
     expect(mounts.map((m) => m.storeId)).toEqual(["ms-added"]);
+  });
+
+  it("resolveSessionMemoryBindings carries access + per-attachment instructions", async () => {
+    const db = await bootstrapTestDb();
+    cleanups.push(db.cleanup);
+    const sessionsService = createSqliteSessionService({ db: db.db });
+    const { session } = await sessionsService.create({
+      tenantId: TENANT,
+      agentId: "agent-1",
+      environmentId: "env-local-runtime",
+      resources: [
+        {
+          type: "memory_store",
+          memory_store_id: "ms-1",
+          access: "read_only",
+          instructions: "Check before starting any task.",
+        } as never,
+      ],
+    });
+    const bindings = await resolveSessionMemoryBindings(
+      {
+        sql: db.sql,
+        sessionsService,
+        memoryService: {
+          getStore: async ({ storeId }: { storeId: string }) => ({
+            id: storeId,
+            name: `name-of-${storeId}`,
+            description: "Project notes",
+          }),
+        } as never,
+      },
+      session.id,
+      TENANT,
+    );
+    expect(bindings).toEqual([
+      {
+        storeId: "ms-1",
+        storeName: "name-of-ms-1",
+        readOnly: true,
+        description: "Project notes",
+        instructions: "Check before starting any task.",
+      },
+    ]);
   });
 
   it("syncMemoryMounts is a no-op for sessions with no in-process entry", async () => {
