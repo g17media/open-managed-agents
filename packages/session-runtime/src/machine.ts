@@ -177,6 +177,25 @@ export class SessionStateMachine {
 
       const harness = this.deps.buildHarness();
       await harness.run(ctx);
+    } catch (err) {
+      // Surface the failure to the user: persist + publish session.error
+      // so the console shows the actual diagnostic (model 4xx, tool
+      // crash, …) instead of a turn that silently produces nothing.
+      // Then re-throw — the shell keeps its own logging/decisions.
+      const message = err instanceof Error ? err.message : String(err);
+      const errorEvent = {
+        type: "session.error",
+        error: { type: "harness_error", message: message.slice(0, 1000) },
+      } as unknown as SessionEvent;
+      try {
+        await this.deps.adapter.eventLog.append(errorEvent);
+        this.deps.publish(errorEvent);
+      } catch (persistErr) {
+        this.logger.warn(
+          `failed to persist session.error: ${(persistErr as Error).message}`,
+        );
+      }
+      throw err;
     } finally {
       this.activeTurnId = null;
       await this.deps.adapter.endTurn(this.deps.sessionId, turnId, "idle");

@@ -613,6 +613,7 @@ const sessionRegistry = new SessionRegistry({
       toMarkdown: toMarkdownProvider,
       tenantId,
       sessionId,
+      toolResultMaxChars: parseInt(process.env.OMA_TOOL_RESULT_MAX_CHARS ?? "", 10) || undefined,
       // In-process equivalent of CF's MAIN_MCP service binding
       // (McpProxyRpc.fetch): resolve the vault credential by server
       // name, swap Authorization, forward with 401-refresh-and-retry.
@@ -713,15 +714,12 @@ const services: RouteServices = {
           entry.machine.runHarnessTurn(agentId, ev as import("@open-managed-agents/shared").UserMessageEvent),
         )
         .catch((err) => {
+          // session.error persistence + publish happens inside
+          // SessionStateMachine.runHarnessTurn's catch — log only here.
           logger.error(
             { err, op: "session.harness_turn.failed", session_id: sid, agent_id: agentId },
             "harness turn failed",
           );
-          void newEventLog(sid).appendAsync({
-            type: "session.error",
-            error: "harness_turn_failed",
-            message: err instanceof Error ? err.message : String(err),
-          } as unknown as SessionEvent);
         });
     },
     interrupt: (sid) => {
