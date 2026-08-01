@@ -39,6 +39,15 @@ export type { MemoryRoutesDeps } from "./memory";
 export { buildDreamRoutes } from "./dreams";
 export type { DreamRoutesDeps } from "./dreams";
 
+export { buildDeploymentRoutes, runDeployment, deploymentsTick } from "./deployments";
+export type {
+  DeploymentRoutesDeps,
+  DeploymentRunContext,
+  DeploymentRunServices,
+  DeploymentsTickDeps,
+  DeploymentsTickShard,
+} from "./deployments";
+
 export { buildTenantRoutes, buildMeRoutes } from "./tenants";
 export type { TenantRoutesDeps, MeRoutesDeps } from "./tenants";
 
