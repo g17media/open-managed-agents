@@ -290,6 +290,7 @@ export default defineConfig({
       { find: "@open-managed-agents/sandbox-adapter-daytona", replacement: "./packages/sandbox-adapter-daytona/src/index.ts" },
       { find: "@open-managed-agents/sandbox-adapter-e2b", replacement: "./packages/sandbox-adapter-e2b/src/index.ts" },
       { find: "@open-managed-agents/sandbox-adapter-boxrun", replacement: "./packages/sandbox-adapter-boxrun/src/index.ts" },
+      { find: "@open-managed-agents/sandbox/vault-proxy", replacement: "./packages/sandbox/src/vault-proxy.ts" },
       { find: "@open-managed-agents/sandbox", replacement: "./packages/sandbox/src/index.ts" },
       { find: "@open-managed-agents/runtime-resource-contract", replacement: "./packages/runtime-resource-contract/src/index.ts" },
       { find: "@open-managed-agents/runtime-resource-fence-sql", replacement: "./packages/runtime-resource-fence-sql/src/index.ts" },
