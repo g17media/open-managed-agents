@@ -137,6 +137,17 @@ export interface SessionLifecycleHooks {
     tenantId: string;
     sessionId: string;
   }) => Promise<void>;
+  /** Called after a resource is attached to a session so the runtime can
+   *  apply it to an already-provisioned sandbox without waiting for a
+   *  re-provision. Node wires this to SessionRegistry.syncMemoryMounts;
+   *  CF leaves it unset (its warmup re-mounts on container recycle).
+   *  Failures are logged, never surfaced — the resource row is the
+   *  source of truth and the next provision retries. */
+  onResourceAttached?: (input: {
+    tenantId: string;
+    sessionId: string;
+    resourceType: string;
+  }) => Promise<void>;
   /** Promote a sandbox path to a first-class file_id (POST /sessions/:id/files). */
   promoteSandboxFile?: (input: {
     tenantId: string;
@@ -1155,6 +1166,13 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
               : undefined,
         } as never,
       });
+      if (deps.lifecycle?.onResourceAttached) {
+        await deps.lifecycle
+          .onResourceAttached({ tenantId: t, sessionId, resourceType: body.type })
+          .catch((err) =>
+            console.warn(`[sessions] onResourceAttached failed for ${sessionId}:`, err),
+          );
+      }
       return c.json(added.resource, 201);
     } catch (err) {
       return mapSessionError(c, err);
