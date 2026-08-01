@@ -121,6 +121,7 @@ export function SessionDetail() {
     | null
   >(null);
   const [showFiles, setShowFiles] = useState(false);
+  const [showVaultSwap, setShowVaultSwap] = useState(false);
   const [linear, setLinear] = useState<{
     issueId?: string;
     issueIdentifier?: string;
@@ -907,6 +908,16 @@ export function SessionDetail() {
               onClick={() => setResourcePanel({ kind: "vault", id: v.id })}
             />
           ))}
+          {/* Vault swap — mid-session credential switch. The outbound proxy
+              resolves credentials live per call, so the new set governs the
+              very next interaction; no session restart needed. */}
+          <button
+            onClick={() => setShowVaultSwap(true)}
+            className="inline-flex items-center justify-center px-2 py-0.5 min-h-11 sm:min-h-0 rounded-md text-xs text-fg-subtle hover:text-fg hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+            title="Swap the session's credential vaults — applies from the next message"
+          >
+            {sessionMeta.vaultIds?.length ? "Swap vaults" : "+ Vaults"}
+          </button>
           <SessionDurationBadge events={events} />
           {sessionMeta.createdAt && <RelativeTimeBadge iso={sessionMeta.createdAt} />}
           <div className="ml-auto flex items-center gap-2">
@@ -1254,7 +1265,126 @@ export function SessionDetail() {
         sessionId={id ?? ""}
         trajectory={trajectory}
       />
+      {id && (
+        <VaultSwapModal
+          open={showVaultSwap}
+          onClose={() => setShowVaultSwap(false)}
+          sessionId={id}
+          currentVaultIds={sessionMeta.vaultIds ?? []}
+          onSwapped={(next) =>
+            setSessionMeta((prev) => ({
+              ...prev,
+              vaultIds: next.map((v) => v.id),
+              vaults: next.map((v) => ({ id: v.id, display_name: v.name })),
+            }))
+          }
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Swap the session's credential vaults mid-session. POSTs the full
+ * replacement set to /v1/sessions/:id — credentials resolve live per
+ * outbound call, so the swap governs the next interaction without
+ * restarting the session.
+ */
+function VaultSwapModal({
+  open,
+  onClose,
+  sessionId,
+  currentVaultIds,
+  onSwapped,
+}: {
+  open: boolean;
+  onClose: () => void;
+  sessionId: string;
+  currentVaultIds: string[];
+  onSwapped: (vaults: Array<{ id: string; name: string }>) => void;
+}) {
+  const { api } = useApi();
+  const [vaults, setVaults] = useState<Array<{ id: string; name: string }>>([]);
+  const [selected, setSelected] = useState<string[]>(currentVaultIds);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setSelected(currentVaultIds);
+    setLoading(true);
+    api<{ data: Array<{ id: string; name: string }> }>("/v1/vaults?limit=200")
+      .then((res) => setVaults(res.data ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+    // Re-seed only on open — currentVaultIds identity churns per render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const toggle = (vid: string) =>
+    setSelected((prev) =>
+      prev.includes(vid) ? prev.filter((v) => v !== vid) : [...prev, vid],
+    );
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api(`/v1/sessions/${sessionId}`, {
+        method: "POST",
+        body: JSON.stringify({ vault_ids: selected }),
+      });
+      onSwapped(vaults.filter((v) => selected.includes(v.id)));
+      toast.success("Vaults swapped — the next message runs with the new credentials");
+      onClose();
+    } catch {
+      /* api wrapper already toasted */
+    }
+    setSaving(false);
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Swap credential vaults"
+      subtitle="Applies from the session's next interaction."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={() => void save()} disabled={saving || loading}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
+        </>
+      }
+    >
+      {loading ? (
+        <div className="text-sm text-fg-subtle py-2">Loading vaults…</div>
+      ) : vaults.length === 0 ? (
+        <p className="text-sm text-fg-subtle py-2">
+          No vaults in this workspace.{" "}
+          <a href="/vaults" className="text-brand hover:underline">
+            Create one →
+          </a>
+        </p>
+      ) : (
+        <div className="space-y-1">
+          {vaults.map((v) => (
+            <label key={v.id} className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={selected.includes(v.id)}
+                onChange={() => toggle(v.id)}
+                className="rounded accent-brand"
+              />
+              <span className="text-fg">{v.name}</span>
+              <span className="text-fg-subtle font-mono text-xs">{v.id}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </Modal>
   );
 }
 

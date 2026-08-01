@@ -220,6 +220,9 @@ export class SqlSessionRepo implements SessionRepo {
     if (update.metadata !== undefined) {
       set.metadata = update.metadata !== null ? JSON.stringify(update.metadata) : null;
     }
+    if (update.vaultIds !== undefined) {
+      set.vault_ids = update.vaultIds !== null ? JSON.stringify(update.vaultIds) : null;
+    }
     if (update.agentSnapshot !== undefined) {
       set.agent_snapshot =
         update.agentSnapshot !== null ? JSON.stringify(update.agentSnapshot) : null;

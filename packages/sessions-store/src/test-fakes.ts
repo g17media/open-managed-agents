@@ -188,6 +188,7 @@ export class InMemorySessionRepo implements SessionRepo {
     if (update.title !== undefined) row.title = update.title;
     if (update.status !== undefined) row.status = update.status;
     if (update.metadata !== undefined) row.metadata = update.metadata;
+    if (update.vaultIds !== undefined) row.vault_ids = update.vaultIds;
     if (update.agentSnapshot !== undefined) row.agent_snapshot = update.agentSnapshot;
     if (update.environmentSnapshot !== undefined) row.environment_snapshot = update.environmentSnapshot;
     row.updated_at = update.updatedAt;

@@ -420,6 +420,17 @@ curl -s $BASE/v1/vaults/$VAULT_ID/credentials \
 6. Request reaches the external service with credentials
 7. Sandbox never sees the raw token
 
+### Swapping Credentials Mid-Session
+
+`vault_ids` is not fixed at create. Replace the set per session
+(`POST /v1/sessions/:id` with `{"vault_ids": [...]}`) or per interaction
+(`vault_ids` alongside the body of `POST /v1/sessions/:id/events` or
+`/v1/sessions/:id/messages` — persisted before the message dispatches).
+Credential resolution reads the session's vault set live on every
+outbound call, so a swap applies from the next interaction with no
+session restart. The console exposes this as "Swap vaults" on the
+session detail page.
+
 ---
 
 ## Memory Stores

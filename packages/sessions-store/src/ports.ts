@@ -49,6 +49,12 @@ export interface SessionUpdateFields {
    * merge semantics (per sessions.ts:489-498).
    */
   metadata?: Record<string, unknown> | null;
+  /**
+   * Full replacement of the session's vault set. Credential injection
+   * re-reads this column live on every outbound call, so a swap takes
+   * effect on the session's next interaction with no runtime invalidation.
+   */
+  vaultIds?: string[] | null;
   agentSnapshot?: AgentConfig | null;
   environmentSnapshot?: EnvironmentConfig | null;
   updatedAt: number;
