@@ -577,8 +577,15 @@ const sessionRegistry = new SessionRegistry({
         apiKey = key;
         provider = card.provider;
         wireModel = card.model;
+        const isOaiCard = card.provider === "oai" || card.provider === "oai-compatible";
         if (card.base_url) baseURL = card.base_url;
+        // NULL base_url / custom_headers = provider default. The ANTHROPIC_*
+        // env fallbacks are Anthropic-specific — leaking them onto the OpenAI
+        // path sends gpt-* calls to api.anthropic.com/v1/chat/completions,
+        // which rejects the card's key with 401 "Invalid Anthropic API Key".
+        else if (isOaiCard) baseURL = undefined;
         if (card.custom_headers) customHeaders = card.custom_headers;
+        else if (isOaiCard) customHeaders = undefined;
       }
     }
     if (!apiKey) {
