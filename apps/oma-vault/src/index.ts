@@ -46,6 +46,7 @@ import {
 import type { CredentialAuth } from "@open-managed-agents/shared";
 import { createNodeLogger } from "@open-managed-agents/observability/logger/node";
 import { setRootLogger, type Logger } from "@open-managed-agents/observability";
+import { evaluateEgress, type NetworkingPolicy } from "./egress-policy";
 
 const logger: Logger = await createNodeLogger({ bindings: { service: "oma-vault" } });
 setRootLogger(logger);
@@ -71,6 +72,12 @@ const scopeTenantId = process.env.OMA_TENANT ?? "*";
 // session attribution tags must carry a valid signature — a sandbox can't
 // claim another session's identity. When unset, tags are trusted as-is.
 const proxyKey = process.env.OMA_VAULT_PROXY_KEY ?? "";
+// Egress policy for requests with no (or forged) session attribution.
+// "allow" (default) keeps operator curl and pre-upgrade sandboxes working;
+// "deny" closes the strip-the-proxy-auth loophole around environment
+// networking limits — pair it with OMA_VAULT_PROXY_KEY for a real lockdown.
+const unattributedEgress =
+  process.env.OMA_VAULT_UNATTRIBUTED_EGRESS === "deny" ? "deny" : "allow";
 
 mkdirSync(resolve(caDir), { recursive: true });
 
@@ -318,6 +325,65 @@ function authToHeader(auth: CredentialAuth): { name: string; value: string } | n
   }
 }
 
+// ─── Environment networking limits ───────────────────────────────────────
+//
+// session → environment_id → environments.config.networking, enforced in
+// the request handler below (see egress-policy.ts for semantics). A short
+// TTL cache keeps parallel sandbox traffic from hammering sqlite; 10s of
+// staleness on a policy edit is acceptable.
+
+const NETWORKING_CACHE_TTL_MS = 10_000;
+const networkingCache = new Map<
+  string,
+  { policy: NetworkingPolicy | null; expiresAt: number }
+>();
+
+async function networkingForSession(sessionId: string): Promise<NetworkingPolicy | null> {
+  const cached = networkingCache.get(sessionId);
+  if (cached && cached.expiresAt > Date.now()) return cached.policy;
+
+  let policy: NetworkingPolicy | null = null;
+  type SessRow = { tenant_id: string; environment_id: string | null };
+  const sess = await sql
+    .prepare(`SELECT tenant_id, environment_id FROM sessions WHERE id = ?`)
+    .bind(sessionId)
+    .all<SessRow>();
+  const row = (sess.results ?? [])[0];
+  if (row?.environment_id && (scopeTenantId === "*" || row.tenant_id === scopeTenantId)) {
+    type EnvRow = { config: string };
+    const env = await sql
+      .prepare(`SELECT config FROM environments WHERE id = ? AND tenant_id = ?`)
+      .bind(row.environment_id, row.tenant_id)
+      .all<EnvRow>();
+    const envRow = (env.results ?? [])[0];
+    if (envRow) {
+      try {
+        policy = (JSON.parse(envRow.config) as { networking?: NetworkingPolicy }).networking ?? null;
+      } catch {
+        /* malformed config — treat as no policy */
+      }
+    }
+  }
+  networkingCache.set(sessionId, { policy, expiresAt: Date.now() + NETWORKING_CACHE_TTL_MS });
+  return policy;
+}
+
+/** null = allowed; otherwise the reason to 403 with. */
+async function checkEgress(url: string, attr: VaultProxyAttribution): Promise<string | null> {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return `unparseable request URL`;
+  }
+  if (!attr.sessionId) {
+    return unattributedEgress === "deny"
+      ? "unattributed sandbox traffic is denied (OMA_VAULT_UNATTRIBUTED_EGRESS=deny)"
+      : null;
+  }
+  return evaluateEgress(hostname, await networkingForSession(attr.sessionId));
+}
+
 // ─── mockttp proxy ───────────────────────────────────────────────────────
 
 const proxy = getLocal({
@@ -333,17 +399,37 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   const url = req.url;
   // Session attribution rides in via mockttp socket metadata (proxy auth
   // set by the sandbox adapters). Invalid signature with a configured key
-  // means someone inside a sandbox is forging attribution — fail closed.
-  const attr = parseVaultProxyTags(req.tags ?? []);
-  let matched: MatchedCred | null = null;
-  if (attr.sessionId && proxyKey && !verifyVaultProxyAttribution(attr, proxyKey)) {
+  // means someone inside a sandbox is forging attribution — fail closed:
+  // no credential injection, and the forged identity is discarded so the
+  // request faces the unattributed egress policy instead of the claimed
+  // session's.
+  const rawAttr = parseVaultProxyTags(req.tags ?? []);
+  const forged = Boolean(rawAttr.sessionId && proxyKey && !verifyVaultProxyAttribution(rawAttr, proxyKey));
+  if (forged) {
     logger.warn(
-      { op: "oma_vault.bad_attribution", session_id: attr.sessionId, url },
+      { op: "oma_vault.bad_attribution", session_id: rawAttr.sessionId, url },
       `rejecting unverified session attribution for ${url}`,
     );
-  } else {
-    matched = await findCredentialForUrl(url, attr);
   }
+  const attr: VaultProxyAttribution = forged ? {} : rawAttr;
+
+  // Environment networking limits (config.networking type "limited") —
+  // enforced before any forwarding, so sandbox-shell traffic is policed,
+  // not just the web_fetch tool.
+  const denial = await checkEgress(url, attr);
+  if (denial) {
+    logger.warn(
+      { op: "oma_vault.egress_denied", session_id: attr.sessionId, url },
+      `egress denied for ${url}: ${denial}`,
+    );
+    return {
+      statusCode: 403,
+      headers: { "content-type": "text/plain" },
+      body: `oma-vault: ${denial}`,
+    };
+  }
+
+  const matched: MatchedCred | null = forged ? null : await findCredentialForUrl(url, attr);
 
   // Strip any incoming Authorization headers — the agent must not be able
   // to override the injected value or smuggle a stolen token. Mirrors the
@@ -412,20 +498,44 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     };
   }
 
+  // Response headers. Two classes must not survive the hop:
+  //  - content-encoding / content-length describe the UPSTREAM body; fetch
+  //    already decoded it and we re-frame below from the buffer we hold.
+  //  - hop-by-hop headers (RFC 9110 §7.6.1) describe the upstream
+  //    connection, not this one. Forwarding `connection: Keep-Alive` +
+  //    `keep-alive:` while dropping content-length leaves the response
+  //    unframed on a persistent connection: lenient clients (curl) read to
+  //    EOF, but apt truncates and reports "Clearsigned file isn't valid,
+  //    got 'NOSPLIT'" — every apt-get update through the vault failed on
+  //    this until we started re-framing.
+  const DROP_RESPONSE = new Set([
+    "content-encoding",
+    "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+  ]);
   const respHeaders: Record<string, string> = {};
   upstream.headers.forEach((v, k) => {
-    // content-encoding would force the client to re-decompress something
-    // we already have decoded. content-length will be wrong post-buffer.
-    // Drop both; let the client re-derive.
-    const lower = k.toLowerCase();
-    if (lower === "content-encoding" || lower === "content-length") return;
+    if (DROP_RESPONSE.has(k.toLowerCase())) return;
     respHeaders[k] = v;
   });
+
+  const respBody = Buffer.from(await upstream.arrayBuffer());
+  // Re-frame with the true post-decode length. 204/304 carry no body and
+  // must not advertise one.
+  const bodyless = upstream.status === 204 || upstream.status === 304;
+  if (!bodyless) respHeaders["content-length"] = String(respBody.byteLength);
 
   return {
     statusCode: upstream.status,
     headers: respHeaders,
-    body: Buffer.from(await upstream.arrayBuffer()),
+    body: bodyless ? Buffer.alloc(0) : respBody,
   };
 });
 
