@@ -49,6 +49,13 @@ services:
       # to route HTTPS traffic through oma-vault for header injection.
       OMA_VAULT_PROXY_URL: http://oma-vault:14322
       OMA_VAULT_CA_CERT: /app/data/oma-vault-ca/ca.crt
+      # Network-isolate sandboxes (belljar isolation): each sandbox lives on
+      # its own internal (no-gateway) Docker network with oma-vault attached
+      # as its ONLY egress path — the proxy env above stops being advisory
+      # and becomes kernel-enforced. Requires a belljar:dev build with
+      # isolation support (older builds silently ignore it). Set to "" to
+      # fall back to open egress on the compose network.
+      BELLJAR_ISOLATION: ${BELLJAR_ISOLATION:-1}
       # Auth: better-auth sqlite-backed. AUTH_DISABLED=1 bypasses entirely
       # (all requests become tenant_id="default") for local single-user
       # demos. BETTER_AUTH_SECRET signs cookies; generate with
@@ -76,10 +83,14 @@ services:
 
   # Sandbox provider (SANDBOX_PROVIDER=belljar) — REST control plane that
   # creates cloudflare/sandbox containers as SIBLINGS through the mounted
-  # engine socket. Networking: sandboxes attach to this compose network
-  # (BELLJAR_NETWORK), so they reach oma-vault by service name, and
-  # belljar dials their container IPs directly (BELLJAR_NETWORK_MODE=direct
-  # — no per-sandbox published ports). Build the image once with:
+  # engine socket. Networking (with BELLJAR_ISOLATION=1, the default above):
+  # each sandbox gets its own internal no-gateway network; belljar's proxy
+  # sidecar bridges it to this compose network (BELLJAR_NETWORK) for the
+  # control path, and oma-vault is attached as the sandbox's only egress.
+  # belljar dials the sidecars over the compose network
+  # (BELLJAR_NETWORK_MODE=direct — no per-sandbox published ports).
+  # Without isolation, sandboxes attach to the compose network directly
+  # and have open egress. Build the image once with:
   #   docker build -t belljar:dev <path-to-belljar-checkout>
   belljar:
     image: belljar:dev
@@ -107,6 +118,10 @@ services:
   # HTTPS requests. The agent never sees the credential value. CA cert is
   # written to ./data/oma-vault-ca/ca.crt and trusted by the sandbox via
   # OMA_VAULT_CA_CERT (NODE_EXTRA_CA_CERTS / SSL_CERT_FILE).
+  # With BELLJAR_ISOLATION=1 belljar also attaches this container to each
+  # sandbox's internal network (dual-homed: compose network for real
+  # egress, internal networks toward sandboxes) — keep container_name
+  # pinned, the attachment and OMA_VAULT_PROXY_URL address it by name.
   oma-vault:
     build:
       context: .
