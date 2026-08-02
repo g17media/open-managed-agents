@@ -54,6 +54,7 @@
 // allowlist. readOnly stores get a real `:ro` bind — OS-enforced.
 
 import { mkdirSync } from "node:fs";
+import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
 import { sessionVaultProxyUrl } from "../vault-proxy";
@@ -104,6 +105,15 @@ export interface BelljarSandboxOptions {
    *  sources (needed when OMA runs in a container and the roots above are
    *  bind-mounted from the host). Longest matching prefix wins. */
   mountPathMap?: Array<{ from: string; to: string }>;
+  /** Network-isolate the sandbox (BELLJAR_ISOLATION=1). belljar puts the
+   *  container on a per-sandbox internal Docker network with no gateway —
+   *  kernel-enforced, unlike the advisory HTTP_PROXY env. When oma-vault
+   *  is configured (OMA_VAULT_PROXY_URL with a container hostname), it is
+   *  attached to that network as the sandbox's ONLY egress path and
+   *  belljar's own egress proxy is disabled — outbound traffic that
+   *  doesn't go through the vault simply has no route. Requires a belljar
+   *  build with isolation support (older servers ignore the field). */
+  isolation?: boolean;
   /** Logger. */
   logger?: { warn: (msg: string, ctx?: unknown) => void; log: (msg: string) => void };
 }
@@ -185,6 +195,13 @@ export class BelljarSandbox implements SandboxExecutor {
       this.logger.warn(
         `belljar: OMA_VAULT_PROXY_URL points at localhost (${baseProxyUrl}) — ` +
         `unreachable from inside the sandbox container. Use host.docker.internal or a routable host.`,
+      );
+    }
+    if (this.opts.isolation && !containerHostname(baseProxyUrl)) {
+      this.logger.warn(
+        `belljar: sandbox is isolated but OMA_VAULT_PROXY_URL (${baseProxyUrl}) is not a ` +
+        `container name — an isolated sandbox has no route to host addresses, so vault ` +
+        `traffic will fail. Point OMA_VAULT_PROXY_URL at the oma-vault container name.`,
       );
     }
     const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
@@ -356,6 +373,7 @@ export class BelljarSandbox implements SandboxExecutor {
     const body: Record<string, unknown> = { id: this.sandboxId };
     if (this.opts.image) body.image = this.opts.image;
     if (this.volumes.length) body.mounts = this.volumes;
+    if (this.opts.isolation) body.isolation = this.buildIsolation();
     const res = await this.fetch("/v1/sandboxes", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -372,6 +390,32 @@ export class BelljarSandbox implements SandboxExecutor {
         this.logger.warn(`belljar vault CA upload failed: ${(err as Error).message}`);
       }
     }
+  }
+
+  /**
+   * Isolation shape for the belljar create request. When the vault proxy
+   * URL names a container (the compose case: http://oma-vault:14322),
+   * that container becomes the sandbox's egress: belljar attaches it to
+   * the sandbox's internal network and disables its own egress proxy, so
+   * the vault's attribution/credential-injection cannot be bypassed. A
+   * vault URL that is NOT a container name (localhost, host.docker.internal,
+   * an IP) is unreachable from an internal network — fall back to belljar's
+   * sidecar proxy as the egress and warn, rather than provisioning a
+   * sandbox whose vault path is dead.
+   */
+  private buildIsolation(): boolean | Record<string, unknown> {
+    const vaultUrl = process.env.OMA_VAULT_PROXY_URL;
+    const vaultHost = vaultUrl ? containerHostname(vaultUrl) : null;
+    if (vaultHost) return { egress: false, attach: [vaultHost] };
+    if (vaultUrl) {
+      this.logger.warn(
+        `belljar isolation: OMA_VAULT_PROXY_URL (${vaultUrl}) does not name a container, ` +
+        `so it cannot be attached to the sandbox's internal network — falling back to ` +
+        `belljar's sidecar proxy for egress. Run oma-vault as a container and point ` +
+        `OMA_VAULT_PROXY_URL at its container name to make the vault the enforced egress.`,
+      );
+    }
+    return true;
   }
 
   /** Rewrite an OMA-visible path to the engine-host path Docker binds
@@ -510,6 +554,24 @@ function repoNameFromUrl(repoUrl: string): string {
   return last.replace(/\.git$/, "") || "repo";
 }
 
+/** Hostname of `url` when it plausibly names a sibling container (a Docker
+ *  DNS name), else null: localhost, host-gateway aliases and IP literals
+ *  are host-side addresses no internal-network sandbox can reach. */
+function containerHostname(url: string): string | null {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  if (!hostname || isIP(hostname.replace(/^\[|\]$/g, ""))) return null;
+  const lower = hostname.toLowerCase();
+  if (lower === "localhost" || lower === "host.docker.internal" || lower === "gateway.docker.internal") {
+    return null;
+  }
+  return hostname;
+}
+
 function stripUndefined(obj: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 }
@@ -539,6 +601,7 @@ export const sandboxFactory: SandboxFactory = async (ctx, env) => {
     memoryRoot: ctx.memoryRoot,
     outputsRoot: ctx.outputsRoot,
     mountPathMap: parseMountPathMap(env.BELLJAR_MOUNT_PATH_MAP),
+    isolation: env.BELLJAR_ISOLATION === "1" || env.BELLJAR_ISOLATION === "true",
   });
 };
 
