@@ -99,6 +99,12 @@ services:
       BELLJAR_TOKEN: ${BELLJAR_TOKEN:-}
       BELLJAR_NETWORK: open-managed-agents_default
       BELLJAR_NETWORK_MODE: direct
+      # Claim this stack's sandboxes. A belljar manages every sandbox it can
+      # see on the engine — reaper included — so without a scope another
+      # instance sharing the socket (a dev server, a CI run with short
+      # lifecycle timers) would sleep and destroy these. Scoped resources are
+      # named belljar-oma-<id> and invisible to instances of other scopes.
+      BELLJAR_SCOPE: oma
       # Host path prefix that sandbox bind mounts (/mnt/memory,
       # /mnt/session/outputs) may live under — the HOST side of the
       # ./data:/app/data bind above. Set OMA_DATA_HOST_DIR in .env to the
