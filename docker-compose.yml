@@ -104,6 +104,12 @@ services:
       # ./data:/app/data bind above. Set OMA_DATA_HOST_DIR in .env to the
       # absolute path of this repo's ./data dir; unset = mounts rejected.
       BELLJAR_ALLOWED_MOUNT_ROOTS: ${OMA_DATA_HOST_DIR:-}
+      # Attach oma-vault to every isolated sandbox's internal network, on
+      # top of the per-request attach the adapter sends. belljar reconciles
+      # this on wake and on its reaper tick, so recreating the oma-vault
+      # container (rebuild / compose up) re-attaches automatically instead
+      # of silently leaving live sandboxes with no egress.
+      BELLJAR_ISOLATION_ATTACH: oma-vault
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     ports:

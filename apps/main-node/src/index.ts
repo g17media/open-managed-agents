@@ -665,6 +665,23 @@ const sessionRegistry = new SessionRegistry({
         "memory store metadata fetch failed; prompt omits mount descriptors",
       );
     }
+    // belljar recycles idle sandbox containers but keeps /workspace on a
+    // volume for a retention window (server defaults: destroy after ~1h
+    // idle, retain ~7 days), transparently reattaching it on the next
+    // request. Tell the agent what that means for where to put files.
+    if ((process.env.SANDBOX_PROVIDER ?? "").toLowerCase() === "belljar") {
+      memoryReminders.push({
+        source: "sandbox:workspace",
+        text: [
+          "## Workspace: /workspace",
+          "Semi-persistent scratch space. The sandbox container is recycled after roughly an hour",
+          "of inactivity, but /workspace survives recycling and comes back on the next request for",
+          "about 7 days of inactivity — after that it is deleted and the session starts with a fresh,",
+          "empty workspace. Use /workspace for checkouts, build artifacts and working files; keep",
+          "anything that must outlive it in /mnt/memory or /mnt/session/outputs.",
+        ].join("\n"),
+      });
+    }
     return {
       agent: input.agent,
       userMessage: input.userMessage,

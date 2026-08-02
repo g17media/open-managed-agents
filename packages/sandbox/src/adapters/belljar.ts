@@ -125,6 +125,9 @@ export class BelljarSandbox implements SandboxExecutor {
   private envVars: Record<string, string> = {};
   private commandSecrets: Array<{ prefix: string; secrets: Record<string, string> }> = [];
   private pendingCaUpload: { hostPath: string; guestPath: string } | null = null;
+  /** Sticky copy of the CA upload so a fresh-provision retry (expired
+   *  workspace) can restore it into the new sandbox. */
+  private caUpload: { hostPath: string; guestPath: string } | null = null;
   private defaultTimeoutMs: number;
   private logger: NonNullable<BelljarSandboxOptions["logger"]>;
 
@@ -205,7 +208,10 @@ export class BelljarSandbox implements SandboxExecutor {
       );
     }
     const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
-    const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
+    // Under /workspace, NOT /etc/ssl: belljar destroys idle containers and
+    // transparently recreates them from their retained /workspace volume,
+    // and only files on that volume survive the round-trip.
+    const inBoxCaPath = "/workspace/.oma-vault-ca.crt";
     await this.setEnvVars({
       HTTP_PROXY: proxyUrl,
       HTTPS_PROXY: proxyUrl,
@@ -216,6 +222,7 @@ export class BelljarSandbox implements SandboxExecutor {
       CURL_CA_BUNDLE: inBoxCaPath,
     });
     this.pendingCaUpload = { hostPath: caCertPath, guestPath: inBoxCaPath };
+    this.caUpload = this.pendingCaUpload;
     // Never trigger creation from here: the orchestrator runs outbound
     // wiring BEFORE mounts, and mounts must be collected pre-create.
     // createSandbox applies the pending upload; if the sandbox somehow
@@ -472,6 +479,24 @@ export class BelljarSandbox implements SandboxExecutor {
     // call, so one retry recovers.
     if (res.status === 410) {
       this.logger.warn(`belljar ${path}: session terminated, retrying once`);
+      res = await send();
+    }
+    // 404 SANDBOX_NOT_FOUND: the sandbox was destroyed and its retained
+    // /workspace has expired (belljar keeps it ~7d past the container,
+    // reviving transparently inside that window — this error only fires
+    // beyond it, or after a manual delete). Provision a fresh sandbox and
+    // retry once; the workspace starts empty, so re-stage the vault CA.
+    if (res.status === 404) {
+      const text = await res.text();
+      if (!text.includes("SANDBOX_NOT_FOUND")) {
+        throw new Error(`belljar ${path} failed: 404 ${text}`);
+      }
+      this.logger.warn(
+        `belljar ${path}: sandbox expired or was removed — provisioning a fresh one (workspace lost)`,
+      );
+      this.createPromise = null;
+      this.pendingCaUpload = this.caUpload;
+      await this.ensureSandbox();
       res = await send();
     }
     if (!res.ok) {
