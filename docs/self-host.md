@@ -451,6 +451,20 @@ matching scoped by `OMA_TENANT`. Set `OMA_VAULT_PROXY_KEY` to the same
 value on both main-node and oma-vault to HMAC-sign the attribution so
 a sandbox can't claim another session's identity.
 
+The vault also enforces the environment's **networking limits**
+(`config.networking`, the Managed-Agents-mirror shape): with
+`type: "limited"`, outbound requests are 403'd unless the host matches
+`allowed_hosts` (exact or subdomain) or — with
+`allow_package_managers: true` — a well-known package registry (npm,
+PyPI, apt, crates.io, RubyGems, Go proxy). Because the vault is the
+sandbox's only egress under belljar isolation, this is kernel-backed,
+not tool-level advisory. Attribution rides in-band, so a sandbox that
+strips its proxy auth becomes "unattributed": set
+`OMA_VAULT_UNATTRIBUTED_EGRESS=deny` (plus `OMA_VAULT_PROXY_KEY`) to
+close that loophole; the default `allow` keeps operator curl working.
+`allow_mcp_servers` is not enforced here — on self-host, MCP calls run
+from the main-node process and never traverse the vault.
+
 ## Architecture
 
 ```
