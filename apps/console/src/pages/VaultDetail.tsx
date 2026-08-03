@@ -11,7 +11,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/vaults/credentials";
 import type { BetaManagedAgentsVault } from "@anthropic-ai/sdk/resources/beta/vaults/vaults";
 
-import { useApi } from "../lib/api";
+import { getActiveTenantId, useApi } from "../lib/api";
 import { useApiQuery, useInfiniteApiQuery, useQueryClient } from "../lib/useApiQuery";
 import { useManagedApi } from "../lib/useManagedApi";
 
@@ -765,6 +765,11 @@ function AddCredentialModal({
       vault_id: vault.id,
       redirect_uri: window.location.href,
     });
+    // Popup navigation can't carry the x-active-tenant header that api()
+    // attaches, so pass the tenant pin as a query param — the backend
+    // validates membership the same way before honoring it.
+    const activeTenant = getActiveTenantId();
+    if (activeTenant) params.set("active_tenant", activeTenant);
     if (opts?.clientId) params.set("client_id", opts.clientId);
     if (opts?.clientSecret) params.set("client_secret", opts.clientSecret);
     if (opts?.scopes?.trim()) params.set("scope", opts.scopes.trim());
