@@ -702,6 +702,16 @@ export function SessionsList() {
     return !!row?.[key];
   };
 
+  // Agent id → name lookup for the Agent column. Sourced from the same
+  // /v1/agents preload as the filter chip / create modal — the session
+  // wire format only carries agent {id, version}. Misses (deleted agent,
+  // >200 agents) fall back to showing the raw id.
+  const agentNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of agents) m.set(a.id, a.name);
+    return m;
+  }, [agents]);
+
   // TanStack column defs. Order, filtering, and search all flow through
   // server params now — no per-column sort/filter UI. Required columns
   // (id, name) opt out of the Columns hide menu so the user can't end
@@ -749,9 +759,15 @@ export function SessionsList() {
         id: "agent",
         accessorFn: (s) => s.agent.id,
         header: "Agent",
-        cell: ({ row }) => (
-          <span className="text-fg-muted font-mono text-xs">{row.original.agent.id}</span>
-        ),
+        cell: ({ row }) => {
+          const id = row.original.agent.id;
+          const name = agentNameById.get(id);
+          return name ? (
+            <span title={id} className="text-fg-muted">{name}</span>
+          ) : (
+            <span title={id} className="text-fg-muted font-mono text-xs">{id}</span>
+          );
+        },
       },
       {
         id: "created",
@@ -808,7 +824,7 @@ export function SessionsList() {
         size: 56,
       },
     ],
-    [api, refreshSessions],
+    [api, refreshSessions, agentNameById],
   );
 
   const hasActiveFilter = !!search || !!filterAgent || status !== "any" || created.after !== undefined || created.before !== undefined;
