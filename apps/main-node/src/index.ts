@@ -84,6 +84,7 @@ import {
   buildModelCardRoutes,
   buildModelsRoutes,
   buildSkillRoutes,
+  buildSkillGitHubRoutes,
   buildStatsRoutes,
   buildClawhubRoutes,
   buildOAuthRoutes,
@@ -1134,6 +1135,9 @@ v1.route("/api_keys", buildApiKeyRoutes({ storage: apiKeyStorage }));
 v1.route("/environments", buildEnvironmentRoutes({ services }));
 v1.route("/model_cards", buildModelCardRoutes({ services }));
 v1.route("/models", buildModelsRoutes());
+// GitHub import/sync mounts first so its static /import/github and
+// /sync/github paths are matched before buildSkillRoutes' /:id routes.
+v1.route("/skills", buildSkillGitHubRoutes({ services }));
 v1.route("/skills", buildSkillRoutes({ services }));
 v1.route("/stats", buildStatsRoutes({ services }));
 v1.route("/clawhub", buildClawhubRoutes({ services }));

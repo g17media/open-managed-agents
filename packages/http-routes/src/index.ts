@@ -69,6 +69,8 @@ export { buildModelsRoutes } from "./models";
 
 export { buildSkillRoutes } from "./skills";
 export type { SkillRoutesDeps } from "./skills";
+export { buildSkillGitHubRoutes } from "./skills/github";
+export type { GitHubSource } from "./skills/github";
 
 export { buildStatsRoutes } from "./stats";
 export type { StatsRoutesDeps } from "./stats";

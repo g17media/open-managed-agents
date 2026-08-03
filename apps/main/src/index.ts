@@ -14,6 +14,7 @@ import {
   buildModelCardRoutes,
   buildModelsRoutes,
   buildSkillRoutes,
+  buildSkillGitHubRoutes,
   buildStatsRoutes,
   buildClawhubRoutes,
   buildOAuthRoutes,
@@ -235,11 +236,16 @@ const modelCardsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: strin
 
 const skillsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
   const ctx = c as unknown as AppCtx;
-  const app = buildSkillRoutes({
+  const deps = {
     services: () => cfRouteServicesFromCtx(ctx),
-    checkUploadSize: (req) => checkUploadSize(c.env, req),
-    checkUploadFreq: (tenantId) => checkUploadFreq(c.env, tenantId),
-  });
+    checkUploadSize: (req: Request) => checkUploadSize(c.env, req),
+    checkUploadFreq: (tenantId: string) => checkUploadFreq(c.env, tenantId),
+  };
+  // GitHub import/sync mounts first so its static /import/github and
+  // /sync/github paths are matched before buildSkillRoutes' /:id routes.
+  const app = new Hono<{ Variables: { tenant_id: string } }>();
+  app.route("/", buildSkillGitHubRoutes(deps));
+  app.route("/", buildSkillRoutes(deps));
   return invokePackage(c, app);
 });
 
@@ -465,6 +471,8 @@ app.route("/v1/cap-cli/oauth", capCliOauthRoutes);
 app.route("/v1/memory_stores", memoryRoutes);
 app.route("/v1/dreams", dreamsRoutes);
 app.route("/v1/files", filesRoutes);
+// GitHub import/sync mounts first so its static /import/github and
+// /sync/github paths can never be shadowed by skills.ts's /:id routes.
 app.route("/v1/skills", skillsRoutes);
 app.route("/v1/model_cards", modelCardsRoutes);
 app.route("/v1/models", buildModelsRoutes());
