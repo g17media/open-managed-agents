@@ -116,6 +116,7 @@ import {
   buildApiKeyRoutes,
   buildEvalRoutes,
   buildSkillRoutes,
+  buildSkillGitHubRoutes,
   buildClawhubRoutes,
   buildOAuthRoutes,
   buildCapCliOauthRoutes,
@@ -2764,6 +2765,7 @@ async function countManagedPages(
 }
 
 // OMA extensions shared with the Cloudflare entrypoint.
+v1.route("/oma/skills", buildSkillGitHubRoutes({ services }));
 v1.route("/oma/skills", buildSkillRoutes({ services }));
 v1.get("/oma/runtimes", (c) => c.json({ data: [] }));
 v1.get("/oma/stats", async (c) => {

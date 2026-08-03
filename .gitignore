@@ -59,3 +59,5 @@ rl/tasks/terminal-bench/findings-*.md
 data/
 .env
 .vercel
+# Local DigitalOcean API key for dev/test droplets — never commit
+do.env
