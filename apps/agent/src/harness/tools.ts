@@ -1232,7 +1232,7 @@ export async function buildTools(
           // when the next buildTools fires after warmup.
           continue;
         }
-        const serverName = server.name;
+        const serverName = server.name.trim();
         // Custom fetch the protocol client calls for every MCP request. We stamp
         // routing metadata and hand the Request to main; main does the
         // credential injection + upstream fetch and returns the Response
@@ -1257,7 +1257,7 @@ export async function buildTools(
           const remoteTools = await mcpClient.listTools({ timeoutMs: MCP_SETUP_TIMEOUT_MS });
           for (const definition of remoteTools) {
             const toolName = definition.name;
-            tools[`mcp__${server.name}__${toolName}`] = dynamicTool({
+            tools[`mcp__${serverName}__${toolName}`] = dynamicTool({
               title: definition.title,
               description: definition.description,
               inputSchema: jsonSchema(definition.inputSchema),
