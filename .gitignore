@@ -53,3 +53,5 @@ rl/tasks/terminal-bench/findings-*.md
 .pnpm-store/
 data/
 .env
+# Local DigitalOcean API key for dev/test droplets — never commit
+do.env

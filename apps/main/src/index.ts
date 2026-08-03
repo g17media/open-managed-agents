@@ -18,6 +18,7 @@ import {
   buildEnvironmentRoutes,
   buildModelCardRoutes,
   buildSkillRoutes,
+  buildSkillGitHubRoutes,
   buildStatsRoutes,
   buildClawhubRoutes,
   buildOAuthRoutes,
@@ -581,11 +582,16 @@ const modelCardsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: strin
 
 const legacySkillsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
   const ctx = c as unknown as AppCtx;
-  const app = buildSkillRoutes({
+  const deps = {
     services: () => cfRouteServicesFromCtx(ctx),
-    checkUploadSize: (req) => checkUploadSize(c.env, req),
-    checkUploadFreq: (tenantId) => checkUploadFreq(c.env, tenantId),
-  });
+    checkUploadSize: (req: Request) => checkUploadSize(c.env, req),
+    checkUploadFreq: (tenantId: string) => checkUploadFreq(c.env, tenantId),
+  };
+  // GitHub import/sync mounts first so its static /import/github and
+  // /sync/github paths are matched before buildSkillRoutes' /:id routes.
+  const app = new Hono<{ Variables: { tenant_id: string } }>();
+  app.route("/", buildSkillGitHubRoutes(deps));
+  app.route("/", buildSkillRoutes(deps));
   return invokePackage(c, app);
 });
 
