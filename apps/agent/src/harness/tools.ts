@@ -1174,7 +1174,10 @@ export async function buildTools(
       const sessionId = env.sessionId;
       for (const server of agentConfig.mcp_servers) {
         if (server.type === "stdio") continue;
-        const serverName = server.name;
+        // Trimmed: the harness sends this name in the x-oma-mcp-server
+        // header, which the Fetch spec whitespace-normalizes, so the proxy
+        // compares against the trimmed form.
+        const serverName = server.name.trim();
         // Custom fetch the protocol client calls for every MCP request. We stamp
         // routing metadata and hand the Request to main; main does the
         // credential injection + upstream fetch and returns the Response
@@ -1200,7 +1203,7 @@ export async function buildTools(
           for (const definition of remoteTools) {
             const toolName = definition.name;
             if (!isMcpToolEnabled(agentConfig, server.name, toolName)) continue;
-            tools[`mcp__${server.name}__${toolName}`] = dynamicTool({
+            tools[`mcp__${serverName}__${toolName}`] = dynamicTool({
               title: definition.title,
               description: definition.description,
               inputSchema: jsonSchema(definition.inputSchema),
