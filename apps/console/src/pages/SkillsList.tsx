@@ -9,6 +9,14 @@ import { DataTable, type ColumnDef } from "../components/DataTable";
 import { FacetedFilter } from "../components/FacetedFilter";
 import { FilterChip } from "../components/FilterChip";
 import { RowActionsMenu } from "../components/RowActionsMenu";
+import {
+  GitHubImportFields,
+  GitHubImportSummary,
+  GitHubSourcePill,
+  SyncGitHubModal,
+  type GitHubImportResponse,
+  type GitHubSource,
+} from "./skills/github";
 
 /* ---------- types ---------- */
 
@@ -20,6 +28,7 @@ interface Skill {
   source: "anthropic" | "custom";
   latest_version: number;
   created_at: string;
+  github_source?: GitHubSource;
 }
 
 interface SkillFile {
@@ -99,12 +108,24 @@ export function SkillsList() {
 
   /* create dialog */
   const [showCreate, setShowCreate] = useState(false);
+  const [createMode, setCreateMode] = useState<"zip" | "github">("zip");
   const [createTitle, setCreateTitle] = useState("");
   const [createZip, setCreateZip] = useState<File | null>(null);
   const [createUploading, setCreateUploading] = useState(false);
   const [createDragOver, setCreateDragOver] = useState(false);
   const [createError, setCreateError] = useState("");
   const createInputRef = useRef<HTMLInputElement>(null);
+
+  /* GitHub import (inside create dialog, mode "github") */
+  const [ghUrl, setGhUrl] = useState("");
+  const [ghRef, setGhRef] = useState("");
+  const [ghPath, setGhPath] = useState("");
+  const [ghToken, setGhToken] = useState("");
+  const [ghImporting, setGhImporting] = useState(false);
+  const [ghResult, setGhResult] = useState<GitHubImportResponse | null>(null);
+
+  /* GitHub sync dialog — SyncGitHubModal owns its own token/result state */
+  const [showSync, setShowSync] = useState(false);
 
   /* detail dialog */
   const [detail, setDetail] = useState<Skill | null>(null);
@@ -125,10 +146,16 @@ export function SkillsList() {
   /* ---- create ---- */
 
   const resetCreate = () => {
+    setCreateMode("zip");
     setCreateTitle("");
     setCreateZip(null);
     setCreateError("");
     setCreateDragOver(false);
+    setGhUrl("");
+    setGhRef("");
+    setGhPath("");
+    setGhToken("");
+    setGhResult(null);
     if (createInputRef.current) createInputRef.current.value = "";
   };
 
@@ -169,6 +196,33 @@ export function SkillsList() {
       setCreateError(e?.message || "Upload failed");
     } finally {
       setCreateUploading(false);
+    }
+  };
+
+  /* ---- GitHub import / sync ---- */
+
+  const doGitHubImport = async () => {
+    if (!ghUrl.trim()) return;
+    setCreateError("");
+    setGhImporting(true);
+    try {
+      const body: Record<string, string> = { url: ghUrl.trim() };
+      if (ghRef.trim()) body.ref = ghRef.trim();
+      if (ghPath.trim()) body.path = ghPath.trim();
+      if (ghToken.trim()) body.token = ghToken.trim();
+      const res = await api<GitHubImportResponse>("/v1/skills/import/github", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setGhResult(res);
+      // Token is only needed for the request — drop it from state as soon
+      // as the import lands so it can't linger in the dialog.
+      setGhToken("");
+      load();
+    } catch (e: any) {
+      setCreateError(e?.message || "Import failed");
+    } finally {
+      setGhImporting(false);
     }
   };
 
@@ -318,16 +372,24 @@ export function SkillsList() {
         id: "source",
         accessorKey: "source",
         header: "Source",
-        cell: ({ row }) =>
-          row.original.source === "anthropic" ? (
-            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-warning-subtle text-warning">
-              built-in
-            </span>
-          ) : (
+        cell: ({ row }) => {
+          const s = row.original;
+          if (s.source === "anthropic") {
+            return (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-warning-subtle text-warning">
+                built-in
+              </span>
+            );
+          }
+          if (s.github_source) {
+            return <GitHubSourcePill source={s.github_source} />;
+          }
+          return (
             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-bg-surface text-fg-muted">
               custom
             </span>
-          ),
+          );
+        },
       },
       {
         id: "version",
@@ -423,6 +485,14 @@ export function SkillsList() {
       subtitle="Manage pre-built and custom skills for your agents."
       createLabel="+ New skill"
       onCreate={() => setShowCreate(true)}
+      headerActions={
+        // Always visible — deriving this from the (filtered) list would
+        // hide it whenever the Source filter excludes custom skills. The
+        // sync dialog reports "nothing to sync" when no sources exist.
+        <Button variant="outline" onClick={() => setShowSync(true)}>
+          Sync GitHub
+        </Button>
+      }
       filters={filters}
       data={skills}
       loading={loading}
@@ -438,81 +508,162 @@ export function SkillsList() {
       <Modal
         open={showCreate}
         onClose={() => {
-          if (createUploading) return;
+          if (createUploading || ghImporting) return;
           setShowCreate(false);
           resetCreate();
         }}
-        title="Upload Custom Skill"
-        subtitle="Upload an Anthropic-style skill folder packaged as a .zip."
+        title="New Skill"
+        subtitle="Upload a packaged .zip or import from a GitHub repository."
         maxWidth="max-w-xl"
         footer={
-          <>
+          createMode === "zip" ? (
+            <>
+              <Button
+                variant="ghost"
+                disabled={createUploading}
+                onClick={() => {
+                  setShowCreate(false);
+                  resetCreate();
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={doCreate}
+                disabled={!createZip || createUploading}
+                loading={createUploading}
+                loadingLabel="Uploading..."
+              >
+                Upload
+              </Button>
+            </>
+          ) : ghResult ? (
             <Button
-              variant="ghost"
-              disabled={createUploading}
               onClick={() => {
                 setShowCreate(false);
                 resetCreate();
               }}
             >
-              Cancel
+              Done
             </Button>
-            <Button
-              onClick={doCreate}
-              disabled={!createZip || createUploading}
-              loading={createUploading}
-              loadingLabel="Uploading..."
-            >
-              Upload
-            </Button>
-          </>
+          ) : (
+            <>
+              <Button
+                variant="ghost"
+                disabled={ghImporting}
+                onClick={() => {
+                  setShowCreate(false);
+                  resetCreate();
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={doGitHubImport}
+                disabled={!ghUrl.trim() || ghImporting}
+                loading={ghImporting}
+                loadingLabel="Importing..."
+              >
+                Import
+              </Button>
+            </>
+          )
         }
       >
         <div className="space-y-4">
+          {/* Mode toggle */}
+          <div className="inline-flex rounded-lg border border-border p-0.5 bg-bg-surface/50">
+            {(["zip", "github"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                disabled={createUploading || ghImporting}
+                onClick={() => {
+                  setCreateMode(m);
+                  setCreateError("");
+                }}
+                className={[
+                  "px-3 py-1.5 min-h-11 sm:min-h-0 text-xs font-medium rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]",
+                  createMode === m
+                    ? "bg-bg text-fg shadow-sm border border-border"
+                    : "text-fg-muted hover:text-fg",
+                ].join(" ")}
+              >
+                {m === "zip" ? "Upload .zip" : "From GitHub"}
+              </button>
+            ))}
+          </div>
+
           {createError && (
             <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">
               {createError}
             </div>
           )}
 
-          {/* Drop zone */}
-          <DropZone
-            file={createZip}
-            dragOver={createDragOver}
-            onDragOver={(over) => setCreateDragOver(over)}
-            onFile={(f) => acceptCreateZip(f)}
-            onClear={() => {
-              setCreateZip(null);
-              if (createInputRef.current) createInputRef.current.value = "";
-            }}
-            inputRef={createInputRef}
-            disabled={createUploading}
-          />
+          {createMode === "zip" ? (
+            <>
+              {/* Drop zone */}
+              <DropZone
+                file={createZip}
+                dragOver={createDragOver}
+                onDragOver={(over) => setCreateDragOver(over)}
+                onFile={(f) => acceptCreateZip(f)}
+                onClear={() => {
+                  setCreateZip(null);
+                  if (createInputRef.current) createInputRef.current.value = "";
+                }}
+                inputRef={createInputRef}
+                disabled={createUploading}
+              />
 
-          {/* Display Title (optional override) */}
-          <div>
-            <label className="text-sm text-fg-muted block mb-1">
-              Display Title{" "}
-              <span className="text-fg-subtle">
-                (optional — falls back to SKILL.md <code>name</code>)
-              </span>
-            </label>
-            <input
-              value={createTitle}
-              onChange={(e) => setCreateTitle(e.target.value)}
-              className={inputCls}
-              placeholder="Leave blank to use the skill's own name"
-              disabled={createUploading}
+              {/* Display Title (optional override) */}
+              <div>
+                <label className="text-sm text-fg-muted block mb-1">
+                  Display Title{" "}
+                  <span className="text-fg-subtle">
+                    (optional — falls back to SKILL.md <code>name</code>)
+                  </span>
+                </label>
+                <input
+                  value={createTitle}
+                  onChange={(e) => setCreateTitle(e.target.value)}
+                  className={inputCls}
+                  placeholder="Leave blank to use the skill's own name"
+                  disabled={createUploading}
+                />
+              </div>
+
+              <p className="text-xs text-fg-subtle">
+                The zip must contain <code>SKILL.md</code> at the root, or one
+                top-level folder containing it (the common case when you
+                <code> zip -r my-skill.zip my-skill</code>).
+              </p>
+            </>
+          ) : ghResult ? (
+            <GitHubImportSummary result={ghResult} />
+          ) : (
+            <GitHubImportFields
+              url={ghUrl}
+              onUrlChange={setGhUrl}
+              refName={ghRef}
+              onRefChange={setGhRef}
+              path={ghPath}
+              onPathChange={setGhPath}
+              token={ghToken}
+              onTokenChange={setGhToken}
+              disabled={ghImporting}
             />
-          </div>
-
-          <p className="text-xs text-fg-subtle">
-            The zip must contain <code>SKILL.md</code> at the root, or one
-            top-level folder containing it (the common case when you
-            <code> zip -r my-skill.zip my-skill</code>).
-          </p>
+          )}
         </div>
       </Modal>
+
+      {/* ===== Sync GitHub Dialog ===== */}
+      <SyncGitHubModal
+        open={showSync}
+        onClose={() => setShowSync(false)}
+        api={api}
+        onSynced={load}
+      />
 
       {/* ===== Detail Dialog ===== */}
       <Modal
@@ -574,6 +725,28 @@ export function SkillsList() {
                   {new Date(detail.created_at).toLocaleString()}
                 </p>
               </div>
+              {detail.github_source && (
+                <div className="col-span-2">
+                  <label className="text-xs text-fg-muted block mb-0.5">
+                    GitHub Source
+                  </label>
+                  <p className="text-sm font-mono text-fg-muted break-all">
+                    {detail.github_source.repo}
+                    {detail.github_source.ref ? `@${detail.github_source.ref}` : ""}
+                    {detail.github_source.skill_dir
+                      ? ` · ${detail.github_source.skill_dir}/`
+                      : ""}
+                    {detail.github_source.commit
+                      ? ` · ${detail.github_source.commit}`
+                      : ""}
+                  </p>
+                  {detail.github_source.synced_at && (
+                    <p className="text-xs text-fg-subtle mt-0.5">
+                      Last synced {new Date(detail.github_source.synced_at).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Usage hint */}
