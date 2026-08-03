@@ -93,6 +93,7 @@ export interface Messages {
     yourName: string;
     minChars: string;
     continueWithGoogle: string;
+    continueWithOidc: string;
     or: string;
     signIn: string;
     signUp: string;

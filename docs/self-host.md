@@ -562,6 +562,34 @@ main-node's stdout — paste into the console verify-signup screen.
 Operators wiring real email replace the `sendVerificationOTP` callback
 in `apps/main-node/src/auth/config.ts` with a Resend / SES / SMTP call.
 
+To sign in through your own identity provider (Okta, Keycloak,
+Authentik, or any OIDC-compliant IdP), set:
+
+- `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` unless the client is a
+  PKCE-only public client
+- `OIDC_DISCOVERY_URL` — the IdP's `/.well-known/openid-configuration` —
+  or explicit `OIDC_AUTHORIZATION_URL` + `OIDC_TOKEN_URL`
+  (+ optional `OIDC_USERINFO_URL`) for IdPs without discovery
+- `OIDC_SCOPES` — space- or comma-separated, default `openid profile email`
+- `OIDC_PKCE=0` to disable PKCE (on by default)
+- `OIDC_PROVIDER_NAME` — label for the console's "Continue with …"
+  button (default "SSO")
+
+Register `${PUBLIC_BASE_URL}/auth/oauth2/callback/oidc` as the redirect
+URI with the IdP. The same variables work on the Cloudflare deployment
+(`wrangler secret put` for the client secret).
+
+Two lockdown toggles compose with this:
+
+- `AUTH_PASSWORD_DISABLED=1` — SSO-only mode: email+password sign-in
+  and sign-up are off entirely (along with the email-OTP flows). Only
+  Google / OIDC buttons remain on the login page, so configure one
+  first or nobody can sign in.
+- `AUTH_SIGNUP_DISABLED=1` — existing users keep signing in, but
+  new-account creation is blocked on every method: password sign-up,
+  OTP sign-in for unknown emails, and Google / OIDC auto-provisioning.
+  Create your account before flipping it on.
+
 Endpoints main-node implements for the console:
 - `/auth-info` (provider list)
 - `/auth/*` (better-auth: sign-up, sign-in, sign-out, get-session, OTP)

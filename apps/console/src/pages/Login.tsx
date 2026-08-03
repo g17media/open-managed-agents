@@ -75,10 +75,15 @@ export function Login() {
   // re-mounts so a navigation between modes doesn't refetch.
   const { data: authInfo } = useApiQuery<{
     providers?: string[];
+    oidc_name?: string | null;
+    signup_disabled?: boolean;
     turnstile_site_key?: string | null;
   }>("/auth-info");
   const googleEnabled = !!authInfo?.providers?.includes("google");
   const githubEnabled = !!authInfo?.providers?.includes("github");
+  const oidcEnabled = !!authInfo?.providers?.includes("oidc");
+  const emailEnabled = !authInfo?.providers || authInfo.providers.includes("email");
+  const signupDisabled = !!authInfo?.signup_disabled;
   // Whether the backend gates sign-up behind an email-OTP verification.
   // /auth-info advertises "email-otp" iff AUTH_REQUIRE_EMAIL_VERIFY=1 on
   // the server. When absent (default self-host), the sign-up flow does
@@ -355,6 +360,10 @@ export function Login() {
     });
   };
 
+  const handleOidc = async () => {
+    await authClient.signIn.oauth2({ providerId: "oidc", callbackURL: nextUrl });
+  };
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-bg">
@@ -430,9 +439,15 @@ export function Login() {
                 Continue with GitHub
               </Button>
             )}
+            {oidcEnabled && (
+              <Button type="button" variant="outline" size="lg" onClick={handleOidc} className="h-11 w-full rounded-full">
+                Continue with {authInfo?.oidc_name || "SSO"}
+              </Button>
+            )}
+            {emailEnabled && (
             <Button
               type="button"
-              variant={googleEnabled || githubEnabled ? "outline" : "default"}
+              variant={googleEnabled || githubEnabled || oidcEnabled ? "outline" : "default"}
               size="lg"
               onClick={() => {
                 setMode("login");
@@ -442,10 +457,11 @@ export function Login() {
             >
               Continue with email
             </Button>
+            )}
           </div>
         )}
 
-        {mode !== "chooser" && (
+        {emailEnabled && mode !== "chooser" && (
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           {error && (
             <div
@@ -658,7 +674,7 @@ export function Login() {
           aria-label="Account options"
           className="flex min-h-6 items-center justify-center gap-1 text-center text-sm text-fg-muted"
         >
-          {mode === "chooser" && (
+          {mode === "chooser" && emailEnabled && !signupDisabled && (
             <>
               <span>Don't have an account?</span>
               <Button
