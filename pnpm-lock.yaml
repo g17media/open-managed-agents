@@ -440,6 +440,9 @@ importers:
       '@open-managed-agents/agents-store':
         specifier: workspace:*
         version: link:../../packages/agents-store
+      '@open-managed-agents/auth-config':
+        specifier: workspace:*
+        version: link:../../packages/auth-config
       '@open-managed-agents/blob-store':
         specifier: workspace:*
         version: link:../../packages/blob-store

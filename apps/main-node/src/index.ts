@@ -122,6 +122,7 @@ import { createAuthMiddleware as buildAuthMw } from "@open-managed-agents/auth";
 import {
   buildBetterAuth,
   ensureTenantSqlite,
+  oidcFromEnv,
 } from "@open-managed-agents/auth-config";
 import { senderFromEnv } from "@open-managed-agents/email/adapters/nodemailer";
 import { SqlKvStore } from "@open-managed-agents/kv-store/adapters/sql";
@@ -233,6 +234,17 @@ const platformRootSecret = process.env.PLATFORM_ROOT_SECRET;
 const authDisabled = process.env.AUTH_DISABLED === "1";
 const authDbPath = process.env.AUTH_DATABASE_PATH ?? "./data/auth.db";
 const sender = senderFromEnv(process.env);
+const oidc = oidcFromEnv(process.env);
+const passwordAuthDisabled = process.env.AUTH_PASSWORD_DISABLED === "1";
+const signupDisabled = process.env.AUTH_SIGNUP_DISABLED === "1";
+const googleEnabled = !!(
+  process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+);
+if (!authDisabled && passwordAuthDisabled && !googleEnabled && !oidc) {
+  console.warn(
+    "[auth] AUTH_PASSWORD_DISABLED=1 with no Google or OIDC provider configured — nobody can sign in",
+  );
+}
 
 let auth: ReturnType<typeof buildBetterAuth> | null = null;
 let authShutdown: (() => Promise<void>) | null = null;
@@ -249,7 +261,10 @@ if (!authDisabled) {
       baseURL: process.env.PUBLIC_BASE_URL,
       googleClientId: process.env.GOOGLE_CLIENT_ID,
       googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      oidc,
       requireEmailVerify: process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1",
+      passwordDisabled: passwordAuthDisabled,
+      signupDisabled,
       cookieDomain: process.env.AUTH_COOKIE_DOMAIN,
       ensureTenant: (u) => ensureTenantSqlite(sql, u.id, u.name, u.email),
     });
@@ -273,7 +288,10 @@ if (!authDisabled) {
       baseURL: process.env.PUBLIC_BASE_URL,
       googleClientId: process.env.GOOGLE_CLIENT_ID,
       googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      oidc,
       requireEmailVerify: process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1",
+      passwordDisabled: passwordAuthDisabled,
+      signupDisabled,
       cookieDomain: process.env.AUTH_COOKIE_DOMAIN,
       ensureTenant: (u) => ensureTenantSqlite(sql, u.id, u.name, u.email),
     });
@@ -880,12 +898,16 @@ app.get("/auth-info", (c) =>
     providers: authDisabled
       ? []
       : [
-          "email",
-          ...(process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1" ? ["email-otp"] : []),
-          ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
-            ? ["google"]
+          ...(passwordAuthDisabled ? [] : ["email"]),
+          ...(process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1" && !passwordAuthDisabled
+            ? ["email-otp"]
             : []),
+          ...(googleEnabled ? ["google"] : []),
+          ...(oidc ? ["oidc"] : []),
         ],
+    oidc_name:
+      !authDisabled && oidc ? (process.env.OIDC_PROVIDER_NAME ?? "SSO") : null,
+    signup_disabled: signupDisabled,
     turnstile_site_key: null,
   }),
 );

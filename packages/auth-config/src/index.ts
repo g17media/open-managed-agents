@@ -11,7 +11,7 @@
 // "sign up auto-creates a workspace" flow runs on either runtime.
 
 import { betterAuth } from "better-auth";
-import { emailOTP } from "better-auth/plugins";
+import { emailOTP, genericOAuth } from "better-auth/plugins";
 import type { EmailSender } from "@open-managed-agents/email";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 
@@ -33,9 +33,24 @@ export interface BuildBetterAuthOpts {
   /** Optional Google OAuth. */
   googleClientId?: string;
   googleClientSecret?: string;
+  /** Optional generic OIDC / OAuth2 login (any spec-compliant IdP — Okta,
+   *  Keycloak, Authentik, ...). Build from OIDC_* env vars via
+   *  oidcFromEnv(). Mounts as providerId "oidc"; the redirect URI to
+   *  register with the IdP is `${origin}/auth/oauth2/callback/oidc`. */
+  oidc?: OidcProviderOptions | null;
   /** When true, sign-up requires email verification before the user is
    *  signed in. Default: false on self-host (no SMTP path), true on CF prod. */
   requireEmailVerify?: boolean;
+  /** When true, email+password auth is off entirely — sign-in AND sign-up —
+   *  and the email-OTP plugin (whose sign-in / verification / reset flows
+   *  only serve email-based accounts) is not mounted. SSO-only mode; make
+   *  sure Google or OIDC is configured or nobody can log in. */
+  passwordDisabled?: boolean;
+  /** When true, existing users can still sign in but new-account creation
+   *  is blocked on every method: password sign-up, OTP sign-in for unknown
+   *  emails, and Google / OIDC auto-provisioning. Create the first account
+   *  before flipping this on. */
+  signupDisabled?: boolean;
   /** Cross-subdomain cookie domain (e.g. ".openma.dev"). Skip for default
    *  per-host scoping. */
   cookieDomain?: string;
@@ -55,6 +70,50 @@ export interface BuildBetterAuthOpts {
 
 export type BetterAuth = ReturnType<typeof betterAuth>;
 
+export interface OidcProviderOptions {
+  clientId: string;
+  /** Optional for public clients doing PKCE-only. */
+  clientSecret?: string;
+  /** OIDC discovery document URL (…/.well-known/openid-configuration).
+   *  Either this or authorizationUrl+tokenUrl must be set. */
+  discoveryUrl?: string;
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  userInfoUrl?: string;
+  scopes: string[];
+  pkce: boolean;
+}
+
+/** Parse the OIDC_* env vars into an OidcProviderOptions, or null when the
+ *  provider isn't (fully) configured: OIDC_CLIENT_ID plus either
+ *  OIDC_DISCOVERY_URL or both OIDC_AUTHORIZATION_URL and OIDC_TOKEN_URL
+ *  are required. OIDC_SCOPES is space- or comma-separated (default
+ *  "openid profile email"); PKCE is on unless OIDC_PKCE=0. */
+export function oidcFromEnv(
+  env: Record<string, string | undefined>,
+): OidcProviderOptions | null {
+  const clientId = env.OIDC_CLIENT_ID;
+  if (!clientId) return null;
+  const discoveryUrl = env.OIDC_DISCOVERY_URL;
+  const authorizationUrl = env.OIDC_AUTHORIZATION_URL;
+  const tokenUrl = env.OIDC_TOKEN_URL;
+  if (!discoveryUrl && !(authorizationUrl && tokenUrl)) return null;
+  return {
+    clientId,
+    clientSecret: env.OIDC_CLIENT_SECRET,
+    discoveryUrl,
+    authorizationUrl,
+    tokenUrl,
+    userInfoUrl: env.OIDC_USERINFO_URL,
+    scopes: env.OIDC_SCOPES?.split(/[\s,]+/).filter(Boolean) ?? [
+      "openid",
+      "profile",
+      "email",
+    ],
+    pkce: env.OIDC_PKCE !== "0",
+  };
+}
+
 function otpEmailHtml(code: string, label: string): string {
   return [
     '<div style="font-family:sans-serif;max-width:400px;margin:0 auto;padding:32px">',
@@ -71,6 +130,7 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
     socialProviders.google = {
       clientId: opts.googleClientId,
       clientSecret: opts.googleClientSecret,
+      disableSignUp: !!opts.signupDisabled,
     };
   }
 
@@ -78,12 +138,13 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
   const requireVerify = !!opts.requireEmailVerify;
 
   const plugins: unknown[] = [];
-  if (sender) {
+  if (sender && !opts.passwordDisabled) {
     plugins.push(
       emailOTP({
         otpLength: 6,
         expiresIn: 300,
         sendVerificationOnSignUp: requireVerify,
+        disableSignUp: !!opts.signupDisabled,
         async sendVerificationOTP({ email, otp, type }) {
           const labels: Record<string, string> = {
             "sign-in": "Your sign-in code",
@@ -98,6 +159,20 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
             text: `${label}: ${otp}`,
           });
         },
+      }),
+    );
+  }
+
+  if (opts.oidc) {
+    plugins.push(
+      genericOAuth({
+        config: [
+          {
+            providerId: "oidc",
+            ...opts.oidc,
+            disableSignUp: !!opts.signupDisabled,
+          },
+        ],
       }),
     );
   }
@@ -134,7 +209,8 @@ export function buildBetterAuth(opts: BuildBetterAuthOpts) {
     baseURL: opts.baseURL,
     database: opts.database as never,
     emailAndPassword: {
-      enabled: true,
+      enabled: !opts.passwordDisabled,
+      disableSignUp: !!opts.signupDisabled,
       requireEmailVerification: requireVerify,
       ...(sendResetPassword ? { sendResetPassword } : {}),
     },
