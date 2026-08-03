@@ -92,6 +92,22 @@ function toApiAgent(row: AgentConfig & { tenant_id?: string }) {
   return formatAgent(rest);
 }
 
+/** Trim mcp_servers[].name and .url on write. Edge whitespace in a name is
+ *  fatal downstream: the harness ships the name in the x-oma-mcp-server
+ *  header, whose value the Fetch spec whitespace-normalizes, so the vault
+ *  proxy's exact-name match never hits and every request 403s. A trimmed
+ *  url keeps the credential lookup's exact url compare honest too. */
+function normalizeMcpServers<T extends AgentConfig["mcp_servers"] | null | undefined>(
+  servers: T,
+): T {
+  if (!servers) return servers;
+  return servers.map((s) => ({
+    ...s,
+    name: typeof s.name === "string" ? s.name.trim() : s.name,
+    url: typeof s.url === "string" ? s.url.trim() : s.url,
+  })) as T;
+}
+
 function multiagentToCallableAgents(
   multiagent: unknown,
 ): { list: AgentConfig["callable_agents"]; error?: string } {
@@ -222,7 +238,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
         tools: body.tools,
         harness: body.harness,
         description: body.description,
-        mcp_servers: body.mcp_servers,
+        mcp_servers: normalizeMcpServers(body.mcp_servers),
         skills: body.skills,
         callable_agents: body.callable_agents,
         metadata: body.metadata,
@@ -439,7 +455,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
           tools: body.tools,
           harness: body.harness,
           description: body.description,
-          mcp_servers: body.mcp_servers,
+          mcp_servers: normalizeMcpServers(body.mcp_servers),
           skills: body.skills,
           callable_agents: body.callable_agents,
           metadata: body.metadata,
