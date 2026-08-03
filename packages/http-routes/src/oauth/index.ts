@@ -281,6 +281,11 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
    *     `offline_access` for auth servers that only issue refresh tokens
    *     when it's requested. Persisted on the credential and reused as the
    *     default on re-authorization.
+   *   - active_tenant (optional): consumed by the auth middleware, not this
+   *     route — pins the tenant for cookie-authenticated navigations that
+   *     can't send the x-active-tenant header (this route opens in a popup).
+   *     Membership-validated; without it the session's default tenant is
+   *     used and non-default-tenant vaults 404.
    */
   app.get("/authorize", async (c) => {
     const services = resolveServices(deps.services, c);
