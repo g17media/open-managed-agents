@@ -7,6 +7,9 @@ import { checkUploadFreq, checkUploadSize } from "../quotas";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 import type { Services } from "@open-managed-agents/services";
 import type { BlobStore } from "@open-managed-agents/blob-store";
+// Type-only import — skills-github.ts imports runtime helpers from this
+// module, so keeping this side type-only avoids a runtime cycle.
+import type { GitHubSource } from "./skills-github";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>();
 
@@ -14,7 +17,7 @@ const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: 
 // Types
 // ---------------------------------------------------------------------------
 
-interface SkillFileInput {
+export interface SkillFileInput {
   filename: string;
   content: string;
   /** "utf8" (default) for text, "base64" for binary (images, fonts, archives) */
@@ -28,7 +31,7 @@ interface SkillFileEntry {
   encoding: "utf8" | "base64";
 }
 
-interface SkillMeta {
+export interface SkillMeta {
   /** Always `"skill"` on the wire — Anthropic SDK uses this discriminator
    *  (BetaSkill schema requires it). Optional in storage so legacy KV rows
    *  without the field still parse. */
@@ -46,6 +49,8 @@ interface SkillMeta {
   /** When this skill was last modified. Defaults to created_at if absent —
    *  built-in catalog rows never change so the default is correct. */
   updated_at?: string;
+  /** Present iff this skill was imported from GitHub. */
+  github_source?: GitHubSource;
 }
 
 interface SkillVersion {
@@ -204,7 +209,7 @@ async function deleteFilesFromR2(
   );
 }
 
-function ensureBucket(c: { var: { services: Services } }): BlobStore | null {
+export function ensureBucket(c: { var: { services: Services } }): BlobStore | null {
   return c.var.services.filesBlob;
 }
 
@@ -212,7 +217,7 @@ function ensureBucket(c: { var: { services: Services } }): BlobStore | null {
  * Attempt to extract `name` and `description` from YAML frontmatter in a
  * SKILL.md file.
  */
-function parseFrontmatter(
+export function parseFrontmatter(
   content: string,
 ): { name?: string; description?: string } {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -277,13 +282,13 @@ function commonRootPrefix(paths: string[]): string {
   return paths.every((p) => p.startsWith(candidate)) ? candidate : "";
 }
 
-function formatBytesHuman(n: number): string {
+export function formatBytesHuman(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function bytesToBase64Str(bytes: Uint8Array): string {
+export function bytesToBase64Str(bytes: Uint8Array): string {
   let bin = "";
   const CHUNK = 8192;
   for (let i = 0; i < bytes.length; i += CHUNK) {
@@ -295,7 +300,7 @@ function bytesToBase64Str(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-function tryDecodeUtf8(bytes: Uint8Array): string | null {
+export function tryDecodeUtf8(bytes: Uint8Array): string | null {
   try {
     return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
   } catch {
@@ -322,12 +327,22 @@ const ZIP_MAX_FILE_COUNT = 500;
 
 class ZipLimitError extends Error {}
 
-function parseSkillZipBytes(bytes: Uint8Array): ParsedSkillZip {
-  let entries: Record<string, Uint8Array>;
+export interface ZipEntry {
+  /** Path with the common top-level folder (if any) already stripped. */
+  path: string;
+  bytes: Uint8Array;
+}
+
+/** Unzip with the zip-bomb limits applied and the common root folder
+ *  stripped. Shared by the single-skill upload path and the GitHub
+ *  multi-skill import (GitHub zipballs wrap everything in
+ *  `owner-repo-<sha>/`, which is exactly the commonRootPrefix case). */
+export function unzipEntriesWithLimits(bytes: Uint8Array): { entries: ZipEntry[]; rootPrefix: string } {
+  let raw: Record<string, Uint8Array>;
   try {
     let totalUncompressed = 0;
     let count = 0;
-    entries = unzipSync(bytes, {
+    raw = unzipSync(bytes, {
       filter: (file) => {
         // Skip directory entries and platform junk before they count
         // against the budget — fflate would otherwise call us for every
@@ -362,16 +377,21 @@ function parseSkillZipBytes(bytes: Uint8Array): ParsedSkillZip {
 
   // fflate's filter already dropped directory + ignored entries; what
   // remains is the actual skill payload.
-  const usable = Object.entries(entries);
+  const usable = Object.entries(raw);
   if (usable.length === 0) {
     throw new Error("Zip is empty (after filtering metadata files)");
   }
 
   const prefix = commonRootPrefix(usable.map(([p]) => p));
-  const stripped = usable.map(([path, data]) => ({
+  const entries = usable.map(([path, data]) => ({
     path: prefix ? path.slice(prefix.length) : path,
     bytes: data,
   }));
+  return { entries, rootPrefix: prefix };
+}
+
+function parseSkillZipBytes(bytes: Uint8Array): ParsedSkillZip {
+  const { entries: stripped } = unzipEntriesWithLimits(bytes);
 
   const skillMd = stripped.find((e) => e.path.toLowerCase() === "skill.md");
   if (!skillMd) {
@@ -413,14 +433,20 @@ function parseSkillZipBytes(bytes: Uint8Array): ParsedSkillZip {
 // converge here once they have a validated SkillFileInput[] in hand.
 // ---------------------------------------------------------------------------
 
-interface PersistArgs {
+export interface PersistArgs {
   files: SkillFileInput[];
   display_title?: string;
   name?: string;
   description?: string;
+  /** Set by the GitHub import path (skills-github.ts) — stored on the SkillMeta. */
+  github_source?: GitHubSource;
+  /** Internal: skip reading files back from R2 for the response. The
+   *  GitHub import creates many skills per call and doesn't echo file
+   *  contents, so the readback is pure waste there. */
+  skip_file_readback?: boolean;
 }
 
-async function persistNewSkill(
+export async function persistNewSkill(
   env: Env,
   bucket: BlobStore,
   tenantId: string,
@@ -469,6 +495,7 @@ async function persistNewSkill(
     latest_version: versionId,
     created_at: now,
   };
+  if (args.github_source) skill.github_source = args.github_source;
   const version: SkillVersion = { version: versionId, files: manifest, created_at: now };
 
   await Promise.all([
@@ -476,11 +503,13 @@ async function persistNewSkill(
     env.CONFIG_KV.put(kvKey(tenantId, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
-  const filesOut = await readFilesFromR2(bucket, tenantId, id, versionId, manifest);
+  const filesOut = args.skip_file_readback
+    ? []
+    : await readFilesFromR2(bucket, tenantId, id, versionId, manifest);
   return { ok: true, status: 201, skill, files: filesOut };
 }
 
-async function persistNewVersion(
+export async function persistNewVersion(
   env: Env,
   bucket: BlobStore,
   tenantId: string,
@@ -510,8 +539,17 @@ async function persistNewVersion(
   const version: SkillVersion = { version: versionId, files: manifest, created_at: now };
 
   skill.latest_version = versionId;
+  skill.updated_at = now;
   if (args.display_title !== undefined) skill.display_title = args.display_title;
   if (args.description !== undefined) skill.description = args.description;
+  if (args.github_source) {
+    skill.github_source = args.github_source;
+  } else if (skill.github_source?.content_hash) {
+    // A manual (non-GitHub) version is now latest. Drop the sync no-op
+    // hash so the next sync re-imports instead of reporting "unchanged"
+    // while the manual files stay active — GitHub is the source of truth.
+    delete skill.github_source.content_hash;
+  }
 
   // Refresh display_title / description from frontmatter if caller didn't
   // override — matches the JSON endpoint's existing behavior.
@@ -541,8 +579,17 @@ app.post("/", async (c) => {
   const bucket = ensureBucket(c);
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
+  // Whitelist body fields explicitly — PersistArgs also carries internal
+  // fields (github_source, skip_file_readback) that public callers must
+  // not be able to set: a forged github_source would be persisted and
+  // echoed verbatim, including any junk keys smuggled inside it.
   const body = await c.req.json<PersistArgs>();
-  const result = await persistNewSkill(c.env, bucket, t, body);
+  const result = await persistNewSkill(c.env, bucket, t, {
+    files: body.files,
+    display_title: body.display_title,
+    name: body.name,
+    description: body.description,
+  });
   if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
   return c.json({ ...toApiSkill(result.skill), files: result.files }, 201);
 });
@@ -739,8 +786,14 @@ app.post("/:id/versions", async (c) => {
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
   const id = c.req.param("id");
+  // Whitelist body fields — see the create route for why github_source /
+  // skip_file_readback must not pass through from public callers.
   const body = await c.req.json<PersistArgs>();
-  const result = await persistNewVersion(c.env, bucket, t, id, body);
+  const result = await persistNewVersion(c.env, bucket, t, id, {
+    files: body.files,
+    display_title: body.display_title,
+    description: body.description,
+  });
   if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 403 | 404 | 500);
   return c.json(result.version, 201);
 });
@@ -901,6 +954,9 @@ app.delete("/:id/versions/:version", async (c) => {
       );
     }
     skill.latest_version = remaining[0];
+    // Latest changed to an arbitrary older version — the stored GitHub
+    // content hash no longer describes it, so drop it (next sync re-imports).
+    if (skill.github_source?.content_hash) delete skill.github_source.content_hash;
     await c.var.services.kv.put(kvKey(t, "skill", id), JSON.stringify(skill));
   }
 

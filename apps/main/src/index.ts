@@ -36,6 +36,7 @@ import memoryRoutes from "./routes/memory";
 import dreamsRoutes from "./routes/dreams";
 import filesRoutes from "./routes/files";
 import skillsRoutes from "./routes/skills";
+import skillsGitHubRoutes from "./routes/skills-github";
 import modelCardsRoutes from "./routes/model-cards";
 import modelsRoutes from "./routes/models";
 import clawhubRoutes from "./routes/clawhub";
@@ -378,6 +379,9 @@ app.route("/v1/cap-cli/oauth", capCliOauthRoutes);
 app.route("/v1/memory_stores", memoryRoutes);
 app.route("/v1/dreams", dreamsRoutes);
 app.route("/v1/files", filesRoutes);
+// GitHub import/sync mounts first so its static /import/github and
+// /sync/github paths can never be shadowed by skills.ts's /:id routes.
+app.route("/v1/skills", skillsGitHubRoutes);
 app.route("/v1/skills", skillsRoutes);
 app.route("/v1/model_cards", modelCardsRoutes);
 app.route("/v1/models", modelsRoutes);
