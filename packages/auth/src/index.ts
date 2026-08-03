@@ -6,8 +6,10 @@
 //   1. AUTH_DISABLED → tenant_id="default", user_id undefined.
 //   2. x-api-key header → resolveApiKey() → {tenant_id, user_id?}.
 //   3. Cookie session → resolveSession() → {user_id} → tenant via
-//      x-active-tenant (validated against membership) or
-//      defaultTenantForUser → ensureTenantForUser self-heal.
+//      x-active-tenant header, or ?active_tenant= query param for
+//      top-level navigations that can't set headers (the OAuth popup),
+//      both validated against membership — or defaultTenantForUser →
+//      ensureTenantForUser self-heal.
 //   4. Otherwise 401.
 //
 // Resolvers are runtime-injected: CF passes resolvers backed by D1
@@ -89,9 +91,14 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
     }
     if (!session) return c.json({ error: "Unauthorized" }, 401);
 
-    // 3. Tenant resolution.
+    // 3. Tenant resolution. The query param covers popup/navigation
+    // requests (e.g. /v1/oauth/authorize opened via window.open) where
+    // the Console can't attach the x-active-tenant header; it goes
+    // through the same membership validation, so it grants nothing the
+    // header doesn't.
     let tenantId: string | null = null;
-    const requested = c.req.header("x-active-tenant") || "";
+    const requested =
+      c.req.header("x-active-tenant") || c.req.query("active_tenant") || "";
     if (requested) {
       const ok = await deps.hasMembership(session.userId, requested);
       if (!ok) {

@@ -87,11 +87,14 @@ export const authMiddleware = createMiddleware<{
       if (session?.user) {
         // Pattern A multi-tenant: cookie auth resolves tenant from
         //   1. x-active-tenant header (set by Console after user picks),
-        //      validated against membership table — never trust the header
+        //      or ?active_tenant= query param for top-level navigations
+        //      that can't set headers (the OAuth popup) — either way
+        //      validated against membership table; never trust the value
         //      blindly or a logged-in user could read any tenant's data.
         //   2. user.tenantId default (legacy / single-tenant users).
         //   3. ensureTenant on demand for never-onboarded users.
-        const requested = c.req.header("x-active-tenant") || "";
+        const requested =
+          c.req.header("x-active-tenant") || c.req.query("active_tenant") || "";
         let tenantId: string | null = null;
         if (requested) {
           const ok = await hasMembership(c.env.MAIN_DB, session.user.id, requested);
