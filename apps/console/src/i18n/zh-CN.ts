@@ -81,6 +81,7 @@ export const zhCN: Messages = {
     yourName: "你的名字",
     minChars: "至少 8 个字符",
     continueWithGoogle: "使用 Google 继续",
+    continueWithOidc: "使用 {name} 继续",
     or: "或",
     signIn: "登录",
     signUp: "注册",

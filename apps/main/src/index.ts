@@ -254,15 +254,26 @@ app.on(["GET", "POST"], "/auth/*", async (c) => {
 // Auth info endpoint (public — tells the frontend which providers are enabled
 // and surfaces the Turnstile site key so the Login page can render the widget).
 app.get("/auth-info", (c) => {
-  const providers = listAuthProviders({
-    emailOtp: true,
-    googleClientId: c.env.GOOGLE_CLIENT_ID,
-    googleClientSecret: c.env.GOOGLE_CLIENT_SECRET,
-    githubClientId: c.env.GITHUB_CLIENT_ID,
-    githubClientSecret: c.env.GITHUB_CLIENT_SECRET,
-  });
+  const passwordDisabled = c.env.AUTH_PASSWORD_DISABLED === "1";
+  const providers: string[] = passwordDisabled ? [] : ["email", "email-otp"];
+  if (c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET) {
+    providers.push("google");
+  }
+  if (c.env.GITHUB_CLIENT_ID && c.env.GITHUB_CLIENT_SECRET) providers.push("github");
+  // Mirrors oidcFromEnv()'s enabled check — inlined because this module
+  // must not import auth-config (and thus better-auth) at the top level.
+  const oidcEnabled = !!(
+    c.env.OIDC_CLIENT_ID &&
+    (c.env.OIDC_DISCOVERY_URL ||
+      (c.env.OIDC_AUTHORIZATION_URL && c.env.OIDC_TOKEN_URL))
+  );
+  if (oidcEnabled) {
+    providers.push("oidc");
+  }
   return c.json({
     providers,
+    oidc_name: oidcEnabled ? (c.env.OIDC_PROVIDER_NAME ?? "SSO") : null,
+    signup_disabled: c.env.AUTH_SIGNUP_DISABLED === "1",
     turnstile_site_key: c.env.TURNSTILE_SITE_KEY ?? null,
   });
 });
