@@ -224,13 +224,44 @@ export function parseFrontmatter(
 ): { name?: string; description?: string } {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return {};
-  const block = match[1];
+  const lines = match[1].split(/\r?\n/);
   const result: Record<string, string> = {};
-  for (const line of block.split(/\r?\n/)) {
-    const kv = line.match(/^\s*([\w-]+)\s*:\s*(.+?)\s*$/);
-    if (kv) {
-      result[kv[1]] = kv[2].replace(/^["']|["']$/g, "");
+  for (let i = 0; i < lines.length; i++) {
+    // Top-level keys only (no leading whitespace) so nested mapping keys
+    // inside block bodies or objects aren't picked up.
+    const kv = lines[i].match(/^([\w-]+)\s*:\s*(.*?)\s*$/);
+    if (!kv) continue;
+    const key = kv[1];
+    let value = kv[2];
+    const block = value.match(/^([>|])[+-]?$/);
+    if (block) {
+      // YAML block scalar: consume the following more-indented lines.
+      // Folded (>) joins lines with spaces (blank line → paragraph break);
+      // literal (|) preserves newlines. Chomping indicators are treated as
+      // strip — trailing newlines don't matter for name/description.
+      const folded = block[1] === ">";
+      const body: string[] = [];
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        if (lines[j].trim() === "") { body.push(""); continue; }
+        if (!/^\s/.test(lines[j])) break;
+        body.push(lines[j].trim());
+      }
+      while (body.length && body[body.length - 1] === "") body.pop();
+      if (folded) {
+        value = "";
+        for (const b of body) {
+          if (b === "") value += "\n";
+          else value += (value === "" || value.endsWith("\n") ? "" : " ") + b;
+        }
+      } else {
+        value = body.join("\n");
+      }
+      i = j - 1;
+    } else {
+      value = value.replace(/^["']|["']$/g, "");
     }
+    if (value) result[key] = value;
   }
   return { name: result.name, description: result.description };
 }
