@@ -333,8 +333,12 @@ async function importGitHubSource(
     const match = byName.get(d.name);
     if (match && match.source === "custom") {
       if (match.github_source?.content_hash === contentHash) {
-        // Files identical — just refresh provenance (commit / synced_at).
+        // Files identical — refresh provenance (commit / synced_at) and the
+        // frontmatter-derived description: parser improvements can change
+        // what identical files parse to (e.g. YAML block scalars), and the
+        // description should heal without a version bump.
         match.github_source = provenance;
+        match.description = d.description;
         await env.CONFIG_KV.put(kvKey(tenantId, "skill", match.id), JSON.stringify(match));
         results.push({ name: d.name, skill_id: match.id, dir: d.dir, action: "unchanged" });
         continue;
