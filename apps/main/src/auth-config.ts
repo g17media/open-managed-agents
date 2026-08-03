@@ -1,7 +1,8 @@
 import { betterAuth } from "better-auth";
 import { drizzle } from "drizzle-orm/d1";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { emailOTP } from "better-auth/plugins";
+import { emailOTP, genericOAuth } from "better-auth/plugins";
+import { oidcFromEnv } from "@open-managed-agents/auth-config";
 import type { Env } from "@open-managed-agents/shared";
 import {
   createCfShardPoolService,
@@ -42,19 +43,26 @@ function otpEmailHtml(code: string, label: string): string {
 export function createAuth(env: Env) {
   const db = drizzle(env.MAIN_DB, { schema });
 
+  const passwordDisabled = env.AUTH_PASSWORD_DISABLED === "1";
+  const signupDisabled = env.AUTH_SIGNUP_DISABLED === "1";
+
   const socialProviders: Record<string, unknown> = {};
   if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
     socialProviders.google = {
       clientId: env.GOOGLE_CLIENT_ID,
       clientSecret: env.GOOGLE_CLIENT_SECRET,
+      disableSignUp: signupDisabled,
     };
   }
+
+  const oidc = oidcFromEnv(env as unknown as Record<string, string | undefined>);
 
   return betterAuth({
     basePath: "/auth",
     secret: env.BETTER_AUTH_SECRET,
     emailAndPassword: {
-      enabled: true,
+      enabled: !passwordDisabled,
+      disableSignUp: signupDisabled,
       requireEmailVerification: true,
       sendResetPassword: async ({ user, url }) => {
         await sendEmail(
@@ -80,26 +88,40 @@ export function createAuth(env: Env) {
       autoSignInAfterVerification: true,
     },
     plugins: [
-      emailOTP({
-        otpLength: 6,
-        expiresIn: 300,
-        sendVerificationOnSignUp: true,
-        async sendVerificationOTP({ email, otp, type }) {
-          const labels: Record<string, string> = {
-            "sign-in": "Your sign-in code",
-            "email-verification": "Verify your email",
-            "forget-password": "Your password reset code",
-          };
-          const label = labels[type] ?? "Your verification code";
-          await sendEmail(
-            env,
-            email,
-            `${label} — openma`,
-            otpEmailHtml(otp, label),
-            `${label}: ${otp}`,
-          );
-        },
-      }),
+      ...(passwordDisabled
+        ? []
+        : [
+            emailOTP({
+              otpLength: 6,
+              expiresIn: 300,
+              sendVerificationOnSignUp: true,
+              disableSignUp: signupDisabled,
+              async sendVerificationOTP({ email, otp, type }) {
+                const labels: Record<string, string> = {
+                  "sign-in": "Your sign-in code",
+                  "email-verification": "Verify your email",
+                  "forget-password": "Your password reset code",
+                };
+                const label = labels[type] ?? "Your verification code";
+                await sendEmail(
+                  env,
+                  email,
+                  `${label} — openma`,
+                  otpEmailHtml(otp, label),
+                  `${label}: ${otp}`,
+                );
+              },
+            }),
+          ]),
+      ...(oidc
+        ? [
+            genericOAuth({
+              config: [
+                { providerId: "oidc", ...oidc, disableSignUp: signupDisabled },
+              ],
+            }),
+          ]
+        : []),
     ],
     socialProviders,
     database: drizzleAdapter(db, { provider: "sqlite", schema }),

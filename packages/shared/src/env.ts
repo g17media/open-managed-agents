@@ -84,8 +84,35 @@ export interface Env {
    *  per-host scoping. */
   AUTH_COOKIE_DOMAIN?: string;
   AUTH_COOKIE_NAME?: string;
+  /** "1" disables email+password auth entirely (sign-in AND sign-up) and
+   *  the email-OTP flows — SSO-only mode. Configure Google or OIDC first
+   *  or nobody can log in. */
+  AUTH_PASSWORD_DISABLED?: string;
+  /** "1" blocks new-account creation on every method (password sign-up,
+   *  OTP sign-in for unknown emails, Google / OIDC auto-provisioning)
+   *  while existing users keep signing in. Create the first account
+   *  before flipping this on. */
+  AUTH_SIGNUP_DISABLED?: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
+  /** Generic OIDC / OAuth2 login provider (any spec-compliant IdP —
+   *  Okta, Keycloak, Authentik, ...). Enabled when OIDC_CLIENT_ID plus
+   *  either OIDC_DISCOVERY_URL or both OIDC_AUTHORIZATION_URL and
+   *  OIDC_TOKEN_URL are set. Redirect URI to register with the IdP:
+   *  ${origin}/auth/oauth2/callback/oidc. */
+  OIDC_CLIENT_ID?: string;
+  /** Optional for public clients doing PKCE-only. */
+  OIDC_CLIENT_SECRET?: string;
+  OIDC_DISCOVERY_URL?: string;
+  OIDC_AUTHORIZATION_URL?: string;
+  OIDC_TOKEN_URL?: string;
+  OIDC_USERINFO_URL?: string;
+  /** Space- or comma-separated; default "openid profile email". */
+  OIDC_SCOPES?: string;
+  /** PKCE is on by default; set to "0" for legacy IdPs without it. */
+  OIDC_PKCE?: string;
+  /** Label for the console's "Continue with …" button; default "SSO". */
+  OIDC_PROVIDER_NAME?: string;
   // Pre-registered OAuth client_id/secret per provider, for MCP servers
   // whose authorization server doesn't expose a working DCR endpoint.
   // Operator workflow: register an OAuth App with the provider, set

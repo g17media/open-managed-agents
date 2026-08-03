@@ -81,6 +81,7 @@ export const en: Messages = {
     yourName: "Your name",
     minChars: "Min 8 characters",
     continueWithGoogle: "Continue with Google",
+    continueWithOidc: "Continue with {name}",
     or: "or",
     signIn: "Sign in",
     signUp: "Sign up",

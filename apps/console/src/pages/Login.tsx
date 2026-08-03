@@ -45,9 +45,17 @@ export function Login() {
   // re-mounts so a navigation between modes doesn't refetch.
   const { data: authInfo } = useApiQuery<{
     providers?: string[];
+    oidc_name?: string | null;
+    signup_disabled?: boolean;
     turnstile_site_key?: string | null;
   }>("/auth-info");
   const googleEnabled = !!authInfo?.providers?.includes("google");
+  const oidcEnabled = !!authInfo?.providers?.includes("oidc");
+  const oidcName = authInfo?.oidc_name || "SSO";
+  // Defaults to true while /auth-info is still loading so the form doesn't
+  // flash in and out; the server rejects password calls regardless.
+  const emailEnabled = !authInfo?.providers || authInfo.providers.includes("email");
+  const signupDisabled = !!authInfo?.signup_disabled;
   // Whether the backend gates sign-up behind an email-OTP verification.
   // /auth-info advertises "email-otp" iff AUTH_REQUIRE_EMAIL_VERIFY=1 on
   // the server. When absent (default self-host), the sign-up flow does
@@ -324,6 +332,13 @@ export function Login() {
     });
   };
 
+  const handleOidc = async () => {
+    await authClient.signIn.oauth2({
+      providerId: "oidc",
+      callbackURL: nextUrl,
+    });
+  };
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-bg">
@@ -369,10 +384,11 @@ export function Login() {
           <p className="text-sm text-fg-muted mt-1">{subtitles[mode]}</p>
         </div>
 
-        {/* Google (only on login/signup/otp-login) */}
-        {googleEnabled &&
+        {/* Google / OIDC (only on login/signup/otp-login) */}
+        {(googleEnabled || oidcEnabled) &&
           (mode === "login" || mode === "signup" || mode === "otp-login") && (
             <>
+              {googleEnabled && (
               <button
                 onClick={handleGoogle}
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-border rounded-md text-sm text-fg hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
@@ -397,14 +413,27 @@ export function Login() {
                 </svg>
                 Continue with Google
               </button>
+              )}
+              {oidcEnabled && (
+                <button
+                  onClick={handleOidc}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-border rounded-md text-sm text-fg hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                >
+                  {t.login.continueWithOidc.replace("{name}", oidcName)}
+                </button>
+              )}
+              {emailEnabled && (
               <div className="flex items-center gap-3">
                 <div className="flex-1 h-px bg-border" />
                 <span className="text-xs text-fg-subtle">or</span>
                 <div className="flex-1 h-px bg-border" />
               </div>
+              )}
             </>
           )}
 
+        {emailEnabled && (
+          <>
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-3">
           {error && (
@@ -610,6 +639,8 @@ export function Login() {
               >
                 Sign in with email code
               </button>
+                  {!signupDisabled && (
+                    <>
               <span className="mx-2">&middot;</span>
               <button
                 onClick={() => {
@@ -622,6 +653,8 @@ export function Login() {
               </button>
             </>
           )}
+                </>
+              )}
           {mode === "signup" && (
             <>
               Already have an account?{" "}
@@ -647,6 +680,8 @@ export function Login() {
               >
                 Sign in with password
               </button>
+                  {!signupDisabled && (
+                    <>
               <span className="mx-2">&middot;</span>
               <button
                 onClick={() => {
@@ -659,6 +694,8 @@ export function Login() {
               </button>
             </>
           )}
+                </>
+              )}
           {(mode === "verify-signup" || mode === "verify-login") && (
             <button
               onClick={() => {
@@ -698,6 +735,8 @@ export function Login() {
             </button>
           )}
         </p>
+          </>
+        )}
       </div>
     </div>
   );
