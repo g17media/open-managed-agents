@@ -1172,7 +1172,11 @@ export async function buildTools(
           // when the next buildTools fires after warmup.
           continue;
         }
-        const serverName = server.name;
+        // Trimmed: Headers.set() whitespace-normalizes the value anyway, so
+        // an untrimmed name would silently diverge between the header (used
+        // for vault-proxy routing) and the mcp__<name>__ tool prefix (which
+        // must satisfy the model API's tool-name charset).
+        const serverName = server.name.trim();
         let timeoutHandle!: ReturnType<typeof setTimeout>;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(
@@ -1208,7 +1212,7 @@ export async function buildTools(
             timeoutPromise,
           ]);
           for (const [toolName, t] of Object.entries(remoteTools)) {
-            tools[`mcp__${server.name}__${toolName}`] = t;
+            tools[`mcp__${serverName}__${toolName}`] = t;
           }
         } catch (err) {
           // Connection / handshake / tools/list failure for one server

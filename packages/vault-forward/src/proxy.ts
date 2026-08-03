@@ -68,10 +68,18 @@ export async function resolveProxyTargetByTenant(
   };
   if (sessionAny.archived_at) return null;
 
-  // 2. agent_snapshot must declare the requested mcp server.
+  // 2. agent_snapshot must declare the requested mcp server. Trim both
+  //    sides: the harness transports the name in the x-oma-mcp-server
+  //    header, whose value the Fetch spec whitespace-normalizes, so a
+  //    stored name like "dendrite " arrives here as "dendrite" and an
+  //    exact compare would 403 every request. New writes are trimmed at
+  //    the agent routes; this heals snapshots that predate that.
   const agent = sessionAny.agent_snapshot;
   if (!agent) return null;
-  const server = (agent.mcp_servers ?? []).find((s) => s.name === serverName);
+  const wanted = serverName.trim();
+  const server = (agent.mcp_servers ?? []).find(
+    (s) => typeof s.name === "string" && s.name.trim() === wanted,
+  );
   if (!server || !server.url) return null;
 
   // 3. Resolve credential. agent.mcp_servers[].authorization_token, if set,
