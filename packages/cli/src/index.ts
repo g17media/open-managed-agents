@@ -28,6 +28,12 @@ interface Config {
   /** Whether the apiKey came from stored credentials (vs env var). Used by
    *  `oma whoami` so it can show the source — env vars override stored creds. */
   source: "env" | "stored" | "missing";
+  /** Active tenant for this invocation. API calls don't need it (the
+   *  per-tenant apiKey pins the tenant server-side), but browser-opened
+   *  URLs (mcp connect) authenticate via session cookie and must pass it
+   *  as ?active_tenant= or the server falls back to the session's default
+   *  tenant. Unknown for bare OMA_API_KEY without OMA_TENANT_ID. */
+  tenantId?: string;
 }
 
 // ─── Stored credentials (~/.config/oma/credentials.json) ───
@@ -157,6 +163,7 @@ function loadConfig(): Config {
       apiKey: envKey,
       json: false,
       source: "env",
+      tenantId: envTenant,
     };
   }
   if (stored) {
@@ -171,6 +178,7 @@ function loadConfig(): Config {
       apiKey: profile.token,
       json: false,
       source: "stored",
+      tenantId: activeId,
     };
   }
   console.error("Error: not authenticated.");
@@ -2209,7 +2217,10 @@ function resolveServerUrl(nameOrUrl: string): string {
 async function connectMcp(config: Config, mcpServerUrl: string, vaultId: string) {
   const port = 19284 + Math.floor(Math.random() * 1000);
   const redirectUri = `http://localhost:${port}/callback`;
-  const authUrl = `${config.baseUrl}/v1/oma/oauth/authorize?mcp_server_url=${encodeURIComponent(mcpServerUrl)}&vault_id=${encodeURIComponent(vaultId)}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+  const tenantParam = config.tenantId
+    ? `&active_tenant=${encodeURIComponent(config.tenantId)}`
+    : "";
+  const authUrl = `${config.baseUrl}/v1/oma/oauth/authorize?mcp_server_url=${encodeURIComponent(mcpServerUrl)}&vault_id=${encodeURIComponent(vaultId)}&redirect_uri=${encodeURIComponent(redirectUri)}${tenantParam}`;
 
   console.log(`Opening browser...\n  ${authUrl}\n`);
   try {
