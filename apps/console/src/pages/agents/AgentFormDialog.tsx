@@ -410,6 +410,11 @@ export function AgentFormDialog({
 
   const inputCls =
     "w-full border border-border rounded-md px-3 py-2 min-h-11 sm:min-h-0 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
+  // The code editor deliberately does NOT reuse `inputCls`: its `sm:min-h-0`
+  // is a responsive variant, so it sorts after any plain `min-h-*` appended
+  // to it and wipes the editor's minimum height on >=sm viewports.
+  const codeAreaCls =
+    "w-full flex-1 min-h-[320px] resize-none border border-border rounded-md px-3 py-2 font-mono text-xs leading-relaxed bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]";
   const tabCls = (t: string) =>
     `inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 text-sm rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
       tab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"
@@ -420,6 +425,10 @@ export function AgentFormDialog({
   // Empty string when nothing matches (e.g. paste mode with an unknown model).
   const selectedCardId =
     form.modelCardId || modelCards.find((mc) => mc.model_id === form.model)?.id || "";
+
+  // YAML/JSON editing wants the full 85vh, not a content-sized panel: the
+  // textarea's `flex-1` only grows when the panel has surplus height to give.
+  const codeMode = createMode !== "form" && (isEdit || createStep === "form");
 
   if (!open) {
     // Render the MCP picker anyway? No — it only makes sense while the
@@ -438,7 +447,9 @@ export function AgentFormDialog({
           role="dialog"
           aria-modal="true"
           aria-label={isEdit ? t.agents.editAgentTitle : t.agents.newAgentTitle}
-          className="bg-bg rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col"
+          className={`bg-bg rounded-lg shadow-xl w-full max-w-2xl flex flex-col ${
+            codeMode ? "h-[85vh]" : "max-h-[85vh]"
+          }`}
           onClick={(e) => e.stopPropagation()}
         >
           {/* Template selection step — create only */}
@@ -620,16 +631,16 @@ export function AgentFormDialog({
               <div className="flex-1 overflow-y-auto px-6 py-4">
                 {/* Code editor mode (YAML/JSON) */}
                 {createMode !== "form" && (
-                  <div className="space-y-3 h-full flex flex-col">
+                  <div className="space-y-3 h-full min-h-0 flex flex-col">
                     {createError && (
-                      <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">
+                      <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2 shrink-0">
                         {createError}
                       </div>
                     )}
                     <textarea
                       value={codeValue}
                       onChange={(e) => setCodeValue(e.target.value)}
-                      className={`${inputCls} flex-1 resize-none font-mono text-xs leading-relaxed min-h-[300px]`}
+                      className={codeAreaCls}
                       spellCheck={false}
                     />
                   </div>
