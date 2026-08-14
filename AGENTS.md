@@ -369,6 +369,41 @@ Environments define the sandbox where tools execute:
 }
 ```
 
+### Custom Sandbox Image (self-host)
+
+On self-host deployments whose sandbox provider supports per-session images
+(belljar today), an environment can name a custom container image — it must
+be built `FROM cloudflare/sandbox` since the platform speaks that image's
+runtime API. For private registries, reference a vault credential of auth
+type `container_registry`; it is resolved control-plane-side for the pull
+only and never enters the sandbox.
+
+```json
+{
+  "config": {
+    "type": "cloud",
+    "image": "ghcr.io/acme/sandbox:latest",
+    "image_registry_auth": { "vault_id": "vlt_xxx", "credential_id": "cred_xxx" }
+  }
+}
+```
+
+### Agent Context
+
+`config.context` is optional free text injected into the system prompt of
+every agent running sessions in the environment — use it for facts about the
+execution environment itself (what's deployed where, conventions, guardrails)
+rather than agent persona, which belongs in `agent.system`.
+
+```json
+{
+  "config": {
+    "type": "cloud",
+    "context": "This environment targets the staging cluster. Services live under /workspace/services."
+  }
+}
+```
+
 ### Environment Status
 
 Environments go through a build process:
@@ -409,6 +444,7 @@ curl -s $BASE/v1/vaults/$VAULT_ID/credentials \
 | `static_bearer` | API tokens (GitHub, etc.) | `Authorization: Bearer` header on matching URLs |
 | `mcp_oauth` | OAuth-authenticated MCP servers | Token refresh + injection via outbound proxy |
 | `command_secret` | CLI tools (wrangler, aws) | Environment variable injection for matching commands |
+| `container_registry` | Private sandbox images (environments' `config.image`) | Control-plane-side pull auth at sandbox provisioning — never enters the sandbox |
 
 ### How It Works
 

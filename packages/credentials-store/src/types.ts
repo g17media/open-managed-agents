@@ -24,4 +24,5 @@ export const SECRET_AUTH_FIELDS: (keyof CredentialAuth)[] = [
   "access_token",
   "refresh_token",
   "client_secret",
+  "password",
 ];

@@ -5067,6 +5067,33 @@ export class SessionDO extends DurableObject<Env> {
       });
     }
 
+    // Environment-level custom context (environments.config.context) —
+    // injected for every agent running a session in this environment.
+    // Snapshot-first via getEnvConfig, so it's static per session and
+    // cache-stable like the rest of the reminders.
+    //
+    // The abort-controller setup that used to sit here is gone: upstream
+    // now mints it earlier in this same method (with parent-signal
+    // propagation), and re-declaring `abortController` /
+    // `effectiveAbortSignal` in this scope would not compile.
+    if (this.state.environment_id) {
+      try {
+        const envCfg = await this.getEnvConfig(this.state.environment_id);
+        const envContext = envCfg?.config?.context;
+        if (typeof envContext === "string" && envContext.trim()) {
+          platformReminders.push({
+            source: `environment:${this.state.environment_id}`,
+            text: envContext,
+          });
+        }
+      } catch (err) {
+        logWarn(
+          { op: "session_do.environment_context", session_id: this.state.session_id, err },
+          "environment context fetch failed; prompt omits it",
+        );
+      }
+    }
+
     // Build the final system prompt: agent.system + platform guidance +
     // every platformReminder wrapped in a <source name="...">…</source>
     // block. Done HERE (after all reminder collection) so the prompt
