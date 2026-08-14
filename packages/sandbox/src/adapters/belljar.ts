@@ -56,7 +56,7 @@
 import { mkdirSync } from "node:fs";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
-import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
+import type { ProcessHandle, SandboxExecutor, SandboxFactory, SandboxRegistryAuth } from "../ports";
 import { sessionVaultProxyUrl } from "../vault-proxy";
 import { getLogger } from "@open-managed-agents/observability";
 
@@ -90,6 +90,12 @@ export interface BelljarSandboxOptions {
    *  adapter talks to that image's runtime API. When omitted, the belljar
    *  server's own BELLJAR_IMAGE default applies. */
   image?: string;
+  /** Credentials for pulling `image` from a private registry, passed to
+   *  belljar's create request. belljar uses them for the pull only and
+   *  never persists them (they're excluded from container labels and the
+   *  retention tombstone); revival pulls fall back to the engine's image
+   *  cache or the server's BELLJAR_REGISTRY_AUTH. */
+  registryAuth?: SandboxRegistryAuth;
   /** Default per-command timeout in ms. */
   defaultTimeoutMs?: number;
   /** Used to name the sandbox — `oma-<sessionId>` is easy to spot in
@@ -379,6 +385,7 @@ export class BelljarSandbox implements SandboxExecutor {
   private async createSandbox(): Promise<void> {
     const body: Record<string, unknown> = { id: this.sandboxId };
     if (this.opts.image) body.image = this.opts.image;
+    if (this.opts.registryAuth) body.registryAuth = this.opts.registryAuth;
     if (this.volumes.length) body.mounts = this.volumes;
     if (this.opts.isolation) body.isolation = this.buildIsolation();
     const res = await this.fetch("/v1/sandboxes", {
@@ -617,11 +624,13 @@ export const sandboxFactory: SandboxFactory = async (ctx, env) => {
   return new BelljarSandbox({
     baseUrl,
     token: env.BELLJAR_TOKEN,
-    // NOTE: unlike other providers, SANDBOX_IMAGE here must be
+    // NOTE: unlike other providers, the image here must be
     // `cloudflare/sandbox` or an image derived from it — the adapter
-    // speaks that image's runtime API. Leave unset to use the belljar
-    // server's BELLJAR_IMAGE default.
-    image: env.SANDBOX_IMAGE,
+    // speaks that image's runtime API. The session's environment-level
+    // override wins over the process-wide SANDBOX_IMAGE; leave both
+    // unset to use the belljar server's BELLJAR_IMAGE default.
+    image: ctx.image ?? env.SANDBOX_IMAGE,
+    registryAuth: ctx.registryAuth,
     sessionId: ctx.sessionId,
     memoryRoot: ctx.memoryRoot,
     outputsRoot: ctx.outputsRoot,

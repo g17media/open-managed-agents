@@ -19,6 +19,8 @@
 // OMA-specific (no Anthropic equivalent):
 //   environment.config.dockerfile         ≤ 100,000 chars
 //   environment.config.packages.<eco>     ≤ 100 entries per ecosystem
+//   environment.config.image              ≤ 512 chars
+//   environment.config.context            ≤ 16,384 chars
 //
 // Naming: ValidationError is intentionally a plain object, not a thrown
 // class, so the route layer can map it to a 400 with a clear message
@@ -38,6 +40,8 @@ const METADATA_KEY_CHARS_MAX = 64;
 const METADATA_VALUE_CHARS_MAX = 512;
 const DOCKERFILE_MAX = 100_000;
 const PACKAGES_PER_ECO_MAX = 100;
+const IMAGE_REF_MAX = 512;
+const ENV_CONTEXT_MAX = 16_384;
 
 function validateMetadata(
   field: string,
@@ -177,6 +181,35 @@ export function validateEnvironmentLimits(
             error: `config.packages.${eco} length ${list.length} exceeds ${PACKAGES_PER_ECO_MAX}`,
           };
         }
+      }
+    }
+    const image = input.config.image;
+    if (typeof image === "string" && image.length > IMAGE_REF_MAX) {
+      return {
+        ok: false,
+        error: `config.image length ${image.length} exceeds ${IMAGE_REF_MAX}`,
+      };
+    }
+    const context = input.config.context;
+    if (typeof context === "string" && context.length > ENV_CONTEXT_MAX) {
+      return {
+        ok: false,
+        error: `config.context length ${context.length} exceeds ${ENV_CONTEXT_MAX}`,
+      };
+    }
+    const registryAuth = input.config.image_registry_auth;
+    if (registryAuth !== undefined && registryAuth !== null) {
+      const ref = registryAuth as { vault_id?: unknown; credential_id?: unknown };
+      if (
+        typeof registryAuth !== "object" ||
+        Array.isArray(registryAuth) ||
+        typeof ref.vault_id !== "string" ||
+        typeof ref.credential_id !== "string"
+      ) {
+        return {
+          ok: false,
+          error: "config.image_registry_auth must be { vault_id, credential_id }",
+        };
       }
     }
   }
