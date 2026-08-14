@@ -37,7 +37,11 @@ import { useI18n } from "../i18n";
 // =================================================================
 
 type Vault = BetaManagedAgentsVault;
-type Credential = BetaManagedAgentsCredential;
+type Credential = Omit<BetaManagedAgentsCredential, "auth"> & {
+  auth: BetaManagedAgentsCredential["auth"]
+    | { type: "container_registry"; registry?: string }
+    | { type: "cap_cli"; cli_id: string; mcp_server_url?: string };
+};
 
 function credentialTypeView(credential: Credential): {
   label: string;
@@ -57,6 +61,10 @@ function credentialTypeView(credential: Credential): {
         className: "bg-success-subtle text-success",
         target: credential.auth.mcp_server_url,
       };
+    case "container_registry":
+      return { label: "Registry", className: "bg-warning-subtle text-warning", target: credential.auth.registry ?? "" };
+    case "cap_cli":
+      return { label: "CLI", className: "bg-brand-subtle text-brand", target: credential.auth.mcp_server_url ?? credential.auth.cli_id };
     case "environment_variable":
       return {
         label: "Environment variable",
@@ -647,9 +655,10 @@ function AddCredentialModal({
   const { api } = useApi();
   const managedApi = useManagedApi();
 
-  // Top-level tab inside the modal: MCP server vs CLI. Folds the two
-  // previously separate entry points into one modal; matches Anthropic.
-  const [addTab, setAddTab] = useState<"mcp" | "cli">("mcp");
+  // Top-level tab inside the modal: MCP server / CLI / container registry.
+  // Folds the previously separate entry points into one modal; matches
+  // Anthropic for the first two.
+  const [addTab, setAddTab] = useState<"mcp" | "cli" | "registry">("mcp");
   const [connecting, setConnecting] = useState<string | null>(null);
 
   // Custom MCP server form — single inline form (Anthropic-style). All
@@ -681,6 +690,16 @@ function AddCredentialModal({
     cli_id: "gh",
     display_name: "",
     token: "",
+  });
+
+  // Container-registry form (container_registry credentials) — pull auth
+  // for private sandbox images referenced by an environment's config.image.
+  const [registryForm, setRegistryForm] = useState({
+    display_name: "",
+    registry: "",
+    username: "",
+    password: "",
+    identityToken: "",
   });
 
   // OAuth Device Authorization Grant state for cap_cli credentials.
@@ -852,6 +871,30 @@ function AddCredentialModal({
     }
   };
 
+  const createRegistryCred = async () => {
+    // Either an identity token (stored as `token`) or username+password —
+    // mirrors the shapes belljar accepts as registryAuth.
+    const auth: Record<string, unknown> = { type: "container_registry" };
+    if (registryForm.registry.trim()) auth.registry = registryForm.registry.trim();
+    if (registryForm.identityToken) {
+      auth.token = registryForm.identityToken;
+    } else {
+      auth.username = registryForm.username;
+      auth.password = registryForm.password;
+    }
+    await api(`/v1/vaults/${vault.id}/credentials`, {
+      method: "POST",
+      body: JSON.stringify({
+        display_name:
+          registryForm.display_name ||
+          registryForm.registry.trim() ||
+          "Container registry",
+        auth,
+      }),
+    });
+    onCreated();
+  };
+
   const createCapCliCred = async () => {
     const defaultName =
       CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.label ?? cliForm.cli_id;
@@ -988,6 +1031,21 @@ function AddCredentialModal({
               </Button>
             </>
           )
+        ) : addTab === "registry" ? (
+          <>
+            <Button variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              onClick={createRegistryCred}
+              disabled={
+                !registryForm.identityToken &&
+                !(registryForm.username && registryForm.password)
+              }
+            >
+              Create
+            </Button>
+          </>
         ) : (
           <>
             <Button variant="ghost" onClick={onClose}>
@@ -1011,12 +1069,13 @@ function AddCredentialModal({
     >
       <Tabs
         value={addTab}
-        onValueChange={(v) => setAddTab(v as "mcp" | "cli")}
+        onValueChange={(v) => setAddTab(v as "mcp" | "cli" | "registry")}
         aria-label="Add credential"
       >
         <TabsList className="mb-3">
           <TabsTrigger value="mcp">MCP server</TabsTrigger>
           <TabsTrigger value="cli">CLI</TabsTrigger>
+          <TabsTrigger value="registry">Registry</TabsTrigger>
         </TabsList>
 
         <TabsContent value="mcp" className="space-y-4">
@@ -1434,6 +1493,107 @@ function AddCredentialModal({
               className={inputCls}
               placeholder="••••••••"
               disabled={deviceFlow?.status === "polling"}
+            />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="registry" className="space-y-3">
+          <div className="text-sm text-fg-muted">
+            Pull credentials for a private container registry. Used by the
+            platform to pull an environment&apos;s custom sandbox image — never
+            exposed to the sandbox itself.
+          </div>
+          <div>
+            <label
+              htmlFor="vault-registry-name"
+              className="text-sm text-fg-muted block mb-1"
+            >
+              Display Name <span className="text-fg-subtle">(optional)</span>
+            </label>
+            <TextInput
+              id="vault-registry-name"
+              value={registryForm.display_name}
+              onChange={(e) =>
+                setRegistryForm({ ...registryForm, display_name: e.target.value })
+              }
+              className={inputCls}
+              placeholder="ghcr.io pull token"
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="vault-registry-host"
+              className="text-sm text-fg-muted block mb-1"
+            >
+              Registry host <span className="text-fg-subtle">(optional)</span>
+            </label>
+            <TextInput
+              id="vault-registry-host"
+              value={registryForm.registry}
+              onChange={(e) =>
+                setRegistryForm({ ...registryForm, registry: e.target.value })
+              }
+              className={inputCls}
+              placeholder="ghcr.io"
+            />
+            <div className="text-xs text-fg-subtle mt-1">
+              Defaults to the registry implied by the image reference.
+            </div>
+          </div>
+          <div>
+            <label
+              htmlFor="vault-registry-username"
+              className="text-sm text-fg-muted block mb-1"
+            >
+              Username
+            </label>
+            <TextInput
+              id="vault-registry-username"
+              value={registryForm.username}
+              onChange={(e) =>
+                setRegistryForm({ ...registryForm, username: e.target.value })
+              }
+              className={inputCls}
+              placeholder="robot$puller"
+              disabled={!!registryForm.identityToken}
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="vault-registry-password"
+              className="text-sm text-fg-muted block mb-1"
+            >
+              Password / access token
+            </label>
+            <SecretInput
+              id="vault-registry-password"
+              value={registryForm.password}
+              onChange={(e) =>
+                setRegistryForm({ ...registryForm, password: e.target.value })
+              }
+              className={inputCls}
+              placeholder="••••••••"
+              disabled={!!registryForm.identityToken}
+            />
+          </div>
+          <div>
+            <label
+              htmlFor="vault-registry-identity"
+              className="text-sm text-fg-muted block mb-1"
+            >
+              Identity token{" "}
+              <span className="text-fg-subtle">
+                (alternative to username/password)
+              </span>
+            </label>
+            <SecretInput
+              id="vault-registry-identity"
+              value={registryForm.identityToken}
+              onChange={(e) =>
+                setRegistryForm({ ...registryForm, identityToken: e.target.value })
+              }
+              className={inputCls}
+              placeholder="••••••••"
             />
           </div>
         </TabsContent>
