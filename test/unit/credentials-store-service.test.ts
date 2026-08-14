@@ -432,6 +432,28 @@ describe("stripSecrets", () => {
     // Original is not mutated
     expect(cred.auth.access_token).toBe("secret_a");
   });
+
+  it("removes password from container_registry auth, keeps username + registry", () => {
+    const cred = {
+      id: "cred-2",
+      tenant_id: "t",
+      vault_id: "v",
+      display_name: "ghcr pull",
+      auth: {
+        type: "container_registry" as const,
+        username: "robot$puller",
+        password: "secret_pw",
+        registry: "ghcr.io",
+      },
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: null,
+      archived_at: null,
+    };
+    const stripped = stripSecrets(cred);
+    expect(stripped.auth.password).toBeUndefined();
+    expect(stripped.auth.username).toBe("robot$puller");
+    expect(stripped.auth.registry).toBe("ghcr.io");
+  });
 });
 
 describe("CredentialService — CAS refresh (race-safe)", () => {

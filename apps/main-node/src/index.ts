@@ -520,9 +520,72 @@ async function buildSandbox(
       workdir,
       memoryRoot: memoryBlobLocalDir ?? "",
       outputsRoot,
+      // Only belljar honors per-session images today — skip the lookups
+      // for providers that would ignore the fields anyway.
+      ...(provider === "belljar" ? await environmentImageOverrides(sessionId) : {}),
     },
     process.env,
   );
+}
+
+/**
+ * Environment-level sandbox overrides: the session's environment may name
+ * a custom `config.image` plus a vault credential (`image_registry_auth`)
+ * to pull it from a private registry. The credential is resolved here,
+ * control-plane-side, and handed to the adapter for the pull only — it
+ * never enters the sandbox and is never persisted in any snapshot.
+ */
+async function environmentImageOverrides(
+  sessionId: string,
+): Promise<Pick<import("@open-managed-agents/sandbox").SandboxFactoryContext, "image" | "registryAuth">> {
+  try {
+    const session = await sessionsService.getById({ sessionId });
+    const envId = session?.environment_id;
+    if (!session || !envId) return {};
+    const env = await environmentsService.get({
+      tenantId: session.tenant_id,
+      environmentId: envId,
+    });
+    const image = env?.config?.image;
+    if (!image) return {};
+    const ref = env.config.image_registry_auth;
+    if (!ref?.vault_id || !ref?.credential_id) return { image };
+    const cred = await credentialService.get({
+      tenantId: session.tenant_id,
+      vaultId: ref.vault_id,
+      credentialId: ref.credential_id,
+    });
+    if (!cred || cred.archived_at || cred.auth.type !== "container_registry") {
+      // Don't fail provisioning — the pull can still succeed from the
+      // engine's image cache or the belljar server's own fallback creds.
+      logger.warn(
+        {
+          op: "main-node.image_registry_auth_unusable",
+          session_id: sessionId,
+          environment_id: envId,
+          credential_id: ref.credential_id,
+        },
+        "environment's image_registry_auth credential is missing, archived, or not container_registry — pulling without credentials",
+      );
+      return { image };
+    }
+    return {
+      image,
+      registryAuth: cred.auth.token
+        ? { identityToken: cred.auth.token, serveraddress: cred.auth.registry }
+        : {
+            username: cred.auth.username,
+            password: cred.auth.password,
+            serveraddress: cred.auth.registry,
+          },
+    };
+  } catch (err) {
+    logger.warn(
+      { err, op: "main-node.environment_image_overrides_failed", session_id: sessionId },
+      "environment image override resolution failed; using provider defaults",
+    );
+    return {};
+  }
 }
 
 // ─── Session registry ───────────────────────────────────────────────────
@@ -700,6 +763,27 @@ const sessionRegistry = new SessionRegistry({
           "anything that must outlive it in /mnt/memory or /mnt/session/outputs.",
         ].join("\n"),
       });
+    }
+    // Environment-level custom context (environments.config.context) —
+    // injected for every agent running a session in this environment.
+    try {
+      const sessionRow = await sessionsService.getById({ sessionId: input.sessionId });
+      const envId = sessionRow?.environment_id;
+      if (envId) {
+        const envRow = await environmentsService.get({
+          tenantId: input.tenantId,
+          environmentId: envId,
+        });
+        const envContext = envRow?.config?.context;
+        if (typeof envContext === "string" && envContext.trim()) {
+          memoryReminders.push({ source: `environment:${envId}`, text: envContext });
+        }
+      }
+    } catch (err) {
+      logger.warn(
+        { err, op: "main-node.environment_context_failed", session_id: input.sessionId },
+        "environment context fetch failed; prompt omits it",
+      );
     }
     return {
       agent: input.agent,

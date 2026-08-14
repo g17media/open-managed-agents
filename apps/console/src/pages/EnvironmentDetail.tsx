@@ -34,6 +34,9 @@ interface EnvConfigBlock {
   packages?: Partial<Record<AnyManager, string[]>>;
   networking?: NetworkingConfig;
   dockerfile?: string;
+  image?: string;
+  image_registry_auth?: { vault_id: string; credential_id: string };
+  context?: string;
 }
 
 interface Env {
@@ -94,6 +97,23 @@ export function EnvironmentDetail() {
   // `gem` packages aren't editable (no UI row) — preserved verbatim
   // so save doesn't silently strip them.
   const [preservedGem, setPreservedGem] = useState<string[] | undefined>(undefined);
+  const [image, setImage] = useState("");
+  // "none" = explicit no-credential sentinel (Radix Select can't carry "").
+  const [registryVaultId, setRegistryVaultId] = useState("none");
+  const [registryCredentialId, setRegistryCredentialId] = useState("");
+  const [contextText, setContextText] = useState("");
+
+  // Vaults + per-vault registry credentials for the image pull picker.
+  const { data: vaultsRes } = useApiQuery<{ data: Array<{ id: string; name: string }> }>(
+    "/v1/vaults",
+  );
+  const vaults = vaultsRes?.data ?? [];
+  const { data: credsRes } = useApiQuery<{
+    data: Array<{ id: string; display_name: string; auth: { type: string }; archived_at?: string | null }>;
+  }>(registryVaultId !== "none" ? `/v1/vaults/${registryVaultId}/credentials` : null);
+  const registryCreds = (credsRes?.data ?? []).filter(
+    (c) => c.auth.type === "container_registry" && !c.archived_at,
+  );
 
   // Initial load via TQ. Re-renders when the cache is populated; the
   // applyEnv side-effect below seeds the editable form state once per
@@ -133,6 +153,11 @@ export function EnvironmentDetail() {
     setPreservedGem(e.config.packages?.gem);
 
     setMetadataRows(metadataToRows(e.metadata));
+
+    setImage(e.config.image ?? "");
+    setRegistryVaultId(e.config.image_registry_auth?.vault_id ?? "none");
+    setRegistryCredentialId(e.config.image_registry_auth?.credential_id ?? "");
+    setContextText(e.config.context ?? "");
   }
 
   async function save() {
@@ -146,6 +171,11 @@ export function EnvironmentDetail() {
         ...(env.config.dockerfile !== undefined ? { dockerfile: env.config.dockerfile } : {}),
         packages: rowsToPackages(packageRows, preservedGem),
         networking: buildNetworking(networking, allowedHostsText),
+        ...(image.trim() ? { image: image.trim() } : {}),
+        ...(image.trim() && registryVaultId !== "none" && registryCredentialId
+          ? { image_registry_auth: { vault_id: registryVaultId, credential_id: registryCredentialId } }
+          : {}),
+        ...(contextText.trim() ? { context: contextText } : {}),
       };
 
       const body = {
@@ -284,6 +314,78 @@ export function EnvironmentDetail() {
               </Field>
             )}
           </div>
+        </SectionCard>
+
+        {/* Sandbox image */}
+        <SectionCard
+          title="Sandbox image"
+          subtitle="Custom container image for sessions in this environment. Honored by sandbox providers that support per-session images (belljar); must be built FROM cloudflare/sandbox."
+        >
+          <div className="space-y-4">
+            <Field label="Image" hint="Leave empty to use the provider's default image.">
+              <input
+                value={image}
+                onChange={(e) => setImage(e.target.value)}
+                placeholder="ghcr.io/acme/sandbox:latest"
+                className="w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle font-mono"
+              />
+            </Field>
+            {image.trim() && (
+              <Field
+                label="Registry credential"
+                hint="Vault credential of type container_registry, used server-side to pull the image from a private registry. Never enters the sandbox."
+              >
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="w-full sm:w-56">
+                    <Select
+                      value={registryVaultId}
+                      onValueChange={(v) => {
+                        setRegistryVaultId(v);
+                        setRegistryCredentialId("");
+                      }}
+                    >
+                      <SelectOption value="none">No credential (public image)</SelectOption>
+                      {vaults.map((v) => (
+                        <SelectOption key={v.id} value={v.id}>{v.name}</SelectOption>
+                      ))}
+                    </Select>
+                  </div>
+                  {registryVaultId !== "none" && (
+                    <div className="w-full sm:w-72">
+                      <Select
+                        value={registryCredentialId}
+                        onValueChange={setRegistryCredentialId}
+                        placeholder={
+                          registryCreds.length
+                            ? "Select credential…"
+                            : "No registry credentials in this vault"
+                        }
+                        disabled={registryCreds.length === 0}
+                      >
+                        {registryCreds.map((c) => (
+                          <SelectOption key={c.id} value={c.id}>{c.display_name}</SelectOption>
+                        ))}
+                      </Select>
+                    </div>
+                  )}
+                </div>
+              </Field>
+            )}
+          </div>
+        </SectionCard>
+
+        {/* Agent context */}
+        <SectionCard
+          title="Agent context"
+          subtitle="Extra context injected into the system prompt of every agent running sessions in this environment."
+        >
+          <textarea
+            value={contextText}
+            onChange={(e) => setContextText(e.target.value)}
+            rows={5}
+            className="w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle resize-y"
+            placeholder="e.g. This environment targets the staging cluster. Deployed services live under /workspace/services; never touch production DNS."
+          />
         </SectionCard>
 
         {/* Packages */}
