@@ -4478,6 +4478,28 @@ export class SessionDO extends DurableObject<Env> {
       });
     }
 
+    // Environment-level custom context (environments.config.context) —
+    // injected for every agent running a session in this environment.
+    // Snapshot-first via getEnvConfig, so it's static per session and
+    // cache-stable like the rest of the reminders.
+    if (this.state.environment_id) {
+      try {
+        const envCfg = await this.getEnvConfig(this.state.environment_id);
+        const envContext = envCfg?.config?.context;
+        if (typeof envContext === "string" && envContext.trim()) {
+          platformReminders.push({
+            source: `environment:${this.state.environment_id}`,
+            text: envContext,
+          });
+        }
+      } catch (err) {
+        logWarn(
+          { op: "session_do.environment_context", session_id: this.state.session_id, err },
+          "environment context fetch failed; prompt omits it",
+        );
+      }
+    }
+
     // Create an abort controller for this execution. Stall detection now
     // lives inside default-loop.ts (in-closure setTimeout next to the
     // streamText call) so we no longer compose with a DO-instance

@@ -177,4 +177,49 @@ describe("validateEnvironmentLimits", () => {
   it("ignores undefined config (PATCH that doesn't touch config)", () => {
     expect(validateEnvironmentLimits({ name: "x" })).toEqual({ ok: true });
   });
+
+  it("accepts config.image, image_registry_auth and context under caps", () => {
+    expect(
+      validateEnvironmentLimits({
+        config: {
+          type: "cloud",
+          image: "ghcr.io/acme/sandbox:latest",
+          image_registry_auth: { vault_id: "vlt_1", credential_id: "cred_1" },
+          context: "Staging cluster only.",
+        },
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it("rejects config.image > 512 chars", () => {
+    const r = validateEnvironmentLimits({
+      config: { type: "cloud", image: "a".repeat(513) },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/image length 513 exceeds 512/);
+  });
+
+  it("rejects config.context > 16,384 chars", () => {
+    const r = validateEnvironmentLimits({
+      config: { type: "cloud", context: "a".repeat(16_385) },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/context length 16385 exceeds 16384/);
+  });
+
+  it("rejects malformed config.image_registry_auth", () => {
+    for (const bad of [
+      "cred_1",
+      ["vlt_1", "cred_1"],
+      { vault_id: "vlt_1" },
+      { credential_id: "cred_1" },
+      { vault_id: 1, credential_id: "cred_1" },
+    ]) {
+      const r = validateEnvironmentLimits({
+        config: { type: "cloud", image_registry_auth: bad },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatch(/image_registry_auth/);
+    }
+  });
 });

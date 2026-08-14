@@ -147,6 +147,25 @@ export interface SandboxFactoryContext {
    *  per-(tenant, session) dirs under here when mountSessionOutputs
    *  is called; remote adapters that don't host-mount can ignore it. */
   outputsRoot?: string;
+  /** Per-session container image override (from the session's
+   *  environment config). Takes precedence over the adapter's own
+   *  image env var; adapters that can't honor it ignore it. */
+  image?: string;
+  /** Credentials for pulling `image` from a private registry. Resolved
+   *  from a vault by the host at provision time; adapters use them for
+   *  the pull only and must never persist or expose them. */
+  registryAuth?: SandboxRegistryAuth;
+}
+
+/** Pull credentials for a private registry — either username/password
+ *  or an identity token, mirroring belljar's `registryAuth` wire shape. */
+export interface SandboxRegistryAuth {
+  username?: string;
+  password?: string;
+  /** Registry host the credentials are for; defaults to the registry
+   *  implied by the image reference. */
+  serveraddress?: string;
+  identityToken?: string;
 }
 
 /** Read-only view of process env handed to the factory. Whole `process.env`

@@ -151,6 +151,19 @@ export interface EnvironmentConfig {
      *  FROM/WORKDIR/USER/ENTRYPOINT/CMD (it owns those to keep the
      *  harness runtime hooks intact). */
     dockerfile?: string;
+    /** Custom sandbox container image. Honored on self-host when the
+     *  sandbox provider supports per-session images (belljar); must be
+     *  `cloudflare/sandbox` or an image derived from it, since the
+     *  adapter speaks that image's runtime API. Other providers ignore it. */
+    image?: string;
+    /** Vault credential (auth type `container_registry`) used to pull
+     *  `image` from a private registry. Resolved server-side at sandbox
+     *  provisioning time — the secret never enters the sandbox and is
+     *  never persisted in session snapshots. */
+    image_registry_auth?: { vault_id: string; credential_id: string };
+    /** Extra context injected into the system prompt of every agent
+     *  running a session in this environment. */
+    context?: string;
   };
   metadata?: Record<string, unknown>;
   created_at: string;
@@ -926,7 +939,7 @@ export interface VaultConfig {
 // --- Credential ---
 
 export interface CredentialAuth {
-  type: "mcp_oauth" | "static_bearer" | "cap_cli";
+  type: "mcp_oauth" | "static_bearer" | "cap_cli" | "container_registry";
   // mcp_oauth / static_bearer: match by MCP server URL
   mcp_server_url?: string;
   // mcp_oauth fields
@@ -955,6 +968,13 @@ export interface CredentialAuth {
   // type which injected tokens directly into subprocess env (leaky).
   cli_id?: string;                 // matches a cap.builtinSpecs cli_id (e.g. "gh", "aws")
   extras?: Record<string, string>; // mode-specific extra fields (e.g. AWS access_key_id)
+  // container_registry: pull auth for private sandbox images (environments'
+  // config.image). username+password, or `token` alone as an identity/bearer
+  // token for registries that don't use basic auth. Used by the control
+  // plane for the image pull only — never injected into the sandbox.
+  username?: string;
+  password?: string;
+  registry?: string;               // registry host (e.g. "ghcr.io"); defaults to the one implied by the image ref
 }
 
 export interface CredentialConfig {
