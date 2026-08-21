@@ -46,7 +46,13 @@
 //
 // Mounts (litebox-style): mountMemoryStore / mountSessionOutputs collect
 // bind volumes BEFORE the lazy create — Docker binds are fixed at
-// container creation, so mounting after the sandbox exists throws. The
+// container creation, so mounting after the sandbox exists throws. The// Boot env: once setOutboundContext has resolved the vault proxy URL and CA,
+// the create request also carries OMA_VAULT_PROXY_URL + OMA_VAULT_CA_PEM as
+// container env, so an image's own entrypoint can reach the vault at first
+// boot — before any exec delivers the per-command proxy env or the CA upload
+// lands on /workspace. Both values are non-secret (belljar persists create
+// env in labels).
+
 // bind source must be a path on the ENGINE HOST; when OMA itself runs in
 // a container (compose), BELLJAR_MOUNT_PATH_MAP translates OMA-visible
 // prefixes to host prefixes (e.g. "/app/data=/srv/oma/data"). The belljar
@@ -131,6 +137,18 @@ export class BelljarSandbox implements SandboxExecutor {
   private envVars: Record<string, string> = {};
   private commandSecrets: Array<{ prefix: string; secrets: Record<string, string> }> = [];
   private pendingCaUpload: { hostPath: string; guestPath: string } | null = null;
+  /**
+   * Container-level env sent on the belljar create request so the image's
+   * own entrypoint can reach the vault at FIRST boot — before any exec has
+   * delivered the per-command proxy env or the CA upload has landed:
+   *   OMA_VAULT_PROXY_URL  session-attributed proxy URL (same value every
+   *                        exec gets as HTTPS_PROXY)
+   *   OMA_VAULT_CA_PEM     the vault CA, as PEM text (public)
+   * belljar persists create env in container labels / the retention
+   * tombstone, which is acceptable for these two values: the CA is public
+   * and the attributed URL is already visible inside the sandbox anyway.
+   */
+  private bootEnv: Record<string, string> | null = null;
   /** Sticky copy of the CA upload so a fresh-provision retry (expired
    *  workspace) can restore it into the new sandbox. */
   private caUpload: { hostPath: string; guestPath: string } | null = null;
@@ -229,6 +247,13 @@ export class BelljarSandbox implements SandboxExecutor {
     });
     this.pendingCaUpload = { hostPath: caCertPath, guestPath: inBoxCaPath };
     this.caUpload = this.pendingCaUpload;
+    try {
+      const { promises: nodeFs } = await import("node:fs");
+      const pem = await nodeFs.readFile(caCertPath, "utf8");
+      this.bootEnv = { OMA_VAULT_PROXY_URL: proxyUrl, OMA_VAULT_CA_PEM: pem };
+    } catch (err) {
+      this.logger.warn(`belljar: could not read vault CA for boot env: ${(err as Error).message}`);
+    }
     // Never trigger creation from here: the orchestrator runs outbound
     // wiring BEFORE mounts, and mounts must be collected pre-create.
     // createSandbox applies the pending upload; if the sandbox somehow
@@ -388,6 +413,7 @@ export class BelljarSandbox implements SandboxExecutor {
     if (this.opts.registryAuth) body.registryAuth = this.opts.registryAuth;
     if (this.volumes.length) body.mounts = this.volumes;
     if (this.opts.isolation) body.isolation = this.buildIsolation();
+    if (this.bootEnv) body.env = this.bootEnv;
     const res = await this.fetch("/v1/sandboxes", {
       method: "POST",
       headers: { "content-type": "application/json" },
