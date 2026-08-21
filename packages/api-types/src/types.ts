@@ -942,6 +942,11 @@ export interface CredentialAuth {
   type: "mcp_oauth" | "static_bearer" | "cap_cli" | "container_registry";
   // mcp_oauth / static_bearer: match by MCP server URL
   mcp_server_url?: string;
+  // static_bearer: optional URL-safe selector. A sandbox picks this
+  // credential over others on the same host by sending Basic auth with
+  // this value as the username (the password is a placeholder; oma-vault
+  // replaces it). Lets several GitHub identities coexist in one session.
+  handle?: string;
   // mcp_oauth fields
   access_token?: string;
   refresh_token?: string;
