@@ -421,7 +421,16 @@ function AddCredentialModal({
     cli_id: "gh",
     display_name: "",
     token: "",
+    // git (HTTPS remotes) only: the host the token is for, stored as
+    // mcp_server_url so the outbound proxy can match requests to it.
+    host: "github.com",
+    // Optional selector — same contract as handleValid on the MCP form.
+    handle: "",
   });
+  const cliHost = cliForm.host.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  const cliHandle = cliForm.handle.trim();
+  const cliHandleValid = cliHandle === "" || /^[a-z0-9][a-z0-9._-]{0,63}$/.test(cliHandle);
+  const cliIsGit = cliForm.cli_id === "git";
 
   // Container-registry form (container_registry credentials) — pull auth
   // for private sandbox images referenced by an environment's config.image.
@@ -636,6 +645,8 @@ function AddCredentialModal({
           type: "cap_cli",
           cli_id: cliForm.cli_id,
           token: cliForm.token,
+          ...(cliIsGit && cliHost ? { mcp_server_url: `https://${cliHost}` } : {}),
+          ...(cliIsGit && cliHandle ? { handle: cliHandle } : {}),
         },
       }),
     });
@@ -756,7 +767,10 @@ function AddCredentialModal({
               <Button variant="ghost" onClick={onClose}>
                 Cancel
               </Button>
-              <Button onClick={createCapCliCred} disabled={!cliForm.token}>
+              <Button
+                onClick={createCapCliCred}
+                disabled={!cliForm.token || (cliIsGit && (!cliHost || !cliHandleValid))}
+              >
                 Create
               </Button>
             </>
@@ -932,6 +946,39 @@ function AddCredentialModal({
               submit path to POST static_bearer + button label changes to
               "Add credential". Visible regardless of Type so the user can
               supply a pre-issued OAuth access_token without a handshake. */}
+          {customForm.type === "bearer" && (
+            <div>
+              <label
+                htmlFor="vault-mcp-handle"
+                className="block text-sm font-medium text-fg mb-1"
+              >
+                Handle{" "}
+                <span className="text-xs text-fg-muted ml-1 px-1.5 py-0.5 rounded bg-bg-surface">
+                  Optional
+                </span>
+              </label>
+              <input
+                id="vault-mcp-handle"
+                value={customForm.handle}
+                onChange={(e) =>
+                  setCustomForm({ ...customForm, handle: e.target.value })
+                }
+                placeholder="brain"
+                spellCheck={false}
+                autoCapitalize="none"
+                aria-invalid={!handleValid}
+                className={inputCls}
+              />
+              <div
+                className={`text-xs mt-1 ${handleValid ? "text-fg-subtle" : "text-danger"}`}
+              >
+                {handleValid
+                  ? "Lets a sandbox pick this credential when several share a host: use it as the username, e.g. https://brain@github.com/org/repo — the password is ignored and the vault injects the real token."
+                  : "Lowercase letters, digits, dots, underscores or dashes; must start with a letter or digit (max 64)."}
+              </div>
+            </div>
+          )}
+
           <Disclosure
             title="Access token"
             meta={
@@ -956,39 +1003,6 @@ function AddCredentialModal({
               If filled, the credential is stored as a static bearer token (no
               OAuth handshake).
             </div>
-            {(customForm.token || customForm.type === "bearer") &&
-              !customForm.refreshToken && (
-                <div className="mt-3">
-                  <label
-                    htmlFor="vault-mcp-handle"
-                    className="block text-xs font-medium text-fg-muted mb-1"
-                  >
-                    Handle{" "}
-                    <span className="text-xs text-fg-muted ml-1 px-1.5 py-0.5 rounded bg-bg-surface">
-                      Optional
-                    </span>
-                  </label>
-                  <input
-                    id="vault-mcp-handle"
-                    value={customForm.handle}
-                    onChange={(e) =>
-                      setCustomForm({ ...customForm, handle: e.target.value })
-                    }
-                    placeholder="brain"
-                    spellCheck={false}
-                    autoCapitalize="none"
-                    aria-invalid={!handleValid}
-                    className={inputCls}
-                  />
-                  <div
-                    className={`text-xs mt-1 ${handleValid ? "text-fg-subtle" : "text-danger"}`}
-                  >
-                    {handleValid
-                      ? "Lets a sandbox pick this credential when several share a host: use it as the username, e.g. https://brain@github.com/org/repo — the password is ignored and the vault injects the real token."
-                      : "Lowercase letters, digits, dots, underscores or dashes; must start with a letter or digit (max 64)."}
-                  </div>
-                </div>
-              )}
           </Disclosure>
 
           {/* Refresh token block (Optional) — only meaningful when an
@@ -1260,6 +1274,61 @@ function AddCredentialModal({
               disabled={deviceFlow?.status === "polling"}
             />
           </div>
+          {cliIsGit && (
+            <>
+              <div>
+                <label
+                  htmlFor="vault-cli-host"
+                  className="text-sm text-fg-muted block mb-1"
+                >
+                  Host
+                </label>
+                <TextInput
+                  id="vault-cli-host"
+                  value={cliForm.host}
+                  onChange={(e) =>
+                    setCliForm({ ...cliForm, host: e.target.value })
+                  }
+                  className={inputCls}
+                  placeholder="github.com"
+                  spellCheck={false}
+                  autoCapitalize="none"
+                />
+                <div className="text-xs text-fg-subtle mt-1">
+                  The git host this token is for. Outbound git traffic to it
+                  gets the token injected (Basic auth, as GitHub expects).
+                </div>
+              </div>
+              <div>
+                <label
+                  htmlFor="vault-cli-handle"
+                  className="text-sm text-fg-muted block mb-1"
+                >
+                  Handle{" "}
+                  <span className="text-fg-subtle">(optional)</span>
+                </label>
+                <TextInput
+                  id="vault-cli-handle"
+                  value={cliForm.handle}
+                  onChange={(e) =>
+                    setCliForm({ ...cliForm, handle: e.target.value })
+                  }
+                  className={inputCls}
+                  placeholder="brain"
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  aria-invalid={!cliHandleValid}
+                />
+                <div
+                  className={`text-xs mt-1 ${cliHandleValid ? "text-fg-subtle" : "text-danger"}`}
+                >
+                  {cliHandleValid
+                    ? "Lets a sandbox pick this credential when several share a host: use it as the username, e.g. git clone https://brain@github.com/org/repo — the password is ignored and the vault injects the real token."
+                    : "Lowercase letters, digits, dots, underscores or dashes; must start with a letter or digit (max 64)."}
+                </div>
+              </div>
+            </>
+          )}
         </TabsContent>
 
         <TabsContent value="registry" className="space-y-3">
