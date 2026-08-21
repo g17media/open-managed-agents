@@ -435,13 +435,30 @@ curl -s $BASE/v1/vaults/$VAULT_ID/credentials \
       "token": "ghp_xxx"
     }
   }'
+
+# Several credentials on one host? Give each a handle; a sandbox selects one
+# by sending Basic auth with the handle as the USERNAME (the password is a
+# placeholder — oma-vault swaps in the real token). GitHub ignores the
+# username when the password is a PAT, so `git clone
+# https://brain@github.com/org/repo` picks the credential with handle "brain".
+curl -s $BASE/v1/vaults/$VAULT_ID/credentials \
+  -H "x-api-key: $KEY" -H "content-type: application/json" \
+  -d '{
+    "display_name": "Brain repo PAT",
+    "auth": {
+      "type": "static_bearer",
+      "mcp_server_url": "https://github.com",
+      "handle": "brain",
+      "token": "github_pat_xxx"
+    }
+  }'
 ```
 
 ### Credential Types
 
 | Type | Use Case | Injection Method |
 |---|---|---|
-| `static_bearer` | API tokens (GitHub, etc.) | `Authorization: Bearer` header on matching URLs |
+| `static_bearer` | API tokens (GitHub, etc.) | `Authorization: Bearer` header on matching URLs; git smart-HTTP URLs get `Basic x-access-token:<token>` instead. Optional `handle` lets a sandbox pick one of several same-host credentials via the Basic-auth username (self-host oma-vault) |
 | `mcp_oauth` | OAuth-authenticated MCP servers | Token refresh + injection via outbound proxy |
 | `command_secret` | CLI tools (wrangler, aws) | Environment variable injection for matching commands |
 | `container_registry` | Private sandbox images (environments' `config.image`) | Control-plane-side pull auth at sandbox provisioning — never enters the sandbox |

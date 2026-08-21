@@ -36,7 +36,7 @@ interface Credential {
   id: string;
   display_name: string;
   vault_id: string;
-  auth: { type: string; mcp_server_url?: string; cli_id?: string; registry?: string };
+  auth: { type: string; mcp_server_url?: string; cli_id?: string; registry?: string; handle?: string };
   created_at: string;
   updated_at?: string | null;
   archived_at?: string | null;
@@ -330,6 +330,14 @@ export function VaultDetail() {
                         </td>
                         <td className="px-4 py-3 font-mono text-xs text-fg-muted truncate max-w-[260px]">
                           {c.auth.mcp_server_url || c.auth.cli_id || c.auth.registry || "—"}
+                          {c.auth.handle && (
+                            <span
+                              className="ml-2 px-1.5 py-0.5 rounded bg-bg-surface text-fg"
+                              title="Handle — select this credential by using it as the Basic-auth username"
+                            >
+                              @{c.auth.handle}
+                            </span>
+                          )}
                         </td>
                         <td className="px-4 py-3">
                           <span
@@ -636,6 +644,7 @@ function AddCredentialModal({
     pickedName: "",
     pickedIcon: "",
     token: "",
+    handle: "",
     refreshToken: "",
     tokenEndpoint: "",
     authMethod: "client_secret_post" as
@@ -764,6 +773,13 @@ function AddCredentialModal({
     );
   };
 
+  // Optional selector for static_bearer: a sandbox picks this credential
+  // over others on the same host by sending Basic auth with the handle as
+  // the username (oma-vault swaps in the real token). URL-safe slug only —
+  // it ends up inside remote URLs like https://<handle>@github.com/org/repo.
+  const handle = customForm.handle.trim();
+  const handleValid = handle === "" || /^[a-z0-9][a-z0-9._-]{0,63}$/.test(handle);
+
   const createBearerCred = async () => {
     setConnecting("custom");
     try {
@@ -785,6 +801,7 @@ function AddCredentialModal({
             type: "static_bearer",
             token: customForm.token,
             mcp_server_url: customForm.url,
+            ...(handle ? { handle } : {}),
           };
       await api(`/v1/vaults/${vault.id}/credentials`, {
         method: "POST",
@@ -1012,6 +1029,7 @@ function AddCredentialModal({
               disabled={
                 !customForm.url ||
                 !!connecting ||
+                !handleValid ||
                 (customForm.type === "bearer" && !customForm.token)
               }
             >
@@ -1181,6 +1199,39 @@ function AddCredentialModal({
               If filled, the credential is stored as a static bearer token (no
               OAuth handshake).
             </div>
+            {(customForm.token || customForm.type === "bearer") &&
+              !customForm.refreshToken && (
+                <div className="mt-3">
+                  <label
+                    htmlFor="vault-mcp-handle"
+                    className="block text-xs font-medium text-fg-muted mb-1"
+                  >
+                    Handle{" "}
+                    <span className="text-xs text-fg-muted ml-1 px-1.5 py-0.5 rounded bg-bg-surface">
+                      Optional
+                    </span>
+                  </label>
+                  <input
+                    id="vault-mcp-handle"
+                    value={customForm.handle}
+                    onChange={(e) =>
+                      setCustomForm({ ...customForm, handle: e.target.value })
+                    }
+                    placeholder="brain"
+                    spellCheck={false}
+                    autoCapitalize="none"
+                    aria-invalid={!handleValid}
+                    className={inputCls}
+                  />
+                  <div
+                    className={`text-xs mt-1 ${handleValid ? "text-fg-subtle" : "text-danger"}`}
+                  >
+                    {handleValid
+                      ? "Lets a sandbox pick this credential when several share a host: use it as the username, e.g. https://brain@github.com/org/repo — the password is ignored and the vault injects the real token."
+                      : "Lowercase letters, digits, dots, underscores or dashes; must start with a letter or digit (max 64)."}
+                  </div>
+                </div>
+              )}
           </Disclosure>
 
           {/* Refresh token block (Optional) — only meaningful when an
