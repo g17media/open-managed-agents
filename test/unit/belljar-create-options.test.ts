@@ -63,6 +63,34 @@ describe("BelljarSandbox create options", () => {
     }
   });
 
+  it("puts the vault proxy URL + CA PEM on the create request as boot env", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "oma-vault-ca-"));
+    const pem = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n";
+    writeFileSync(join(dir, "ca.crt"), pem);
+    vi.stubEnv("OMA_VAULT_PROXY_URL", "http://oma-vault:14322");
+    vi.stubEnv("OMA_VAULT_CA_CERT", join(dir, "ca.crt"));
+    const calls = stubBelljarFetch();
+    const sb = new BelljarSandbox({
+      baseUrl: "http://belljar:8877",
+      token: "tok",
+      sessionId: "sess-boot",
+    });
+    await sb.setOutboundContext({ tenantId: "tn-1", sessionId: "sess-boot" });
+    await sb.exec("echo hi");
+    const body = createBody(calls);
+    const env = body.env as Record<string, string>;
+    // Same attributed form every exec receives as HTTPS_PROXY:
+    // http://metadata:<base64 json tags>@oma-vault:14322
+    const u = new URL(env.OMA_VAULT_PROXY_URL);
+    expect(u.host).toBe("oma-vault:14322");
+    expect(Buffer.from(decodeURIComponent(u.password), "base64").toString("utf8")).toContain("sess-boot");
+    expect(env.OMA_VAULT_CA_PEM).toBe(pem);
+    vi.unstubAllEnvs();
+  });
+
   it("omits image and registryAuth when not configured", async () => {
     const calls = stubBelljarFetch();
     const sb = new BelljarSandbox({
