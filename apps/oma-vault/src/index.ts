@@ -186,7 +186,17 @@ interface MatchedCred {
   vaultId: string;
   credentialId: string;
   injectHeader: { name: string; value: string };
+  /**
+   * HTTP Basic form of a static_bearer token, used instead of injectHeader
+   * for git smart-HTTP requests: GitHub's git endpoints answer 401 to
+   * `Bearer <PAT>` and require Basic with the token as the password.
+   */
+  gitBasicHeader?: string;
 }
+
+// git smart-HTTP: ref advertisement (GET .../info/refs?service=git-upload-pack)
+// and the upload/receive-pack POSTs. Anything else on the host keeps Bearer.
+const GIT_SMART_HTTP_RE = /\/info\/refs\?service=git-(upload|receive)-pack(&|$)|\/git-(upload|receive)-pack(\?|$)/;
 
 /**
  * Find the active credential whose mcp_server_url host matches the request
@@ -215,6 +225,7 @@ interface MatchedCred {
 async function findCredentialForUrl(
   url: string,
   attr: VaultProxyAttribution,
+  selector?: string,
 ): Promise<MatchedCred | null> {
   let host: string;
   try {
@@ -259,7 +270,7 @@ async function findCredentialForUrl(
       )
       .bind(row.tenant_id, ...vaultIds)
       .all<Row>();
-    return matchRowsByHost(result.results ?? [], host);
+    return matchRowsByHost(result.results ?? [], host, selector);
   }
 
   // Legacy host-wide lookup. When OMA_TENANT="*" we accept any tenant;
@@ -277,13 +288,27 @@ async function findCredentialForUrl(
     )
     .bind(scopeTenantId, scopeTenantId)
     .all<Row>();
-  return matchRowsByHost(result.results ?? [], host);
+  return matchRowsByHost(result.results ?? [], host, selector);
 }
 
+/**
+ * Pick the credential for `host`. When several credentials share a host
+ * (two GitHub identities, say) the sandbox can choose one explicitly by
+ * sending HTTP Basic auth whose *username* equals the credential's
+ * `auth.handle` — services like GitHub ignore the username when the
+ * password is a token, so it is a free selector field. The placeholder
+ * password is discarded with the rest of the inbound Authorization header.
+ *
+ * Priority: handle match > host-only credential (no handle) > any handled
+ * credential for the host (so tools that send other usernames, e.g. `gh`,
+ * still work in a session whose only GitHub credential has a handle).
+ */
 function matchRowsByHost(
   rows: Array<{ id: string; tenant_id: string; vault_id: string; auth: string }>,
   host: string,
+  selector?: string,
 ): MatchedCred | null {
+  let best: { rank: number; match: MatchedCred } | null = null;
   for (const row of rows) {
     let auth: CredentialAuth;
     try { auth = JSON.parse(row.auth) as CredentialAuth; } catch { continue; }
@@ -293,13 +318,38 @@ function matchRowsByHost(
     if (credHost !== host) continue;
     const headerSpec = authToHeader(auth);
     if (!headerSpec) continue;
-    return {
-      vaultId: row.vault_id,
-      credentialId: row.id,
-      injectHeader: headerSpec,
+    const handle = typeof auth.handle === "string" && auth.handle.length > 0 ? auth.handle : undefined;
+    const rank = handle !== undefined && selector !== undefined && handle === selector ? 0 : handle === undefined ? 1 : 2;
+    if (best !== null && rank >= best.rank) continue;
+    best = {
+      rank,
+      match: {
+        vaultId: row.vault_id,
+        credentialId: row.id,
+        injectHeader: headerSpec,
+        gitBasicHeader:
+          auth.type === "static_bearer" && typeof auth.token === "string" && auth.token.length > 0
+            ? `Basic ${Buffer.from(`x-access-token:${auth.token}`).toString("base64")}`
+            : undefined,
+      },
     };
+    if (rank === 0) break;
   }
-  return null;
+  return best?.match ?? null;
+}
+
+/** Username of an inbound `Authorization: Basic …` header, else undefined. */
+function basicAuthUsername(headerValue: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (typeof raw !== "string" || !/^basic /i.test(raw)) return undefined;
+  try {
+    const decoded = Buffer.from(raw.slice(6).trim(), "base64").toString("utf8");
+    const i = decoded.indexOf(":");
+    const user = i === -1 ? decoded : decoded.slice(0, i);
+    return user.length > 0 ? user : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function authToHeader(auth: CredentialAuth): { name: string; value: string } | null {
@@ -429,7 +479,11 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     };
   }
 
-  const matched: MatchedCred | null = forged ? null : await findCredentialForUrl(url, attr);
+  // The inbound Authorization header is stripped below, but its Basic-auth
+  // username is read first: it lets the sandbox name which credential it
+  // wants when several match the host (see matchRowsByHost).
+  const selector = basicAuthUsername(req.headers["authorization"]);
+  const matched: MatchedCred | null = forged ? null : await findCredentialForUrl(url, attr, selector);
 
   // Strip any incoming Authorization headers — the agent must not be able
   // to override the injected value or smuggle a stolen token. Mirrors the
@@ -469,7 +523,8 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   }
 
   if (matched) {
-    headers[matched.injectHeader.name] = matched.injectHeader.value;
+    const useGitBasic = matched.gitBasicHeader !== undefined && GIT_SMART_HTTP_RE.test(url);
+    headers[matched.injectHeader.name] = useGitBasic ? matched.gitBasicHeader! : matched.injectHeader.value;
     logger.info(
       { op: "oma_vault.inject", header: matched.injectHeader.name, url, credential_id: matched.credentialId, session_id: attr.sessionId },
       `inject ${matched.injectHeader.name} for ${url}`,
