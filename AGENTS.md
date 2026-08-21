@@ -460,6 +460,7 @@ curl -s $BASE/v1/vaults/$VAULT_ID/credentials \
 |---|---|---|
 | `static_bearer` | API tokens (GitHub, etc.) | `Authorization: Bearer` header on matching URLs; git smart-HTTP URLs get `Basic x-access-token:<token>` instead. Optional `handle` lets a sandbox pick one of several same-host credentials via the Basic-auth username (self-host oma-vault) |
 | `mcp_oauth` | OAuth-authenticated MCP servers | Token refresh + injection via outbound proxy |
+| `cap_cli` with `cli_id: "git"` | git over HTTPS (self-host) | Give it `mcp_server_url` (the git host, e.g. `https://github.com`) and optionally a `handle`; oma-vault injects `Basic x-access-token:<token>` on git smart-HTTP requests to that host. The console's CLI tab → *git (HTTPS remotes)* sets both |
 | `command_secret` | CLI tools (wrangler, aws) | Environment variable injection for matching commands |
 | `container_registry` | Private sandbox images (environments' `config.image`) | Control-plane-side pull auth at sandbox provisioning — never enters the sandbox |
 

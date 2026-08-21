@@ -187,7 +187,7 @@ interface MatchedCred {
   credentialId: string;
   injectHeader: { name: string; value: string };
   /**
-   * HTTP Basic form of a static_bearer token, used instead of injectHeader
+   * HTTP Basic form of a static_bearer / cap_cli token, used instead of injectHeader
    * for git smart-HTTP requests: GitHub's git endpoints answer 401 to
    * `Bearer <PAT>` and require Basic with the token as the password.
    */
@@ -328,7 +328,8 @@ function matchRowsByHost(
         credentialId: row.id,
         injectHeader: headerSpec,
         gitBasicHeader:
-          auth.type === "static_bearer" && typeof auth.token === "string" && auth.token.length > 0
+          (auth.type === "static_bearer" || auth.type === "cap_cli") &&
+          typeof auth.token === "string" && auth.token.length > 0
             ? `Basic ${Buffer.from(`x-access-token:${auth.token}`).toString("base64")}`
             : undefined,
       },
