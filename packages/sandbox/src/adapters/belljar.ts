@@ -46,18 +46,19 @@
 //
 // Mounts (litebox-style): mountMemoryStore / mountSessionOutputs collect
 // bind volumes BEFORE the lazy create — Docker binds are fixed at
-// container creation, so mounting after the sandbox exists throws. The// Boot env: once setOutboundContext has resolved the vault proxy URL and CA,
-// the create request also carries OMA_VAULT_PROXY_URL + OMA_VAULT_CA_PEM as
-// container env, so an image's own entrypoint can reach the vault at first
-// boot — before any exec delivers the per-command proxy env or the CA upload
-// lands on /workspace. Both values are non-secret (belljar persists create
-// env in labels).
-
+// container creation, so mounting after the sandbox exists throws. The
 // bind source must be a path on the ENGINE HOST; when OMA itself runs in
 // a container (compose), BELLJAR_MOUNT_PATH_MAP translates OMA-visible
 // prefixes to host prefixes (e.g. "/app/data=/srv/oma/data"). The belljar
 // server only accepts binds under its BELLJAR_ALLOWED_MOUNT_ROOTS
 // allowlist. readOnly stores get a real `:ro` bind — OS-enforced.
+//
+// Boot env: once setOutboundContext has resolved the vault proxy URL and CA,
+// the create request also carries OMA_VAULT_PROXY_URL + OMA_VAULT_CA_PEM as
+// container env, so an image's own entrypoint can reach the vault at first
+// boot — before any exec delivers the per-command proxy env or the CA upload
+// lands on /workspace. Both values are non-secret (belljar persists create
+// env in labels).
 
 import { mkdirSync } from "node:fs";
 import { isIP } from "node:net";
