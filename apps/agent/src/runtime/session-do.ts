@@ -65,6 +65,7 @@ import { HarnessLease, resolveHarness } from "../harness/registry";
 import { composeSystemPrompt } from "../harness/platform-guidance";
 import {
   createPiModelRuntime,
+  modelThinkingLevel,
   toAiSdkLanguageModel,
 } from "../harness/pi-provider";
 import {
@@ -3587,6 +3588,7 @@ export class SessionDO extends DurableObject<Env> {
   private async resolveAuxModel(agent: AgentConfig): Promise<{
     model: LanguageModel;
     modelInfo: { model_id: string };
+    callOptions?: import("../harness/provider").ModelCallOptions;
   } | null> {
     if (!agent.aux_model) return null;
     const handle = typeof agent.aux_model === "string" ? agent.aux_model : agent.aux_model.id;
@@ -3598,6 +3600,7 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      thinkingLevel: modelThinkingLevel(agent.aux_model),
       speed: typeof agent.aux_model === "string" ? undefined : agent.aux_model.speed,
     }));
     return { model, modelInfo: { model_id: handle } };
@@ -3652,6 +3655,7 @@ export class SessionDO extends DurableObject<Env> {
           browser: this.getBrowserHarness() ?? undefined,
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,
+          auxCallOptions: auxResolved?.callOptions,
           broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
           scheduleWakeup: (a) => this.scheduleWakeup(a),
           cancelWakeup: (id) => this.cancelWakeup(id),
@@ -4066,6 +4070,7 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: subAuxResolved?.model,
       auxModelInfo: subAuxResolved?.modelInfo,
+      auxCallOptions: subAuxResolved?.callOptions,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
       // Subagents do NOT get the schedule tool. onScheduledWakeup is a
       // SessionDO-level callback with no per-thread routing — a wakeup
@@ -4093,7 +4098,7 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: subCreds.baseURL,
       customHeaders: subCreds.customHeaders,
       piConfig: subCreds.piConfig,
-      thinkingLevel: typeof subAgent.model === "string" ? undefined : subAgent.model.effort,
+      thinkingLevel: modelThinkingLevel(subAgent.model),
       speed: typeof subAgent.model === "string" ? undefined : subAgent.model.speed,
     });
     const subModel = toAiSdkLanguageModel(subPiRuntime);
@@ -4351,6 +4356,7 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: auxResolved?.model,
       auxModelInfo: auxResolved?.modelInfo,
+      auxCallOptions: auxResolved?.callOptions,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
       scheduleWakeup: (a) => this.scheduleWakeup(a),
       cancelWakeup: (id) => this.cancelWakeup(id),
@@ -4389,7 +4395,7 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
-      thinkingLevel: typeof agent.model === "string" ? undefined : agent.model.effort,
+      thinkingLevel: modelThinkingLevel(agent.model),
       speed: typeof agent.model === "string" ? undefined : agent.model.speed,
     });
     const model = toAiSdkLanguageModel(piRuntime);

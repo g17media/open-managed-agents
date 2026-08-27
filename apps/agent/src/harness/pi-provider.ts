@@ -17,6 +17,17 @@ import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 export { toAiSdkLanguageModel } from "./pi-ai-sdk";
 
+/** Preserve stored agent reasoning settings when binding the Pi runtime. */
+export function modelThinkingLevel(model: string | {
+  effort?: Exclude<ModelThinkingLevel, "off"> | { type: Exclude<ModelThinkingLevel, "off"> };
+  reasoning?: "none" | Exclude<ModelThinkingLevel, "off">;
+}): ModelThinkingLevel | undefined {
+  if (typeof model === "string") return undefined;
+  const effort = typeof model.effort === "object" ? model.effort.type : model.effort;
+  const level = effort ?? model.reasoning;
+  return level === "none" ? "off" : level;
+}
+
 export interface PiModelRuntime {
   models: Models;
   model: Model<Api>;
