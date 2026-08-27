@@ -8,7 +8,7 @@ import { Select, SelectGroup, SelectGroupLabel, SelectOption } from "../../compo
 import { Combobox } from "../../components/Combobox";
 import { McpServerPickerModal } from "../../components/McpServerPickerModal";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../../data/templates";
-import type { ModelCard } from "@open-managed-agents/api-types";
+import type { ModelCard, ModelReasoning } from "@open-managed-agents/api-types";
 import {
   KNOWN_ACP_AGENTS,
   resolveKnownAgent,
@@ -17,6 +17,7 @@ import type { AgentRecord as Agent } from "../../types/agent";
 import { useI18n } from "../../i18n";
 import {
   INITIAL_FORM,
+  MODEL_REASONING_LEVELS,
   agentToForm,
   agentToPreservedConfig,
   configToForm,
@@ -26,6 +27,15 @@ import {
   type SkillEntry,
   type ToolOverride,
 } from "./agentFormCodec";
+
+const REASONING_LABELS: Record<ModelReasoning, string> = {
+  none: "None",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Max",
+};
 
 const ANTHROPIC_SKILLS = [
   { id: "xlsx", label: "Excel (xlsx)" },
@@ -836,6 +846,36 @@ function BasicTab({
             />
           </div>
         ))}
+      {!form.runtimeId && (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-sm text-fg-muted block mb-1">Speed</label>
+            <Select
+              value={form.modelSpeed === "fast" ? "fast" : "standard"}
+              onValueChange={(v) => setForm({ ...form, modelSpeed: v as "standard" | "fast" })}
+            >
+              <SelectOption value="standard">Standard</SelectOption>
+              <SelectOption value="fast">Fast</SelectOption>
+            </Select>
+          </div>
+          <div>
+            <label className="text-sm text-fg-muted block mb-1">Reasoning</label>
+            <Select
+              value={form.modelReasoning || "__default__"}
+              onValueChange={(v) =>
+                setForm({ ...form, modelReasoning: v === "__default__" ? "" : (v as ModelReasoning) })
+              }
+            >
+              <SelectOption value="__default__">Default</SelectOption>
+              {MODEL_REASONING_LEVELS.map((r) => (
+                <SelectOption key={r} value={r}>
+                  {REASONING_LABELS[r]}
+                </SelectOption>
+              ))}
+            </Select>
+          </div>
+        </div>
+      )}
       {form.runtimeId && (
         <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
           Model is determined by the ACP child on the runtime ({form.acpAgentId || "—"}) — it

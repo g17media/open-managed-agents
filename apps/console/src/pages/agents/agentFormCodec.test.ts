@@ -77,6 +77,32 @@ describe("agentFormCodec lossless update", () => {
     expect(payload.model).toEqual({ id: "claude-sonnet-4-6", speed: "fast" });
   });
 
+  it("round-trips model.reasoning and drops to a plain string when both knobs are unset", () => {
+    const agent = sampleAgent({
+      model: { id: "claude-opus-4-7", speed: "standard", reasoning: "high" },
+    });
+    const form = agentToForm(agent);
+    expect(form.modelSpeed).toBe("standard");
+    expect(form.modelReasoning).toBe("high");
+    expect(buildModelValue(form)).toEqual({
+      id: "claude-opus-4-7",
+      speed: "standard",
+      reasoning: "high",
+    });
+
+    form.modelReasoning = "";
+    expect(buildModelValue(form)).toEqual({ id: "claude-opus-4-7", speed: "standard" });
+    form.modelSpeed = "";
+    expect(buildModelValue(form)).toBe("claude-opus-4-7");
+    form.modelReasoning = "max";
+    expect(buildModelValue(form)).toEqual({ id: "claude-opus-4-7", reasoning: "max" });
+
+    expect(agentToForm(sampleAgent({ model: "claude-opus-4-7" })).modelReasoning).toBe("");
+    expect(
+      agentToForm(sampleAgent({ model: { id: "x", reasoning: "bogus" } })).modelReasoning,
+    ).toBe("");
+  });
+
   it("merges tools without dropping custom / unknown / mcp policies", () => {
     const agent = sampleAgent();
     const form = agentToForm(agent);

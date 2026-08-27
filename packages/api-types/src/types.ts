@@ -40,10 +40,19 @@ export interface CustomToolConfig {
 
 export type ToolConfig = ToolsetConfig | CustomToolConfig;
 
+/** Reasoning effort for a model call. Unset = provider default (nothing sent). */
+export type ModelReasoning = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface ModelSpec {
+  id: string;
+  speed?: "standard" | "fast";
+  reasoning?: ModelReasoning;
+}
+
 export interface AgentConfig {
   id: string;
   name: string;
-  model: string | { id: string; speed?: "standard" | "fast" };
+  model: string | ModelSpec;
   system: string;
   tools: ToolConfig[];
   mcp_servers?: Array<{
@@ -74,7 +83,7 @@ export interface AgentConfig {
    * When unset, tools that would benefit from summarization fall back to
    * returning raw content. Set this to opt into compressed tool results.
    */
-  aux_model?: string | { id: string; speed?: "standard" | "fast" };
+  aux_model?: string | ModelSpec;
   harness?: string;
   /**
    * When set, agent runs on a user-registered local ACP runtime instead of

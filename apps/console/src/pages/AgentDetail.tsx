@@ -146,7 +146,10 @@ export function AgentDetail() {
 
   const error = agentError instanceof Error ? agentError.message : agentError ? String(agentError) : "";
 
-  const modelStr = (m: Agent["model"]) => typeof m === "string" ? m : `${m?.id} (${m?.speed || "standard"})`;
+  const modelStr = (m: Agent["model"]) =>
+    typeof m === "string"
+      ? m
+      : `${m?.id} (${m?.speed || "standard"}${m?.reasoning ? `, ${m.reasoning} reasoning` : ""})`;
 
   const refreshAgent = () => {
     if (!id) return;

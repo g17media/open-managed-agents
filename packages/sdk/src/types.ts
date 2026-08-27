@@ -248,7 +248,7 @@ export type SessionEvent =
 export interface AgentSummary {
   id: string;
   name: string;
-  model: { id: string; speed?: string };
+  model: { id: string; speed?: string; reasoning?: string };
   created_at: string;
   updated_at: string;
 }

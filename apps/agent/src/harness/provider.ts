@@ -1,6 +1,7 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
-import type { LanguageModel } from "ai";
+import type { JSONValue, LanguageModel, streamText } from "ai";
+import type { AgentConfig } from "@open-managed-agents/api-types";
 
 /**
  * API compatibility types:
@@ -112,7 +113,7 @@ function useOpenAI(compat: ApiCompat): boolean {
 }
 
 export function resolveModel(
-  model: string | { id: string; speed?: "standard" | "fast" },
+  model: AgentConfig["model"],
   apiKey: string,
   baseURL?: string,
   compat?: ApiCompat,
@@ -173,4 +174,54 @@ export function resolveModel(
   });
 
   return anthropic(modelId);
+}
+
+type StreamTextOptions = Parameters<typeof streamText>[0];
+export interface ModelCallOptions {
+  reasoning?: StreamTextOptions["reasoning"];
+  providerOptions?: StreamTextOptions["providerOptions"];
+}
+
+/**
+ * Per-agent call options derived from `agent.model` (`speed` / `reasoning`).
+ * Unset fields send nothing — provider defaults apply, same as before these
+ * knobs existed.
+ *
+ * `reasoning` rides the AI SDK's provider-agnostic option so the provider
+ * picks the wire shape (adaptive thinking + effort on newer Claude,
+ * budget_tokens on older ones, reasoning_effort on OpenAI). `max` isn't in
+ * that enum, so it goes through providerOptions directly. `speed` is
+ * Anthropic-only (adds the fast-mode beta).
+ */
+export function modelCallOptions(
+  model: LanguageModel,
+  spec: AgentConfig["model"] | undefined,
+): ModelCallOptions {
+  if (!spec || typeof spec === "string") return {};
+  const provider = String((model as { provider?: unknown })?.provider ?? "").toLowerCase();
+  const isAnthropic = provider.includes("anthropic");
+  const isOpenAI = provider.includes("openai");
+  const out: ModelCallOptions = {};
+  const anthropic: Record<string, JSONValue> = {};
+  const openai: Record<string, JSONValue> = {};
+
+  if (spec.reasoning === "max") {
+    if (isAnthropic) {
+      anthropic.thinking = { type: "adaptive" };
+      anthropic.effort = "max";
+    } else if (isOpenAI) {
+      openai.reasoningEffort = "max";
+    } else {
+      out.reasoning = "xhigh";
+    }
+  } else if (spec.reasoning) {
+    out.reasoning = spec.reasoning;
+  }
+  if (spec.speed === "fast" && isAnthropic) anthropic.speed = "fast";
+
+  const providerOptions: Record<string, Record<string, JSONValue>> = {};
+  if (Object.keys(anthropic).length > 0) providerOptions.anthropic = anthropic;
+  if (Object.keys(openai).length > 0) providerOptions.openai = openai;
+  if (Object.keys(providerOptions).length > 0) out.providerOptions = providerOptions;
+  return out;
 }

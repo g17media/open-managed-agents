@@ -8,6 +8,7 @@ import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compac
 import type { CompactionStrategy } from "./compaction";
 import { ALL_TOOLS } from "./tools";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
+import { modelCallOptions } from "./provider";
 
 // Single source of truth lives in ./tools.ts (ALL_TOOLS). Importing here so
 // adding a new toolset entry can't drift the event-classification list — the
@@ -421,6 +422,7 @@ export class DefaultHarness implements HarnessInterface {
         : undefined,
       messages: finalMessages,
       tools: cached.tools,
+      ...modelCallOptions(model, agent.model),
       stopWhen: stepCountIs(100),
       abortSignal: runtime.abortSignal,
 

@@ -11,7 +11,7 @@
 export interface AgentRecord {
   id: string;
   name: string;
-  model: string | { id: string; speed?: string };
+  model: string | { id: string; speed?: string; reasoning?: string };
   system?: string | null;
   version: number;
   description?: string | null;
@@ -45,7 +45,7 @@ export interface AgentRecord {
    *  selection, harness binding, appendable prompt presets. Not on the
    *  wire-format AgentConfig (those fields live in OMA-private storage). */
   _oma?: {
-    aux_model?: { id: string; speed?: string };
+    aux_model?: { id: string; speed?: string; reasoning?: string };
     harness?: string;
     runtime_binding?: {
       runtime_id: string;

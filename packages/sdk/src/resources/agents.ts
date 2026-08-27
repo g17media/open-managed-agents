@@ -4,6 +4,8 @@ import type { AgentDetail, AgentSummary, PaginatedResponse } from "../types.js";
 export interface AgentModelInput {
   id: string;
   speed?: "standard" | "fast";
+  /** Reasoning effort. Omit for the provider default. */
+  reasoning?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 export interface AgentSkillInput {

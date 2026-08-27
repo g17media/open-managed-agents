@@ -63,8 +63,8 @@ import type {
 import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor, ProcessHandle, FileResolver } from "../harness/interface";
 import { resolveHarness } from "../harness/registry";
 import { composeSystemPrompt } from "../harness/platform-guidance";
-import { resolveModel } from "../harness/provider";
-import type { ApiCompat } from "../harness/provider";
+import { resolveModel, modelCallOptions } from "../harness/provider";
+import type { ApiCompat, ModelCallOptions } from "../harness/provider";
 import type { LanguageModel } from "ai";
 import { generateText } from "ai";
 import { extractTextFromContent } from "@open-managed-agents/shared";
@@ -3566,12 +3566,13 @@ export class SessionDO extends DurableObject<Env> {
   private async resolveAuxModel(agent: AgentConfig): Promise<{
     model: LanguageModel;
     modelInfo: { model_id: string };
+    callOptions: ModelCallOptions;
   } | null> {
     if (!agent.aux_model) return null;
     const handle = typeof agent.aux_model === "string" ? agent.aux_model : agent.aux_model.id;
     const creds = await this.resolveModelCardCredentials(handle);
     const model = resolveModel(creds.model, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
-    return { model, modelInfo: { model_id: handle } };
+    return { model, modelInfo: { model_id: handle }, callOptions: modelCallOptions(model, agent.aux_model) };
   }
 
   /**
@@ -3623,6 +3624,7 @@ export class SessionDO extends DurableObject<Env> {
           browser: this.getBrowserHarness() ?? undefined,
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,
+          auxCallOptions: auxResolved?.callOptions,
           broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
           scheduleWakeup: (a) => this.scheduleWakeup(a),
           cancelWakeup: (id) => this.cancelWakeup(id),
@@ -4034,6 +4036,7 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: subAuxResolved?.model,
       auxModelInfo: subAuxResolved?.modelInfo,
+      auxCallOptions: subAuxResolved?.callOptions,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
       // Subagents do NOT get the schedule tool. onScheduledWakeup is a
       // SessionDO-level callback with no per-thread routing — a wakeup
@@ -4291,6 +4294,7 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: auxResolved?.model,
       auxModelInfo: auxResolved?.modelInfo,
+      auxCallOptions: auxResolved?.callOptions,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
       scheduleWakeup: (a) => this.scheduleWakeup(a),
       cancelWakeup: (id) => this.cancelWakeup(id),

@@ -7,6 +7,7 @@
  * tracked separately in #155 — this module only guarantees round-trips.
  */
 import type { AgentRecord as Agent } from "../../types/agent";
+import type { ModelReasoning } from "@open-managed-agents/api-types";
 
 export interface McpEntry {
   name: string;
@@ -33,8 +34,9 @@ export type ToolOverride = "default" | "always_allow" | "always_ask" | "disabled
 export type FormState = {
   name: string;
   model: string;
-  /** Preserved from `{ id, speed }` model objects; not edited in Form UI yet. */
+  /** "" = provider default (model stays a plain string when reasoning is also unset). */
   modelSpeed: "" | "standard" | "fast";
+  modelReasoning: "" | ModelReasoning;
   system: string;
   description: string;
   modelCardId: string;
@@ -54,6 +56,7 @@ export const INITIAL_FORM: FormState = {
   name: "",
   model: "",
   modelSpeed: "",
+  modelReasoning: "",
   system: "",
   description: "",
   modelCardId: "",
@@ -138,6 +141,14 @@ function modelSpeedOf(model: unknown): "" | "standard" | "fast" {
   return speed === "standard" || speed === "fast" ? speed : "";
 }
 
+export const MODEL_REASONING_LEVELS: ModelReasoning[] = ["none", "low", "medium", "high", "xhigh", "max"];
+
+function modelReasoningOf(model: unknown): "" | ModelReasoning {
+  if (!model || typeof model !== "object") return "";
+  const reasoning = (model as { reasoning?: unknown }).reasoning;
+  return MODEL_REASONING_LEVELS.includes(reasoning as ModelReasoning) ? (reasoning as ModelReasoning) : "";
+}
+
 type RuntimeBinding = {
   runtime_id?: string;
   acp_agent_id?: string;
@@ -158,6 +169,7 @@ export function configToForm(config: Record<string, unknown>): FormState {
     name: String(config.name || ""),
     model: modelIdOf(config.model) || (typeof config.model === "string" ? config.model : ""),
     modelSpeed: modelSpeedOf(config.model),
+    modelReasoning: modelReasoningOf(config.model),
     modelCardId: "",
     system: String(config.system || ""),
     description: String(config.description || ""),
@@ -199,11 +211,11 @@ export function agentToForm(agent: Agent): FormState {
 
 export function buildModelValue(
   form: FormState,
-): string | { id: string; speed: "standard" | "fast" } {
-  if (form.modelSpeed === "standard" || form.modelSpeed === "fast") {
-    return { id: form.model, speed: form.modelSpeed };
-  }
-  return form.model;
+): string | { id: string; speed?: "standard" | "fast"; reasoning?: ModelReasoning } {
+  const spec: { id: string; speed?: "standard" | "fast"; reasoning?: ModelReasoning } = { id: form.model };
+  if (form.modelSpeed === "standard" || form.modelSpeed === "fast") spec.speed = form.modelSpeed;
+  if (form.modelReasoning) spec.reasoning = form.modelReasoning;
+  return spec.speed || spec.reasoning ? spec : form.model;
 }
 
 /** Form-managed built-in toolset entry only. */

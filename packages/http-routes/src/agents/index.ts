@@ -28,21 +28,37 @@ interface Vars {
   Variables: { tenant_id: string; user_id?: string };
 }
 
+function formatModel(m: AgentConfig["model"] | undefined) {
+  const spec = m && typeof m === "object" ? m : { id: m || "" };
+  return {
+    id: spec.id,
+    speed: spec.speed || ("standard" as const),
+    ...(spec.reasoning ? { reasoning: spec.reasoning } : {}),
+  };
+}
+
+const MODEL_SPEEDS = ["standard", "fast"];
+const MODEL_REASONING = ["none", "low", "medium", "high", "xhigh", "max"];
+
+/** Enum check for the optional knobs on `{ id, speed, reasoning }` models. */
+function invalidModelSpec(model: unknown, field: string): string | undefined {
+  if (!model || typeof model !== "object") return;
+  const { speed, reasoning } = model as { speed?: unknown; reasoning?: unknown };
+  if (speed != null && !MODEL_SPEEDS.includes(speed as string)) {
+    return `${field}.speed must be one of: ${MODEL_SPEEDS.join(", ")}`;
+  }
+  if (reasoning != null && !MODEL_REASONING.includes(reasoning as string)) {
+    return `${field}.reasoning must be one of: ${MODEL_REASONING.join(", ")}`;
+  }
+}
+
 function formatAgent(agent: AgentConfig) {
-  const model =
-    !agent.model || typeof agent.model === "string"
-      ? { id: agent.model || "", speed: "standard" as const }
-      : { id: agent.model.id, speed: agent.model.speed || ("standard" as const) };
+  const model = formatModel(agent.model);
 
   // OMA-only fields nest under `_oma:` so AMA SDK consumers ignore them
   // while OMA tooling can read the platform extensions.
   const oma: Record<string, unknown> = {};
-  if (agent.aux_model) {
-    oma.aux_model =
-      typeof agent.aux_model === "string"
-        ? { id: agent.aux_model, speed: "standard" as const }
-        : { id: agent.aux_model.id, speed: agent.aux_model.speed || ("standard" as const) };
-  }
+  if (agent.aux_model) oma.aux_model = formatModel(agent.aux_model);
   if (agent.harness) oma.harness = agent.harness;
   if (agent.runtime_binding) oma.runtime_binding = agent.runtime_binding;
   if (agent.appendable_prompts && agent.appendable_prompts.length > 0) {
@@ -150,7 +166,7 @@ export interface AgentRoutesDeps {
    *  services.modelCards; Node passes nothing → validation skipped. */
   validateModel?: (
     tenantId: string,
-    model: string | { id: string; speed?: string },
+    model: AgentConfig["model"],
   ) => Promise<{ valid: boolean; error?: string }>;
   /** Optional field-size cap check. CF passes apps/main/src/lib/limits;
    *  Node currently passes nothing. */
@@ -176,7 +192,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
     const services = resolveServices(deps.services, c);
     const raw = await c.req.json<{
       name: string;
-      model: string | { id: string; speed?: "standard" | "fast" };
+      model: AgentConfig["model"];
       system?: string;
       tools?: AgentConfig["tools"];
       description?: string;
@@ -188,7 +204,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       harness?: string;
       enable_general_subagent?: boolean;
       _oma?: {
-        aux_model?: string | { id: string; speed?: "standard" | "fast" };
+        aux_model?: AgentConfig["aux_model"];
         harness?: string;
         runtime_binding?: AgentConfig["runtime_binding"];
         appendable_prompts?: string[];
@@ -211,6 +227,9 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
     if (!body.runtime_binding && !body.model) {
       return c.json({ error: "model is required for cloud agents" }, 400);
     }
+    const specError =
+      invalidModelSpec(body.model, "model") ?? invalidModelSpec(body.aux_model, "aux_model");
+    if (specError) return c.json({ error: specError }, 400);
 
     if (deps.validateAgentLimits) {
       const limitCheck = deps.validateAgentLimits(body);
@@ -374,7 +393,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
 
     const raw = (await c.req.json()) as {
       name?: string;
-      model?: string | { id: string; speed?: "standard" | "fast" };
+      model?: AgentConfig["model"];
       system?: string | null;
       tools?: AgentConfig["tools"];
       description?: string | null;
@@ -387,7 +406,7 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       harness?: string;
       enable_general_subagent?: boolean | null;
       _oma?: {
-        aux_model?: string | { id: string; speed?: "standard" | "fast" } | null;
+        aux_model?: AgentConfig["aux_model"] | null;
         harness?: string;
         runtime_binding?: AgentConfig["runtime_binding"] | null;
         appendable_prompts?: string[] | null;
@@ -417,6 +436,9 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
     if (body.name !== undefined && !body.name) {
       return c.json({ error: "name cannot be empty" }, 400);
     }
+    const specError =
+      invalidModelSpec(body.model, "model") ?? invalidModelSpec(body.aux_model, "aux_model");
+    if (specError) return c.json({ error: specError }, 400);
 
     if (deps.validateAgentLimits) {
       const limitCheck = deps.validateAgentLimits(body);

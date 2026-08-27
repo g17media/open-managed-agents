@@ -2,7 +2,7 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { resolveModel } from "../../apps/agent/src/harness/provider";
+import { resolveModel, modelCallOptions } from "../../apps/agent/src/harness/provider";
 import { evaluateOutcome } from "../../apps/agent/src/harness/outcome-evaluator";
 import { outboundByHost } from "../../apps/agent/src/outbound";
 import { registerHarness } from "../../apps/agent/src/harness/registry";
@@ -76,6 +76,36 @@ describe("Provider", () => {
     );
     expect(model).toBeTruthy();
     expect(model.modelId).toContain("claude-opus-4-6");
+  });
+
+  it("modelCallOptions sends nothing when speed/reasoning are unset", () => {
+    const model = resolveModel("claude-opus-4-7", "fake-key");
+    expect(modelCallOptions(model, "claude-opus-4-7")).toEqual({});
+    expect(modelCallOptions(model, { id: "claude-opus-4-7", speed: "standard" })).toEqual({});
+    expect(modelCallOptions(model, undefined)).toEqual({});
+  });
+
+  it("modelCallOptions maps speed + reasoning for Anthropic", () => {
+    const model = resolveModel("claude-opus-4-7", "fake-key");
+    expect(
+      modelCallOptions(model, { id: "claude-opus-4-7", speed: "fast", reasoning: "high" }),
+    ).toEqual({ reasoning: "high", providerOptions: { anthropic: { speed: "fast" } } });
+    expect(modelCallOptions(model, { id: "claude-opus-4-7", reasoning: "none" })).toEqual({
+      reasoning: "none",
+    });
+    expect(modelCallOptions(model, { id: "claude-opus-4-7", reasoning: "max" })).toEqual({
+      providerOptions: { anthropic: { thinking: { type: "adaptive" }, effort: "max" } },
+    });
+  });
+
+  it("modelCallOptions ignores speed on OpenAI and maps max to reasoningEffort", () => {
+    const model = resolveModel("gpt-5", "fake-key", undefined, "oai");
+    expect(modelCallOptions(model, { id: "gpt-5", speed: "fast", reasoning: "low" })).toEqual({
+      reasoning: "low",
+    });
+    expect(modelCallOptions(model, { id: "gpt-5", reasoning: "max" })).toEqual({
+      providerOptions: { openai: { reasoningEffort: "max" } },
+    });
   });
 
   it("strips provider prefix", () => {
@@ -493,6 +523,26 @@ describe("Edge cases - concurrent and complex operations", () => {
     const agent = (await res.json()) as any;
     expect(agent.model.id).toBe("claude-opus-4-6");
     expect(agent.model.speed).toBe("fast");
+  });
+
+  it("agent model.reasoning round-trips via API and rejects unknown levels", async () => {
+    const res = await post("/v1/agents", {
+      name: "Reasoning Agent",
+      model: { id: "claude-opus-4-7", reasoning: "xhigh" },
+    });
+    expect(res.status).toBe(201);
+    const agent = (await res.json()) as any;
+    expect(agent.model).toEqual({ id: "claude-opus-4-7", speed: "standard", reasoning: "xhigh" });
+
+    const plain = await post("/v1/agents", { name: "Plain", model: "claude-opus-4-7" });
+    expect(((await plain.json()) as any).model).toEqual({ id: "claude-opus-4-7", speed: "standard" });
+
+    const bad = await post("/v1/agents", {
+      name: "Bad Reasoning",
+      model: { id: "claude-opus-4-7", reasoning: "ultra" },
+    });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as any).error.message).toContain("model.reasoning");
   });
 
   it("agent update system preserves tools in version history", async () => {
