@@ -150,6 +150,11 @@ export class SessionStateMachine {
     await this.deps.adapter.beginTurn(this.deps.sessionId, turnId);
     this.deps.adapter.hintTurnInFlight?.(this.deps.sessionId, turnId);
 
+    // Set once the harness returns normally so the finally block can emit
+    // the terminal session.status_idle only on success (the catch path
+    // emits session.error instead, which is already terminal for clients).
+    let harnessCompleted = false;
+
     try {
       // Memory store mounts: optional adapter step, runs once per turn
       // so a session newly bound to a store picks it up on the next
@@ -178,6 +183,7 @@ export class SessionStateMachine {
 
       const harness = this.deps.buildHarness();
       await harness.run(ctx);
+      harnessCompleted = true;
     } catch (err) {
       // Surface the failure to the user: persist + publish session.error
       // so the console shows the actual diagnostic (model 4xx, tool
@@ -200,6 +206,31 @@ export class SessionStateMachine {
     } finally {
       this.activeTurnId = null;
       await this.deps.adapter.endTurn(this.deps.sessionId, turnId, "idle");
+
+      // Emit the terminal session.status_idle the Anthropic Managed Agents
+      // wire contract requires at the end of every turn. endTurn() above only
+      // flips the sessions-row status in SQL; without this event, SSE
+      // consumers that discriminate on session.status_idle (every Anthropic
+      // SDK — the /messages one-shot handler already waits on it) never see
+      // the turn end and block until their own inactivity timeout. Persist +
+      // publish, mirroring the session.error path above. Only on the success
+      // path: a thrown harness already emitted session.error, itself terminal.
+      // stop_reason=end_turn because the default harness runs to completion
+      // rather than pausing for requires_action tool results.
+      if (harnessCompleted) {
+        const idleEvent = {
+          type: "session.status_idle",
+          stop_reason: { type: "end_turn" },
+        } as unknown as SessionEvent;
+        try {
+          await this.deps.adapter.eventLog.append(idleEvent);
+          this.deps.publish(idleEvent);
+        } catch (persistErr) {
+          this.logger.warn(
+            `failed to persist session.status_idle: ${(persistErr as Error).message}`,
+          );
+        }
+      }
     }
   }
 
