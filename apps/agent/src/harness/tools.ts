@@ -10,6 +10,7 @@ import {
 import type { AgentConfig, ToolsetConfig, CustomToolConfig, SessionEvent } from "@open-managed-agents/shared";
 import type { ToMarkdownProvider } from "@open-managed-agents/markdown";
 import type { SandboxPort, ProcessHandle } from "./interface";
+import type { ModelCallOptions } from "./provider";
 import { nanoid } from "nanoid";
 // Browser tools depend on the runtime-agnostic BrowserHarness interface.
 // Concrete adapters (CF / Node / CDP / Disabled) live in the package and
@@ -403,6 +404,8 @@ export async function buildTools(
     /** Identifier metadata for the aux model — written into aux.model_call
      *  trajectory events so cost dashboards can attribute usage. */
     auxModelInfo?: { model_id: string };
+    /** speed / reasoning derived from `agent.aux_model` — see modelCallOptions. */
+    auxCallOptions?: ModelCallOptions;
     /** Emit a SessionEvent into the trajectory stream. Used to record
      *  aux.model_call events from inside tool execution. */
     broadcastEvent?: (event: SessionEvent) => void;
@@ -881,7 +884,7 @@ export async function buildTools(
           try {
             const summarizeResult = await generateText({
               model: env.auxModel,
-              providerOptions: env.auxProviderOptions as SharedV3ProviderOptions | undefined,
+              ...env.auxCallOptions,
               system: WEB_SUMMARIZE_SYSTEM_PROMPT,
               prompt: `URL: ${url}\n\nPAGE CONTENT (markdown):\n\n${markdown}`,
               maxOutputTokens: 1500,

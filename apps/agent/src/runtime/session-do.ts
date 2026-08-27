@@ -79,6 +79,7 @@ import { HarnessLease, resolveHarness } from "../harness/registry";
 import { composeSystemPrompt } from "../harness/platform-guidance";
 import {
   createPiModelRuntime,
+  modelThinkingLevel,
   toAiSdkLanguageModel,
 } from "../harness/pi-provider";
 import {
@@ -4008,7 +4009,7 @@ export class SessionDO extends DurableObject<Env> {
   private async resolveAuxModel(agent: AgentConfig): Promise<{
     model: LanguageModel;
     modelInfo: { model_id: string };
-    providerOptions?: SharedV3ProviderOptions;
+    callOptions?: import("../harness/provider").ModelCallOptions;
   } | null> {
     if (!agent.aux_model) return null;
     const handle = typeof agent.aux_model === "string" ? agent.aux_model : agent.aux_model.id;
@@ -4027,6 +4028,7 @@ export class SessionDO extends DurableObject<Env> {
         !Array.isArray(agent.aux_model.provider_options.pi)
           ? agent.aux_model.provider_options.pi as Record<string, unknown>
           : undefined,
+      thinkingLevel: modelThinkingLevel(agent.aux_model),
       speed: typeof agent.aux_model === "string" ? undefined : agent.aux_model.speed,
     }));
     return {
@@ -4099,7 +4101,7 @@ export class SessionDO extends DurableObject<Env> {
           browser: this.getBrowserHarness() ?? undefined,
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,
-          auxProviderOptions: auxResolved?.providerOptions,
+          auxCallOptions: auxResolved?.callOptions,
           broadcastEvent: (event) => this.persistAndBroadcastEvent(
             event,
             (confirmation as unknown as { session_thread_id?: string }).session_thread_id ?? "sthr_primary",
@@ -4542,7 +4544,7 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: subAuxResolved?.model,
       auxModelInfo: subAuxResolved?.modelInfo,
-      auxProviderOptions: subAuxResolved?.providerOptions,
+      auxCallOptions: subAuxResolved?.callOptions,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(
         event,
         parentThreadId,
@@ -4581,7 +4583,7 @@ export class SessionDO extends DurableObject<Env> {
         !Array.isArray(subAgent.model.provider_options.pi)
           ? subAgent.model.provider_options.pi as Record<string, unknown>
           : undefined,
-      thinkingLevel: typeof subAgent.model === "string" ? undefined : subAgent.model.effort,
+      thinkingLevel: modelThinkingLevel(subAgent.model),
       speed: typeof subAgent.model === "string" ? undefined : subAgent.model.speed,
     });
     const subModel = toAiSdkLanguageModel(subPiRuntime);
@@ -4876,7 +4878,7 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: auxResolved?.model,
       auxModelInfo: auxResolved?.modelInfo,
-      auxProviderOptions: auxResolved?.providerOptions,
+      auxCallOptions: auxResolved?.callOptions,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event, turnThreadId, activeFence),
       scheduleWakeup: (a) => this.scheduleWakeup(a),
       cancelWakeup: (id) => this.cancelWakeup(id),
@@ -4922,7 +4924,7 @@ export class SessionDO extends DurableObject<Env> {
         !Array.isArray(agent.model.provider_options.pi)
           ? agent.model.provider_options.pi as Record<string, unknown>
           : undefined,
-      thinkingLevel: typeof agent.model === "string" ? undefined : agent.model.effort,
+      thinkingLevel: modelThinkingLevel(agent.model),
       speed: typeof agent.model === "string" ? undefined : agent.model.speed,
     });
     const model = toAiSdkLanguageModel(piRuntime);

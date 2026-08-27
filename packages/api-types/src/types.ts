@@ -43,16 +43,29 @@ export interface CustomToolConfig {
 
 export type ToolConfig = ToolsetConfig | CustomToolConfig;
 
+/** Reasoning effort for a model call. Unset = provider default (nothing sent). */
+export type ModelReasoning = "none" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface ModelSpec {
+  id: string;
+  speed?: "standard" | "fast";
+  reasoning?: ModelReasoning;
+  effort?: Exclude<ModelReasoning, "none"> | { type: Exclude<ModelReasoning, "none"> };
+  /** Upstream escape hatch: routing hint passed through to the provider. */
+  inference_geo?: string;
+  /** Upstream escape hatch: raw provider options, merged over the options
+   *  derived from `speed` / `reasoning` / `effort` by modelCallOptions(). */
+  provider_options?: Record<string, unknown>;
+  /** Legacy camelCase spelling of `provider_options`. Read-compatible only:
+   *  stored agent configs predate the snake_case rename, and the Node model
+   *  factory accepts either. Write `provider_options` in new code. */
+  providerOptions?: Record<string, unknown>;
+}
+
 export interface AgentConfig {
   id: string;
   name: string;
-  model: string | {
-    id: string;
-    effort?: "low" | "medium" | "high" | "xhigh" | "max";
-    inference_geo?: string;
-    provider_options?: Record<string, unknown>;
-    speed?: "standard" | "fast";
-  };
+  model: string | ModelSpec;
   system: string;
   tools: ToolConfig[];
   mcp_servers?: Array<
@@ -79,13 +92,7 @@ export interface AgentConfig {
    * When unset, tools that would benefit from summarization fall back to
    * returning raw content. Set this to opt into compressed tool results.
    */
-  aux_model?: string | {
-    id: string;
-    effort?: "low" | "medium" | "high" | "xhigh" | "max";
-    inference_geo?: string;
-    provider_options?: Record<string, unknown>;
-    speed?: "standard" | "fast";
-  };
+  aux_model?: string | ModelSpec;
   harness?: string;
   /** ACP process configuration for the `acp-sandbox` harness. The process is
    * spawned inside the session Sandbox through SandboxDuplexProcessPort; the

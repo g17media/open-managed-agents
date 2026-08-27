@@ -7,6 +7,7 @@
  * tracked separately in #155 — this module only guarantees round-trips.
  */
 import type { AgentRecord as Agent } from "../../types/agent";
+import type { ModelReasoning } from "@open-managed-agents/api-types";
 import yaml from "js-yaml";
 
 export function parseAgentConfigText(
@@ -165,6 +166,14 @@ export type FormState = {
   auxiliaryModelSpeed: "" | "standard" | "fast";
   appendablePrompts: string[];
   metadataJson: string;
+  /** "" = provider default (model stays a plain string when speed is also unset). */
+  modelReasoning: "" | ModelReasoning;
+  /** ACP runtime binding. Fork-only: upstream dropped these from the form,
+   *  but keeps `runtime_binding` as a lossless passthrough key, so the
+   *  console remains the only place that edits them. */
+  runtimeId: string;
+  acpAgentId: string;
+  localSkillBlocklist: string[];
   system: string;
   description: string;
   modelCardId: string;
@@ -184,6 +193,10 @@ export const INITIAL_FORM: FormState = {
   auxiliaryModelSpeed: "",
   appendablePrompts: [],
   metadataJson: "{}",
+  modelReasoning: "",
+  runtimeId: "",
+  acpAgentId: "claude-agent-acp",
+  localSkillBlocklist: [],
   system: "",
   description: "",
   modelCardId: "",
@@ -275,6 +288,35 @@ function modelSpeedOf(model: unknown): "" | "standard" | "fast" {
   return speed === "standard" || speed === "fast" ? speed : "";
 }
 
+export const MODEL_REASONING_LEVELS: ModelReasoning[] = ["none", "low", "medium", "high", "xhigh", "max"];
+
+function modelReasoningOf(model: unknown): "" | ModelReasoning {
+  if (!model || typeof model !== "object") return "";
+  const spec = model as { reasoning?: unknown; effort?: unknown };
+  const effort = spec.effort && typeof spec.effort === "object"
+    ? (spec.effort as { type?: unknown }).type : spec.effort;
+  const reasoning = effort ?? spec.reasoning;
+  return MODEL_REASONING_LEVELS.includes(reasoning as ModelReasoning) ? (reasoning as ModelReasoning) : "";
+}
+
+/** `runtime_binding` lives under `_oma` on v1 configs; older snapshots put
+ *  it at the top level. Read both so existing agents keep decoding. */
+function runtimeBindingOf(
+  openma: Record<string, unknown> | undefined,
+  config: Record<string, unknown>,
+): RuntimeBinding | undefined {
+  const raw = openma?.runtime_binding ?? config.runtime_binding;
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as RuntimeBinding
+    : undefined;
+}
+
+type RuntimeBinding = {
+  runtime_id?: string;
+  acp_agent_id?: string;
+  local_skill_blocklist?: string[];
+};
+
 /** Map an API / pasted config into form state (lossy by design for the UI). */
 export function configToForm(config: Record<string, unknown>): FormState {
   const toolPolicy = parseToolPolicy(
@@ -305,6 +347,10 @@ export function configToForm(config: Record<string, unknown>): FormState {
       !Array.isArray(config.metadata)
         ? JSON.stringify(config.metadata, null, 2)
         : "{}",
+    modelReasoning: modelReasoningOf(config.model),
+    runtimeId: runtimeBindingOf(openma, config)?.runtime_id ?? "",
+    acpAgentId: runtimeBindingOf(openma, config)?.acp_agent_id ?? "claude-agent-acp",
+    localSkillBlocklist: runtimeBindingOf(openma, config)?.local_skill_blocklist ?? [],
     modelCardId: "",
     system: String(config.system || ""),
     description: String(config.description || ""),
@@ -355,6 +401,20 @@ export function buildModelValue(
   form: FormState,
   existingModel?: unknown,
 ): string | Record<string, unknown> {
+  const applyKnobs = (model: Record<string, unknown>): Record<string, unknown> => {
+    if (form.modelSpeed === "standard" || form.modelSpeed === "fast") {
+      model.speed = form.modelSpeed;
+    } else {
+      delete model.speed;
+    }
+    if (form.modelReasoning && form.modelReasoning !== "none") {
+      model.effort = { type: form.modelReasoning };
+    } else {
+      delete model.effort;
+    }
+    delete model.reasoning;
+    return model;
+  };
   if (
     existingModel &&
     typeof existingModel === "object" &&
@@ -363,16 +423,12 @@ export function buildModelValue(
   ) {
     const model = structuredClone(existingModel as Record<string, unknown>);
     model.id = form.model;
-    if (form.modelSpeed === "standard" || form.modelSpeed === "fast") {
-      model.speed = form.modelSpeed;
-    } else {
-      delete model.speed;
-    }
-    return model;
+    return applyKnobs(model);
   }
-  return form.modelSpeed === "standard" || form.modelSpeed === "fast"
-    ? { id: form.model, speed: form.modelSpeed }
-    : form.model;
+  const spec = applyKnobs({ id: form.model });
+  // Collapse back to a bare string when neither knob is set, so agents that
+  // never touch these fields keep the simple `model: "..."` shape.
+  return Object.keys(spec).length > 1 ? spec : form.model;
 }
 
 /** Form-managed built-in toolset entry only. */

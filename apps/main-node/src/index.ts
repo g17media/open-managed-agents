@@ -91,6 +91,7 @@ import {
 } from "@open-managed-agents/agent/harness/tools";
 import {
   createPiModelRuntime,
+  modelThinkingLevel,
   toAiSdkLanguageModel,
 } from "@open-managed-agents/agent/harness/pi-provider";
 import type { PiModelConfig } from "@open-managed-agents/agent/harness/pi-provider";
@@ -997,11 +998,7 @@ async function environmentImageOverrides(
  *  Prefer a matching model card; fall back to ANTHROPIC_* env vars. */
 async function resolveNodeModelCreds(
   tenantId: string,
-  agentModel: string | {
-    id: string;
-    effort?: "low" | "medium" | "high" | "xhigh" | "max";
-    speed?: string;
-  },
+  agentModel: import("@open-managed-agents/shared").AgentConfig["model"],
 ): Promise<{
   wireModel: string;
   apiKey: string;
@@ -1049,13 +1046,7 @@ async function resolveNodeModelCreds(
 
 async function buildNodeLanguageModel(
   tenantId: string,
-  agentModel: string | {
-    id: string;
-    effort?: "low" | "medium" | "high" | "xhigh" | "max";
-    providerOptions?: Record<string, unknown>;
-    provider_options?: Record<string, unknown>;
-    speed?: string;
-  },
+  agentModel: import("@open-managed-agents/shared").AgentConfig["model"],
 ) {
   const creds = await resolveNodeModelCreds(tenantId, agentModel);
   const configuredProviderOptions =
@@ -1076,7 +1067,7 @@ async function buildNodeLanguageModel(
       !Array.isArray(piProviderOptions)
         ? piProviderOptions as Record<string, unknown>
         : undefined,
-    thinkingLevel: typeof agentModel === "string" ? undefined : agentModel.effort,
+    thinkingLevel: modelThinkingLevel(agentModel),
     speed: typeof agentModel === "string"
       ? undefined
       : agentModel.speed === "fast" ? "fast" : "standard",
@@ -1317,8 +1308,7 @@ const sessionRegistry = new SessionRegistry({
         !Array.isArray(input.agent.model.provider_options.pi)
           ? input.agent.model.provider_options.pi as Record<string, unknown>
           : undefined,
-      thinkingLevel:
-        typeof input.agent.model === "string" ? undefined : input.agent.model.effort,
+      thinkingLevel: modelThinkingLevel(input.agent.model),
       speed:
         typeof input.agent.model === "string"
           ? undefined

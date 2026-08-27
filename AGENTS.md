@@ -125,7 +125,7 @@ A **vault** is a secure credential store. Credentials in vaults are **never expo
 |---|---|---|---|
 | `name` | string | Yes | Display name for the agent |
 | `description` | string | No | Human-readable description |
-| `model` | string or object | Yes | Model identifier (e.g. `"claude-sonnet-4-6"`) or `{ id, speed }` |
+| `model` | string or object | Yes | Model identifier (e.g. `"claude-sonnet-4-6"`) or `{ id, speed?, reasoning? }`. `speed`: `"standard"` (default) or `"fast"` (Anthropic fast mode). `reasoning`: `none` / `low` / `medium` / `high` / `xhigh` / `max`; unset = provider default. |
 | `system` | string | Yes | System prompt — defines the agent's behavior and persona |
 | `tools` | array | No | Tool configurations (toolsets, custom tools) |
 | `mcp_servers` | array | No | External MCP server connections |
