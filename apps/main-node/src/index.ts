@@ -60,7 +60,7 @@ import {
 import { toFileRecord } from "@open-managed-agents/files-store";
 import { SqlEventLog } from "@open-managed-agents/event-log/sql";
 import type { SessionEvent } from "@open-managed-agents/shared";
-import { generateEventId, generateFileId, fileR2Key } from "@open-managed-agents/shared";
+import { generateEventId, generateFileId, fileR2Key, skillFileR2Key } from "@open-managed-agents/shared";
 import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
@@ -135,6 +135,7 @@ import {
 } from "@open-managed-agents/auth-config";
 import { senderFromEnv } from "@open-managed-agents/email/adapters/nodemailer";
 import { SqlKvStore } from "@open-managed-agents/kv-store/adapters/sql";
+import { listAll as kvListAll } from "@open-managed-agents/kv-store";
 import {
   selectBrowserHarness,
   buildSelectedBrowserHarness,
@@ -448,6 +449,88 @@ const sessionOutputs = nodeOutputsAdapter(outputsRoot);
 // quotes and escaping embedded quotes is the standard POSIX-safe form.
 function qsh(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+// ── Skill resolution (Node) ──────────────────────────────────────────────
+// The Node runtime resolves agent.skills the way the CF SessionDO does:
+// inline each skill's SKILL.md into the system prompt and mount its files
+// into the sandbox. Skills live as tenant skills in KV (t:<tenant>:skill:<id>
+// metadata + :skillver:<id>:<ver> manifest; bytes in the blob store, keyed by
+// skillFileR2Key). Anthropic-hosted skills (pdf/docx/xlsx/pptx) are imported
+// into the deployment via POST /v1/skills, where they get id skill_<random>
+// and keep their frontmatter name — so an agent ref like
+// {type:"anthropic", skill_id:"pdf"} is matched to the imported skill by NAME
+// (id won't match) and the ref's `type` is ignored.
+interface NodeSkillMeta {
+  id: string;
+  name?: string;
+  display_title?: string;
+  description?: string;
+  latest_version?: string;
+}
+interface ResolvedNodeSkill {
+  name: string;
+  addition: string;
+  files: Array<{ filename: string; bytes: Uint8Array }>;
+}
+
+async function resolveNodeSkills(
+  tenantId: string,
+  skillRefs: Array<{ skill_id: string; type?: string; version?: string }>,
+): Promise<ResolvedNodeSkill[]> {
+  if (!skillRefs.length || !filesBlob) return [];
+
+  // Index the tenant's skills by id and by name so a ref matches either.
+  const byId = new Map<string, NodeSkillMeta>();
+  const byName = new Map<string, NodeSkillMeta>();
+  const listed = await kvListAll(kv, `t:${tenantId}:skill:`);
+  for (const k of listed) {
+    const raw = await kv.get(k.name);
+    if (!raw) continue;
+    try {
+      const m = JSON.parse(raw) as NodeSkillMeta;
+      if (m.id) byId.set(m.id, m);
+      if (m.name) byName.set(m.name, m);
+    } catch {
+      /* skip unparseable skill metadata */
+    }
+  }
+
+  const resolved: ResolvedNodeSkill[] = [];
+  const seen = new Set<string>();
+  for (const ref of skillRefs) {
+    const meta = byId.get(ref.skill_id) ?? byName.get(ref.skill_id);
+    if (!meta || seen.has(meta.id)) continue;
+    seen.add(meta.id);
+    const version =
+      ref.version && ref.version !== "latest" ? ref.version : meta.latest_version;
+    if (!version) continue;
+    const verRaw = await kv.get(`t:${tenantId}:skillver:${meta.id}:${version}`);
+    if (!verRaw) continue;
+    let fileList: Array<{ filename: string }> = [];
+    try {
+      fileList = ((JSON.parse(verRaw) as { files?: Array<{ filename: string }> }).files ?? []);
+    } catch {
+      /* skip skills with an unparseable manifest */
+    }
+    const files: Array<{ filename: string; bytes: Uint8Array }> = [];
+    let skillMd = "";
+    for (const f of fileList) {
+      const obj = await filesBlob.get(skillFileR2Key(tenantId, meta.id, version, f.filename));
+      if (!obj) continue;
+      const bytes = await obj.bytes();
+      files.push({ filename: f.filename, bytes });
+      if (f.filename === "SKILL.md") skillMd = new TextDecoder().decode(bytes);
+    }
+    const name = meta.name || meta.display_title || ref.skill_id;
+    // Inline the full SKILL.md (AMA-aligned: the model sees the instructions
+    // up front). Fall back to a metadata line if SKILL.md is missing.
+    const addition = skillMd
+      ? `<skill name="${name}">\n${skillMd}\n</skill>`
+      : `[Skill: ${name}]${meta.description ? " " + meta.description : ""}`;
+    resolved.push({ name, addition, files });
+  }
+  return resolved;
 }
 
 // ─── Files-store blob backend ────────────────────────────────────────
@@ -976,6 +1059,51 @@ const sessionRegistry = new SessionRegistry({
         "environment context fetch failed; prompt omits it",
       );
     }
+
+    // Resolve agent.skills → inline SKILL.md into the system prompt and mount
+    // each skill's files into the sandbox (progressive disclosure). The Node
+    // runtime did neither before, so declared skills were inert. Best-effort:
+    // a failure here must not break the turn — the agent just loses the skill.
+    if (input.agent.skills?.length) {
+      try {
+        const skills = await resolveNodeSkills(input.tenantId, input.agent.skills);
+        for (const skill of skills) {
+          if (skill.addition) {
+            memoryReminders.push({ source: `skill:${skill.name}`, text: skill.addition });
+          }
+          if (!skill.files.length) continue;
+          // Mount once per session: writing every skill file on every turn
+          // would be dozens of round-trips per turn. The .skills dir under the
+          // agent's home matches the CF SessionDO's mount location.
+          const skillDir = `/home/user/.skills/${skill.name}`;
+          const present = await input.sandbox
+            .exec(`test -d ${qsh(skillDir)} && echo present || echo absent`, 5000)
+            .catch(() => "absent");
+          if (present.includes("present")) continue;
+          for (const f of skill.files) {
+            const dest = `${skillDir}/${f.filename}`;
+            const slash = dest.lastIndexOf("/");
+            const dir = slash > 0 ? dest.slice(0, slash) : "";
+            try {
+              if (dir) await input.sandbox.exec(`mkdir -p ${qsh(dir)}`, 5000).catch(() => undefined);
+              if (input.sandbox.writeFileBytes) await input.sandbox.writeFileBytes(dest, f.bytes);
+              else await input.sandbox.writeFile(dest, new TextDecoder().decode(f.bytes));
+            } catch (err) {
+              logger.warn(
+                { err, op: "main-node.skill_file_mount", session_id: input.sessionId, file: dest },
+                "skill file mount failed; skipping",
+              );
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(
+          { err, op: "main-node.skills_failed", session_id: input.sessionId },
+          "skill resolution failed; prompt omits skills",
+        );
+      }
+    }
+
     return {
       agent: input.agent,
       userMessage: input.userMessage,
