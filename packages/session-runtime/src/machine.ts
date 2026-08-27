@@ -78,6 +78,19 @@ export interface SessionMachineDeps {
    *  Optional — sandboxes / hosts that don't support it skip silently. */
   mountSessionOutputs?(opts: { sandbox: SandboxExecutor }): Promise<void>;
 
+  /** Mount the session's `file` and `github_repository` resources into the
+   *  sandbox before the harness runs (client attachments + repo checkouts).
+   *  Node's port of the CF resource-mounter; read fresh each turn so a
+   *  resource attached mid-session is mounted on the next turn. Optional —
+   *  shells that mount resources elsewhere (CF) leave it unset. */
+  mountSessionResources?(opts: { sandbox: SandboxExecutor }): Promise<void>;
+
+  /** Promote files the agent wrote under /mnt/session/outputs into the
+   *  Files API (scope_id = this session) at turn completion, so Anthropic
+   *  Managed Agents SDK consumers that poll files.list({scope_id}) can
+   *  fetch them. Optional; the shell owns the files-store wiring. */
+  promoteSessionOutputs?(opts: { sandbox: SandboxExecutor }): Promise<void>;
+
   /** Build the LanguageModel for this turn. CF reads env from
    *  bindings; Node from process.env (and optionally a model card).
    *  May be async when the shell needs to look up credentials. */
@@ -171,6 +184,14 @@ export class SessionStateMachine {
         await this.deps.mountSessionOutputs({ sandbox: this.deps.sandbox });
       }
 
+      // Mount the session's file + github_repository resources (client
+      // attachments and repo checkouts) so the agent can use them this
+      // turn. Runs after the outputs/memory mounts and before tools are
+      // built, mirroring their per-turn, idempotent contract.
+      if (this.deps.mountSessionResources) {
+        await this.deps.mountSessionResources({ sandbox: this.deps.sandbox });
+      }
+
       const tools = await this.deps.buildTools(agent, this.deps.sandbox);
       const model = await this.deps.buildModel(agent);
       const ctx = await this.deps.buildHarnessContext({
@@ -218,6 +239,22 @@ export class SessionStateMachine {
       // stop_reason=end_turn because the default harness runs to completion
       // rather than pausing for requires_action tool results.
       if (harnessCompleted) {
+        // Promote files the agent wrote to /mnt/session/outputs into the
+        // Files API before signalling idle, so a consumer that reacts to
+        // session.status_idle by polling files.list({scope_id}) (the
+        // ff-agents bot's file mirroring) sees them already present.
+        // Best-effort: a promote failure must never block the terminal
+        // event below — that would re-introduce the turn-never-ends hang.
+        if (this.deps.promoteSessionOutputs) {
+          try {
+            await this.deps.promoteSessionOutputs({ sandbox: this.deps.sandbox });
+          } catch (promoteErr) {
+            this.logger.warn(
+              `promoteSessionOutputs failed: ${(promoteErr as Error).message}`,
+            );
+          }
+        }
+
         const idleEvent = {
           type: "session.status_idle",
           stop_reason: { type: "end_turn" },

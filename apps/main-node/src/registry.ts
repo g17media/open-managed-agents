@@ -174,6 +174,24 @@ export interface SessionRegistryDeps {
     eventLog: SqlEventLog;
   }): Promise<unknown>;
 
+  /** Mount the session's `file` + `github_repository` resources into the
+   *  sandbox. The shell owns files-store + blob access; the registry just
+   *  binds sessionId/tenantId and forwards to the machine's per-turn hook.
+   *  Optional — unset falls back to no resource mounting. */
+  mountSessionResources?(input: {
+    sessionId: string;
+    tenantId: string;
+    sandbox: SandboxExecutor;
+  }): Promise<void>;
+
+  /** Promote agent-written /mnt/session/outputs files into the Files API
+   *  (scope_id = session) at turn completion. Optional. */
+  promoteSessionOutputs?(input: {
+    sessionId: string;
+    tenantId: string;
+    sandbox: SandboxExecutor;
+  }): Promise<void>;
+
   /** Sandbox workdir root, e.g. /app/data/sandboxes. Per-session dirs
    *  are joined under it. */
   sandboxWorkdirRoot: string;
@@ -383,6 +401,19 @@ export class SessionRegistry {
       // Node passes no-ops since the work has already been done.
       mountMemoryStores: async () => {},
       mountSessionOutputs: async () => {},
+      // Resource mounting + outputs promotion DO run through the machine
+      // hooks on Node (unlike memory/outputs mounting, done in the
+      // orchestrator above): the mount must read resources fresh each turn,
+      // and the promotion must fire on turn completion. Bind the per-session
+      // ids here and forward to the shell's implementations.
+      mountSessionResources: this.deps.mountSessionResources
+        ? ({ sandbox: sb }) =>
+            this.deps.mountSessionResources!({ sessionId, tenantId, sandbox: sb })
+        : undefined,
+      promoteSessionOutputs: this.deps.promoteSessionOutputs
+        ? ({ sandbox: sb }) =>
+            this.deps.promoteSessionOutputs!({ sessionId, tenantId, sandbox: sb })
+        : undefined,
       buildModel: (agent) => this.deps.buildModel(agent, tenantId),
       buildTools: (agent, sb) => this.deps.buildTools(agent, sb, sessionId, tenantId),
       buildHarness: () => this.deps.buildHarness(),

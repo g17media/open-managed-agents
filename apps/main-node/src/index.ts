@@ -439,6 +439,16 @@ if (s3MemoryConfig) {
 
 const outputsRoot = process.env.SESSION_OUTPUTS_DIR ?? "./data/session-outputs";
 mkdirSync(outputsRoot, { recursive: true });
+// Shared with the SessionRegistry's output-promotion closure below; the
+// sessions routes build their own instance over the same root.
+const sessionOutputs = nodeOutputsAdapter(outputsRoot);
+
+// Shell single-quote escape for values interpolated into sandbox exec
+// commands (repo URLs, mount paths, branch names). Wrapping in single
+// quotes and escaping embedded quotes is the standard POSIX-safe form.
+function qsh(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
 
 // ─── Files-store blob backend ────────────────────────────────────────
 //
@@ -714,6 +724,145 @@ const sessionRegistry = new SessionRegistry({
   buildSandbox,
   sandboxWorkdirRoot: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
   sqlDialect: dialect,
+  // Mount `file` + `github_repository` session resources into the sandbox
+  // before each turn. The CF SessionDO does this itself; the Node runtime
+  // did not, so attachments and repos were recorded but never appeared in
+  // the sandbox. Files use the sandbox's writeFileBytes primitive (same as
+  // the CF mountFile); repos reuse the CF mountGitRepo verbatim, which
+  // drives the sandbox's native gitCheckout (belljar proxies it to the
+  // cloudflare/sandbox git endpoint).
+  mountSessionResources: async ({ sessionId, tenantId, sandbox }) => {
+    if (!filesBlob) return;
+    const rows = await sessionsService.listResourcesBySession({ sessionId });
+    for (const row of rows) {
+      try {
+        if (row.type === "file" && row.resource.file_id) {
+          const fileId = row.resource.file_id;
+          const meta = await filesService.get({ tenantId, fileId });
+          if (!meta) continue;
+          const obj = await filesBlob.get(meta.r2_key);
+          if (!obj) continue;
+          const bytes = await obj.bytes();
+          // Default mount path matches the Anthropic Managed Agents
+          // convention the ff-agents bot relies on (/workspace/<name>).
+          const path = row.resource.mount_path || `/workspace/${meta.filename}`;
+          const slash = path.lastIndexOf("/");
+          const dir = slash > 0 ? path.slice(0, slash) : "";
+          // belljar's write endpoint does not create parent dirs; ensure
+          // the target directory exists first (no-op for /workspace).
+          if (dir) await sandbox.exec(`mkdir -p ${JSON.stringify(dir)}`, 5000).catch(() => undefined);
+          if (sandbox.writeFileBytes) await sandbox.writeFileBytes(path, bytes);
+          else await sandbox.writeFile(path, new TextDecoder().decode(bytes));
+        } else if (row.type === "github_repository" || row.type === "github_repo") {
+          const repoUrl = row.resource.url || row.resource.repo_url;
+          if (!repoUrl) continue;
+          // Clone into a subdir when mount_path is unset or the bare
+          // /workspace (belljar seeds /workspace with the vault CA, so git
+          // clone into it would fail "directory not empty").
+          const repoName = (repoUrl.split("/").pop() || "repo").replace(/\.git$/, "") || "repo";
+          const mp = row.resource.mount_path;
+          const targetDir = mp && mp !== "/workspace" ? mp : `/workspace/${repoName}`;
+          const parentDir = targetDir.slice(0, Math.max(0, targetDir.lastIndexOf("/"))) || "/";
+          // Idempotency: this hook runs every turn — skip once cloned.
+          const present = await sandbox
+            .exec(`test -d ${qsh(`${targetDir}/.git`)} && echo present || echo absent`, 5000)
+            .catch(() => "absent");
+          if (present.includes("present")) continue;
+          // Under BELLJAR_ISOLATION the sandbox's only egress is the
+          // oma-vault proxy: exec already carries HTTPS_PROXY, but git needs
+          // the vault CA (it ignores NODE_EXTRA_CA_CERTS) or TLS verification
+          // fails. The native sandbox.gitCheckout endpoint is NOT usable here
+          // — it runs git without the proxy env, so github.com won't resolve.
+          // Configuring the CA is a no-op on a non-isolated sandbox (the env
+          // var is unset), so this one path covers belljar + subprocess.
+          const clone = [
+            `CA="$NODE_EXTRA_CA_CERTS"`,
+            `if [ -n "$CA" ] && [ -f "$CA" ]; then git config --global http.sslCAInfo "$CA"; fi`,
+            // Fail fast instead of hanging on an auth prompt when the proxy
+            // can't satisfy a private repo (public repos need no auth).
+            `git config --global core.askpass /bin/true`,
+            `git config --global credential.helper "" 2>/dev/null || true`,
+            `mkdir -p ${qsh(parentDir)}`,
+            `git clone ${qsh(repoUrl)} ${qsh(targetDir)}`,
+            `cd ${qsh(targetDir)} && git config user.name Agent && git config user.email "agent@managed-agents.dev"`,
+          ].join("; ");
+          await sandbox.exec(clone, 180000);
+          // Optional branch/commit checkout (mirrors the CF resource-mounter):
+          // DWIM a remote branch, else create it locally off the default HEAD.
+          const checkout = row.resource.checkout;
+          if (checkout?.type === "branch" && checkout.name) {
+            const branch = checkout.name.replace(/[^A-Za-z0-9._/-]/g, "");
+            if (branch) {
+              await sandbox.exec(
+                `cd ${qsh(targetDir)} && (git fetch origin ${qsh(branch)}:refs/remotes/origin/${qsh(branch)} 2>/dev/null && git checkout ${qsh(branch)}) || git checkout -b ${qsh(branch)}`,
+                60000,
+              );
+            }
+          } else if (checkout?.type === "commit" && checkout.sha) {
+            const sha = checkout.sha.replace(/[^A-Za-z0-9]/g, "");
+            if (sha) await sandbox.exec(`cd ${qsh(targetDir)} && git checkout ${qsh(sha)}`, 60000);
+          }
+          // Verify the clone actually landed; log if not (belljar surfaces
+          // clone failures as a thrown exec error caught below, but a
+          // partial/edge failure should still be visible).
+          const ok = await sandbox
+            .exec(`test -d ${qsh(`${targetDir}/.git`)} && echo present || echo absent`, 5000)
+            .catch(() => "absent");
+          if (!ok.includes("present")) {
+            logger.warn(
+              { op: "node.mount_git_repo", session_id: sessionId, resource_id: row.resource.id, target_dir: targetDir },
+              "github_repository clone did not produce a checkout",
+            );
+          }
+        }
+      } catch (err) {
+        logger.warn(
+          { op: "node.mount_session_resource", session_id: sessionId, resource_id: row.resource.id, resource_type: row.type, err },
+          "session resource mount failed",
+        );
+      }
+    }
+  },
+  // Promote files the agent wrote to /mnt/session/outputs into the Files
+  // API (scope_id = session, downloadable) at turn completion, so
+  // files.list({scope_id}) surfaces them the way Anthropic's API does.
+  // Dedup by (filename, size) against the session's existing file rows so
+  // an unchanged output is not re-created — and re-mirrored — every turn.
+  promoteSessionOutputs: async ({ sessionId, tenantId }) => {
+    if (!filesBlob) return;
+    const listed = await sessionOutputs.list(tenantId, sessionId);
+    if (listed.length === 0) return;
+    const existing = await filesService.list({ tenantId, sessionId, limit: 1000 });
+    const seen = new Set(existing.map((r) => `${r.filename}:${r.size_bytes}`));
+    for (const out of listed) {
+      const key = `${out.filename}:${out.size_bytes}`;
+      if (seen.has(key)) continue;
+      try {
+        const obj = await sessionOutputs.read(tenantId, sessionId, out.filename);
+        if (!obj) continue;
+        const bytes = new Uint8Array(await new Response(obj.body).arrayBuffer());
+        const id = generateFileId();
+        const r2Key = fileR2Key(tenantId, id);
+        await filesBlob.put(r2Key, bytes, { httpMetadata: { contentType: out.media_type } });
+        await filesService.create({
+          id,
+          tenantId,
+          sessionId,
+          filename: out.filename,
+          mediaType: out.media_type,
+          sizeBytes: bytes.byteLength,
+          r2Key,
+          downloadable: true,
+        });
+        seen.add(key);
+      } catch (err) {
+        logger.warn(
+          { op: "node.promote_output", session_id: sessionId, filename: out.filename, err },
+          "session output promote failed",
+        );
+      }
+    }
+  },
   buildModel: async (agent, tenantId) => {
     const creds = await resolveNodeModelCreds(tenantId, agent.model);
     return resolveModel(
