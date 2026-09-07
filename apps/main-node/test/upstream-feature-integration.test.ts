@@ -166,7 +166,10 @@ describe("native session filesystem persistence", () => {
     expect(writes.get("/workspace/input.bin")).toEqual(new Uint8Array([0, 255, 128]));
     writes.set("/workspace/input.bin", new Uint8Array([1, 2, 3]));
     await mountManagedSessionResources({ session, files, sandbox });
-    const restored = { ...sandbox, exec: async () => "mounted" } as SandboxPort;
+    const restored = { ...sandbox, exec: async (command: string) => {
+      // Old workspaces have the edited file but no .oma-resource-mounts marker.
+      return command.includes(".oma-resource-mounts") ? "" : "mounted";
+    } } as SandboxPort;
     await mountManagedSessionResources({ session, files, sandbox: restored });
     expect(downloadFile).toHaveBeenCalledTimes(1);
     expect(writes.get("/workspace/input.bin")).toEqual(new Uint8Array([1, 2, 3]));

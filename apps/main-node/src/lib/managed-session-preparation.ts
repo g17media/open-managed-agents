@@ -22,13 +22,13 @@ export async function mountManagedSessionResources(input: {
   for (const resource of input.session.resources) {
     if (resource.type === "file") {
       if (mounted.has(resource.id)) continue;
-      const marker = `/workspace/.oma-resource-mounts/${createHash("sha256").update(resource.id).digest("hex")}`;
-      const restored = await input.sandbox.exec(`test -f ${quote(marker)} && test -e ${quote(resource.mountPath)} && echo mounted || true`, 5000);
+      // Resource mounts are write-once. A recovered workspace can predate our
+      // marker files; its edited content is still authoritative.
+      const restored = await input.sandbox.exec(`test -f ${quote(resource.mountPath)} && echo mounted || true`, 5000);
       if (restored.trim() === "mounted") { mounted.add(resource.id); continue; }
       const file = await input.files.downloadFile({ fileId: resource.fileId });
       if (file.type !== "found") throw new Error(`File ${resource.fileId} is unavailable`);
       await writeBytes(input.sandbox, resource.mountPath, file.file.content);
-      await writeBytes(input.sandbox, marker, new TextEncoder().encode(resource.id));
       mounted.add(resource.id);
     } else if (resource.type === "github_repository") {
       const repo = new URL(resource.url);
