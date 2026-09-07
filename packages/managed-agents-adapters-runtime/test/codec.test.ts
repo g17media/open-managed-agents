@@ -13,6 +13,15 @@ import type {
 import * as runtimeCodec from "../src";
 
 describe("Managed session runtime codec", () => {
+  it("keeps opaque tool arguments and signed thinking unchanged when resuming stored history", () => {
+    const input = { snake_key: "value", camelKey: { another_key: true } };
+    const [tool] = decodeRuntimeEvent({ id: "tool-1", type: "agent.tool_use", name: "custom", input, processed_at: "2026-08-26T00:00:00Z" }, new Set());
+    expect((tool as { input: unknown }).input).toEqual(input);
+    expect(runtimeCodec.encodeRuntimeHistoryEvent(tool as SessionEventView)).toMatchObject({ input });
+    const providerOptions = { anthropic: { signed_payload: "signature", camelKey: true } };
+    const [thinking] = decodeRuntimeEvent({ id: "thinking-1", type: "agent.thinking", text: "Saved reasoning", providerOptions, processed_at: "2026-08-26T00:00:00Z" }, new Set());
+    expect(runtimeCodec.encodeRuntimeHistoryEvent(thinking as SessionEventView)).toMatchObject({ text: "Saved reasoning", providerOptions });
+  });
   it("encodes accepted application events without API or SDK DTO dependencies", () => {
     expect(
       encodeRuntimeSessionEvent({

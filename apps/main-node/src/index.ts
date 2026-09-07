@@ -1,3 +1,4 @@
+import { migrateV0AtStartup } from "./migrations/v0-data.js";
 import { nativeOAuthCredentials } from "@open-managed-agents/http-routes";
 import { ManagedMemoryFiles } from "./lib/managed-memory-files.js";
 import { mountManagedSessionResources, managedSessionReminders, promoteManagedSessionOutputs } from "./lib/managed-session-preparation.js";
@@ -418,6 +419,7 @@ let databaseShutdown: (() => Promise<void>) | null = null;
 // Existing SqlClient is still built alongside for the legacy applySchema /
 // integrations adapters until those finish migrating.
 let drizzleDb: OmaDb<Record<string, unknown>>;
+let v0DataMigrated = false;
 if (usePostgres) {
   sql = await createPostgresSqlClient(dbUrl);
   const { drizzle: drizzlePostgresJs } = await import("drizzle-orm/postgres-js");
@@ -450,6 +452,24 @@ if (usePostgres) {
   const { drizzle: drizzleBetterSqlite3 } = await import("drizzle-orm/better-sqlite3");
   const BetterSqlite3 = (await import("better-sqlite3")).default;
   const sqliteRaw = new BetterSqlite3(dbPath);
+  const dataMigration = await migrateV0AtStartup({
+    databasePath: dbPath, dataDir: dirname(dbPath), rootSecret: process.env.PLATFORM_ROOT_SECRET ?? "",
+    enabled: process.env.OMA_AUTO_MIGRATE !== "0",
+    remoteBlobs: Boolean(process.env.FILES_S3_ENDPOINT || process.env.FILES_S3_BUCKET || process.env.MEMORY_S3_ENDPOINT || process.env.MEMORY_S3_BUCKET),
+    backupConfiguration: {
+      PLATFORM_ROOT_SECRET: process.env.PLATFORM_ROOT_SECRET ?? "",
+      BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? "",
+    },
+    storagePaths: {
+      "auth.db": process.env.AUTH_DATABASE_PATH ?? "./data/auth.db",
+      "files-blobs": process.env.FILES_BLOB_DIR ?? "./data/files-blobs",
+      "memory-blobs": process.env.MEMORY_BLOB_DIR ?? "./data/memory-blobs",
+      sandboxes: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
+      "session-outputs": process.env.SESSION_OUTPUTS_DIR ?? "./data/session-outputs",
+    },
+    onProgress: ({ phase, report }) => logger.info({ op: "main-node.data_migration", phase, ...(report && { report }) }, `SQLite data migration: ${phase}`),
+  });
+  v0DataMigrated = dataMigration !== null;
   // Match D1's runtime default — FK enforcement off. See packages/sql-client
   // for the rationale (publication-first install + a few other paths).
   sqliteRaw.exec("PRAGMA foreign_keys = OFF");
@@ -2331,12 +2351,13 @@ const managedEnvironmentWorkRoutes = buildManagedEnvironmentWorkRoutes(
       .port(managedAgentsPortTokens.environmentWork),
 );
 
+const managedDreamApiKey = process.env.ANTHROPIC_API_KEY?.trim();
 const managedDreamCurator =
   process.env.DREAM_CURATOR_MODE === "dedup" ||
-    process.env.ANTHROPIC_API_KEY === undefined
+    !managedDreamApiKey
   ? new DeduplicatingDreamCurator()
   : new AnthropicMessagesDreamCurator({
-      apiKey: process.env.ANTHROPIC_API_KEY,
+      apiKey: managedDreamApiKey,
       ...(process.env.ANTHROPIC_BASE_URL !== undefined && {
         baseUrl: process.env.ANTHROPIC_BASE_URL,
       }),
@@ -3890,7 +3911,7 @@ const scheduler = buildNodeScheduler({
   },
   memory: memoryService,
   integrationsSql: platformRootSecret ? sql : null,
-  deployments: {
+  deployments: v0DataMigrated ? undefined : {
     services: {
       deployments: deploymentsService,
       sessions: sessionsService,

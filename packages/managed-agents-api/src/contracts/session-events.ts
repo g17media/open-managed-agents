@@ -365,6 +365,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
       id: z.string().min(1),
       type: z.literal("agent.thinking"),
       session_thread_id: z.string().nullable().optional(),
+      text: z.string().optional(),
       processed_at: z.string(),
     })
     .strict(),
@@ -513,6 +514,23 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
       id: z.string().min(1),
       type: z.literal("span.model_request_start"),
       session_thread_id: z.string().nullable().optional(),
+      processed_at: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      id: z.string().min(1),
+      type: z.literal("span.model_first_token"),
+      model: z.string().optional(),
+      model_request_start_id: z.string().optional(),
+      processed_at: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      id: z.string().min(1),
+      type: z.literal("span.compaction_summarize_start"),
+      model: z.string().optional(),
       processed_at: z.string(),
     })
     .strict(),

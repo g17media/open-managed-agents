@@ -47,6 +47,12 @@ describe("main-node /v1/oma/dreams", () => {
     }
   });
 
+  it("starts with an empty optional Anthropic key as supplied by Docker Compose", async () => {
+    h = await startMainNode({ dataDir, env: { ANTHROPIC_API_KEY: "", DREAM_CURATOR_MODE: undefined } });
+    const response = await fetch(`http://localhost:${h.port}/health`);
+    expect(response.status).toBe(200);
+  }, 45_000);
+
   it("runs a dream through the local Node API without an LLM key when dedup curator is enabled", async () => {
     h = await startMainNode({ dataDir });
     const base = `http://localhost:${h.port}/v1/oma`;
@@ -100,7 +106,7 @@ describe("main-node /v1/oma/dreams", () => {
   }, 90_000);
 });
 
-async function startMainNode(opts: { dataDir: string }): Promise<ProcessHandle> {
+async function startMainNode(opts: { dataDir: string; env?: Record<string, string | undefined> }): Promise<ProcessHandle> {
   const port = await pickPort();
   const child = spawn(TSX_BIN, [MAIN_NODE_ENTRY], {
     ...detachedProcessOptions,
@@ -118,6 +124,7 @@ async function startMainNode(opts: { dataDir: string }): Promise<ProcessHandle> 
       BETTER_AUTH_SECRET: "test-secret-only-for-vitest",
       DREAM_CURATOR_MODE: "dedup",
       NODE_ENV: "test",
+      ...opts.env,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

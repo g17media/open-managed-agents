@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "migrate:v0": "tsx src/migrations/cli.ts",
     "test": "vitest run --config vitest.config.ts",
     "test:integration:mysql": "vitest run --config vitest.mysql.config.ts",
     "test:e2e:acp-deepseek-cache": "tsx scripts/acp-deepseek-native-cache.e2e.ts",

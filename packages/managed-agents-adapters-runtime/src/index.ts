@@ -93,6 +93,8 @@ const OFFICIAL_RUNTIME_EVENT_TYPES = new Set([
   "session.updated",
   "session.usage",
   "span.model_request_start",
+  "span.model_first_token",
+  "span.compaction_summarize_start",
   "span.model_request_end",
   "span.outcome_evaluation_start",
   "span.outcome_evaluation_ongoing",
@@ -111,7 +113,7 @@ function camelCaseRuntimeValue(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => [
       camelCaseKey(key),
-      camelCaseRuntimeValue(item),
+      ["input", "providerOptions", "provider_options", "metadata"].includes(key) ? structuredClone(item) : camelCaseRuntimeValue(item),
     ]),
   );
 }
@@ -132,7 +134,16 @@ function snakeCaseRuntimeValue(value: unknown): unknown {
 }
 
 export function encodeRuntimeHistoryEvent(event: SessionEventView): object {
-  return snakeCaseRuntimeValue(event) as object;
+  const encoded = snakeCaseRuntimeValue(event) as Record<string, unknown>;
+  // Tool arguments and provider signatures are opaque application data.
+  // Renaming their keys changes tool calls and can invalidate signed thinking.
+  const raw = event as unknown as Record<string, unknown>;
+  if (raw.input !== undefined) encoded.input = structuredClone(raw.input);
+  if (raw.providerOptions !== undefined) {
+    delete encoded.provider_options;
+    encoded.providerOptions = structuredClone(raw.providerOptions);
+  }
+  return encoded;
 }
 
 function normalizeRuntimeError(value: unknown): object {

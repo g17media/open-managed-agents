@@ -122,3 +122,6 @@ export function buildManagedAgentsApi(
   app.route("/v1/vaults", buildVaultRoutes(ports.vaults));
   return app;
 }
+// Shared by persisted-history migration and the HTTP/SSE routes.
+export { toSessionEventResponse } from "./mappers/session-events";
+export { sessionStreamEventResponseSchema } from "./contracts/session-events";

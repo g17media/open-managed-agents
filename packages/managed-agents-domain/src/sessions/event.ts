@@ -229,7 +229,7 @@ export type HistorySessionEvent =
       content: AgentMessageContentBlock[];
       processedAt: string;
     }
-  | { id: string; type: "agent.thinking"; processedAt: string; sessionThreadId?: string | null }
+  | { id: string; type: "agent.thinking"; text?: string; processedAt: string; sessionThreadId?: string | null }
   | {
       id: string;
       type: "agent.thread_context_compacted";
@@ -329,6 +329,8 @@ export type HistorySessionEvent =
       sessionThreadId: string;
     }
   | { id: string; type: "span.model_request_start"; processedAt: string; sessionThreadId?: string | null }
+  | { id: string; type: "span.model_first_token"; model?: string; modelRequestStartId?: string; processedAt: string; sessionThreadId?: string | null }
+  | { id: string; type: "span.compaction_summarize_start"; model?: string; processedAt: string; sessionThreadId?: string | null }
   | {
       id: string;
       type: "span.model_request_end";

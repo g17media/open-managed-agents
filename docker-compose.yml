@@ -83,7 +83,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      # Allow the first startup to back up and migrate an existing database.
+      start_period: ${OMA_START_PERIOD:-5m}
 
   # Sandbox provider (SANDBOX_PROVIDER=belljar) — REST control plane that
   # creates cloudflare/sandbox containers as SIBLINGS through the mounted
@@ -150,6 +151,7 @@ services:
       DATABASE_PATH: /app/data/oma.db
       OMA_VAULT_CA_DIR: /app/data/oma-vault-ca
       OMA_VAULT_PORT: "14322"
+      PLATFORM_ROOT_SECRET: ${PLATFORM_ROOT_SECRET:-}
       # Tenant scope. Default "*" matches active credentials across ALL
       # tenants by hostname — fine for single-operator self-host (every
       # vault belongs to "me"), unsafe for shared multi-tenant deploys
