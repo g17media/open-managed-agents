@@ -37,6 +37,7 @@ import {
 import type { SessionRouter } from "@open-managed-agents/session-runtime";
 
 export interface NodeSchedulerDeps {
+  managedDeploymentsTick?: () => Promise<void>;
   evalServices: EvalRunnerServices;
   memory: MemoryStoreService;
   /** Deployments sweep — fires due scheduled deployments through the same
@@ -134,6 +135,10 @@ export function buildNodeScheduler(deps: NodeSchedulerDeps) {
       }),
     });
   }
+
+  if (deps.managedDeploymentsTick) scheduler.register({
+    name: "managed-deployments-tick", cron: cron("DEPLOYMENTS_TICK_CRON", "* * * * *"), handler: deps.managedDeploymentsTick,
+  });
 
   // Linear dispatch sweep + drain. Only registered when a sweeper resolver
   // is provided — most self-host deployments don't run the gateway side

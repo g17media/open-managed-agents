@@ -499,24 +499,27 @@ describe("Edge cases - concurrent and complex operations", () => {
     expect(agent.model.speed).toBe("fast");
   });
 
-  it("agent model.reasoning round-trips via API and rejects unknown levels", async () => {
-    const res = await post("/v1/agents", {
+  it("agent model.effort round-trips via API and rejects unknown levels", async () => {
+    const create = (body: Record<string, unknown>) => api("/v1/agents", {
+      method: "POST", headers: { ...HEADERS, "anthropic-beta": "managed-agents-2026-04-01" }, body: JSON.stringify(body),
+    });
+    const res = await create({
       name: "Reasoning Agent",
-      model: { id: "claude-opus-4-7", reasoning: "xhigh" },
+      model: { id: "claude-opus-4-7", speed: "fast", effort: { type: "xhigh" } },
     });
     expect(res.status).toBe(201);
     const agent = (await res.json()) as any;
-    expect(agent.model).toEqual({ id: "claude-opus-4-7", speed: "standard", reasoning: "xhigh" });
+    expect(agent.model).toEqual({ id: "claude-opus-4-7", speed: "fast", effort: { type: "xhigh" } });
 
-    const plain = await post("/v1/agents", { name: "Plain", model: "claude-opus-4-7" });
-    expect(((await plain.json()) as any).model).toEqual({ id: "claude-opus-4-7", speed: "standard" });
+    const plain = await create( { name: "Plain", model: "claude-opus-4-7" });
+    expect(((await plain.json()) as any).model).toEqual({ id: "claude-opus-4-7" });
 
-    const bad = await post("/v1/agents", {
+    const bad = await create( {
       name: "Bad Reasoning",
-      model: { id: "claude-opus-4-7", reasoning: "ultra" },
+      model: { id: "claude-opus-4-7", effort: { type: "ultra" } },
     });
     expect(bad.status).toBe(400);
-    expect(((await bad.json()) as any).error.message).toContain("model.reasoning");
+    expect(((await bad.json()) as any).error.message).toContain("model");
   });
 
   it("agent update system preserves tools in version history", async () => {

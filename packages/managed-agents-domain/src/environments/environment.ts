@@ -1,3 +1,10 @@
+export interface EnvironmentStartup {
+  script: string;
+  enabled?: boolean;
+  triggers?: Array<"create" | "wake" | "revive">;
+  timeoutSeconds?: number;
+}
+
 export type EnvironmentNetwork =
   | { type: "unrestricted" }
   | {
@@ -21,6 +28,10 @@ export type EnvironmentConfig =
       type: "cloud";
       networking: EnvironmentNetwork;
       packages: EnvironmentPackages;
+      image?: string;
+      imageRegistryAuth?: { vaultId: string; credentialId: string };
+      context?: string;
+      startup?: EnvironmentStartup;
     }
   | { type: "self_hosted" };
 

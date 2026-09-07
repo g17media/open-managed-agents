@@ -116,6 +116,7 @@ export class SkillVersionsApplicationService
     };
     const nextSkill: Skill = {
       ...current.skill,
+      ...("githubSource" in command && command.githubSource !== undefined && { githubSource: structuredClone(command.githubSource) }),
       latestVersion: versionValue,
       updatedAt: timestamp,
     };

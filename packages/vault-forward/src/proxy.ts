@@ -335,7 +335,7 @@ async function tryRefreshOauth(
     if (fresh) {
       const liveAccessToken = (fresh.row.auth as unknown as Record<string, unknown>)?.[tokenField];
       if (typeof liveAccessToken === "string" && liveAccessToken !== staleAccessToken) {
-        // Another in-flight refresh (or a manual /v1/oauth/refresh) has
+        // Another in-flight refresh (or a manual /v1/oma/oauth/refresh) has
         // already rotated the token between our caller's first 401/403
         // and us reaching this re-read. Use the live token, skip the
         // token_endpoint roundtrip + the CAS write entirely.

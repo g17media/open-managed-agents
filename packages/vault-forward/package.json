@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./proxy": "./src/proxy.ts"
+    "./proxy": "./src/proxy.ts",
+    "./managed": "./src/managed.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts"
@@ -13,7 +14,9 @@
   "dependencies": {
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/credentials-store": "workspace:*",
-    "@open-managed-agents/sessions-store": "workspace:*"
+    "@open-managed-agents/sessions-store": "workspace:*",
+    "@open-managed-agents/domain": "workspace:*",
+    "@open-managed-agents/credential-store": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^4.1.3"

@@ -90,6 +90,12 @@ function normalizeConfig(
   const networking = input?.type === "cloud" ? input.networking : undefined;
   return {
     type: "cloud",
+    ...(input?.type === "cloud" && {
+      ...(input.image !== undefined && { image: input.image }),
+      ...(input.imageRegistryAuth !== undefined && { imageRegistryAuth: structuredClone(input.imageRegistryAuth) }),
+      ...(input.context !== undefined && { context: input.context }),
+      ...(input.startup !== undefined && { startup: structuredClone(input.startup) }),
+    }),
     networking:
       networking?.type === "limited"
         ? {

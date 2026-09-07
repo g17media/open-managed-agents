@@ -15,7 +15,7 @@ interface SessionExecutionContextRow {
   session_archived_at: number | null;
   session_revision: number;
   environment_id: string;
-  environment_document: string;
+  environment_document: string | null;
   environment_created_at: number;
   environment_updated_at: number;
   environment_archived_at: number | null;
@@ -44,7 +44,7 @@ export class SqlSessionExecutionContextSource
            environment.updated_at AS environment_updated_at,
            environment.archived_at AS environment_archived_at
          FROM managed_sessions AS session
-         JOIN managed_environments AS environment
+         LEFT JOIN managed_environments AS environment
            ON environment.workspace_id = session.workspace_id
           AND environment.id = session.environment_id
          WHERE session.workspace_id = ? AND session.id = ?`,
@@ -52,8 +52,9 @@ export class SqlSessionExecutionContextSource
       .bind(input.workspaceId, input.sessionId)
       .first<SessionExecutionContextRow>();
     if (row === null) return null;
-    const environment = JSON.parse(row.environment_document) as Environment;
     const session = JSON.parse(row.session_document) as Session;
+    if (row.environment_document === null && session.environmentSnapshot === undefined) return null;
+    const environment = row.environment_document === null ? session.environmentSnapshot! : JSON.parse(row.environment_document) as Environment;
     return {
       session: {
         ...session,
@@ -65,8 +66,9 @@ export class SqlSessionExecutionContextSource
             ? null
             : new Date(Number(row.session_archived_at)).toISOString(),
       },
-      environment: {
+      environment: row.environment_document === null ? environment : {
         ...environment,
+        config: session.environmentSnapshot?.config ?? environment.config,
         id: row.environment_id,
         createdAt: new Date(Number(row.environment_created_at)).toISOString(),
         updatedAt: new Date(Number(row.environment_updated_at)).toISOString(),

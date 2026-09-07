@@ -1,34 +1,23 @@
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useMemo, useState } from "react";
 import { Link } from "react-router";
-import { ArchiveIcon, PencilIcon, PlayIcon, TrashIcon } from "lucide-react";
+import { ArchiveIcon, PencilIcon, PlayIcon, PauseIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { useApi } from "../lib/api";
+import { deploymentInitialMessage, updateDeploymentMessage, deploymentMemoryResources } from "./deployments/form";
+import { useManagedApi } from "../lib/useManagedApi";
+import type { BetaManagedAgentsDeployment as Deployment, DeploymentCreateParams } from "@anthropic-ai/sdk/resources/beta/deployments";
+import type { BetaManagedAgentsDeploymentRun } from "@anthropic-ai/sdk/resources/beta/deployment-runs";
 import { useApiQuery } from "../lib/useApiQuery";
 import { DataTable, type ColumnDef } from "../components/DataTable";
-import { RowActionsMenu } from "../components/RowActionsMenu";
 import { Modal } from "../components/Modal";
 import { Combobox } from "../components/Combobox";
 import { Select, SelectOption } from "../components/Select";
 import { Button } from "@/components/ui/button";
 import { shortenId } from "../lib/format";
-
-interface Deployment {
-  id: string;
-  name: string;
-  agent_id: string;
-  environment_id: string | null;
-  initial_message: string;
-  vault_ids: string[];
-  memory_store_ids: string[];
-  trigger: { type: "manual" | "schedule"; cron?: string | null };
-  next_run_at: string | null;
-  last_run_at: string | null;
-  last_session_id: string | null;
-  created_at: string;
-  updated_at?: string | null;
-  archived_at?: string | null;
-}
 
 interface DeploymentForm {
   name: string;
@@ -58,7 +47,7 @@ const EMPTY_FORM: DeploymentForm = {
  * Every run creates a regular session; the Last run column links to it.
  */
 export function DeploymentsList() {
-  const { api } = useApi();
+  const managedApi = useManagedApi();
 
   const [includeArchived, setIncludeArchived] = useState(false);
   const [search, setSearch] = useState("");
@@ -73,14 +62,18 @@ export function DeploymentsList() {
     [includeArchived],
   );
   const { data: resp, isLoading: loading, refetch } = useApiQuery<{ data: Deployment[] }>(
-    "/v1/oma/deployments",
+    "/v1/deployments",
     params,
   );
   const deployments = resp?.data ?? [];
+  const { data: runsRes, refetch: refetchRuns } = useApiQuery<{ data: BetaManagedAgentsDeploymentRun[] }>(
+    "/v1/deployment_runs", { limit: "100" },
+  );
+  const latestRun = (deploymentId: string) => runsRes?.data.find((run) => run.deployment_id === deploymentId);
 
   // Aux data for the form's pickers — fetched lazily on first open.
   const formOpen = formTarget !== null;
-  const { data: vaultsRes } = useApiQuery<{ data: Array<{ id: string; name: string }> }>(
+  const { data: vaultsRes } = useApiQuery<{ data: Array<{ id: string; display_name: string }> }>(
     "/v1/vaults",
     { limit: "200" },
     { enabled: formOpen },
@@ -93,7 +86,7 @@ export function DeploymentsList() {
   // Agent-name lookup for the table.
   const { data: agentsRes } = useApiQuery<{ data: Array<{ id: string; name: string }> }>(
     "/v1/agents",
-    { limit: "200", status: "any" },
+    { limit: "100" },
   );
   const agentName = (id: string) =>
     agentsRes?.data?.find((a) => a.id === id)?.name ?? shortenId(id);
@@ -107,13 +100,13 @@ export function DeploymentsList() {
   const openEdit = (d: Deployment) => {
     setForm({
       name: d.name,
-      agentId: d.agent_id,
+      agentId: d.agent.id,
       environmentId: d.environment_id ?? "",
-      initialMessage: d.initial_message,
+      initialMessage: deploymentInitialMessage(d),
       vaultIds: d.vault_ids,
-      memoryStoreIds: d.memory_store_ids,
-      triggerType: d.trigger.type,
-      cron: d.trigger.cron || EMPTY_FORM.cron,
+      memoryStoreIds: d.resources.flatMap((resource) => resource.type === "memory_store" ? [resource.memory_store_id] : []),
+      triggerType: d.schedule ? "schedule" : "manual",
+      cron: d.schedule?.expression || EMPTY_FORM.cron,
     });
     setFormError(null);
     setFormTarget(d);
@@ -128,24 +121,37 @@ export function DeploymentsList() {
     setFormError(null);
     setSaving(true);
     try {
-      const body = {
+      const body: Omit<DeploymentCreateParams, "betas"> = {
         name: form.name,
-        agent_id: form.agentId,
-        environment_id: form.environmentId || null,
-        initial_message: form.initialMessage,
+        agent: formTarget && formTarget !== "new" && formTarget.agent.id === form.agentId
+          ? formTarget.agent : form.agentId,
+        environment_id: form.environmentId,
+        initial_events: [{ type: "user.message", content: [{ type: "text", text: form.initialMessage }] }],
         vault_ids: form.vaultIds,
-        memory_store_ids: form.memoryStoreIds,
-        trigger:
-          form.triggerType === "schedule"
-            ? { type: "schedule", cron: form.cron }
-            : { type: "manual" },
+        resources: form.memoryStoreIds.map((id) => {
+          const existing = formTarget && formTarget !== "new"
+            ? formTarget.resources.find((resource) => resource.type === "memory_store" && resource.memory_store_id === id)
+            : undefined;
+          return existing?.type === "memory_store" ? existing : { type: "memory_store", memory_store_id: id, access: "read_write" };
+        }),
+        schedule: form.triggerType === "schedule"
+          ? { type: "cron", expression: form.cron, timezone: "UTC" } : null,
       };
       if (formTarget === "new") {
-        await api("/v1/oma/deployments", { method: "POST", body: JSON.stringify(body) });
+        await managedApi.deployments.create(body);
       } else if (formTarget) {
-        await api(`/v1/oma/deployments/${formTarget.id}`, {
-          method: "PUT",
-          body: JSON.stringify(body),
+        const { resources: _resources, initial_events: _events, schedule, ...fields } = body;
+        const oldMemoryIds = formTarget.resources.flatMap((resource) => resource.type === "memory_store" ? [resource.memory_store_id] : []);
+        const memoriesChanged = JSON.stringify(oldMemoryIds) !== JSON.stringify(form.memoryStoreIds);
+        const scheduleChanged = (formTarget.schedule ? "schedule" : "manual") !== form.triggerType ||
+          (form.triggerType === "schedule" && form.cron !== formTarget.schedule?.expression);
+        await managedApi.deployments.update(formTarget.id, {
+          ...fields,
+          ...(deploymentInitialMessage(formTarget) !== form.initialMessage && {
+            initial_events: updateDeploymentMessage(formTarget, form.initialMessage),
+          }),
+          ...(memoriesChanged && { resources: deploymentMemoryResources(formTarget, form.memoryStoreIds) }),
+          ...(scheduleChanged && { schedule: schedule ? { ...schedule, timezone: formTarget.schedule?.timezone ?? "UTC" } : null }),
         });
       }
       closeForm();
@@ -158,10 +164,9 @@ export function DeploymentsList() {
 
   const runNow = async (d: Deployment) => {
     try {
-      const res = await api<{ session_id: string }>(`/v1/oma/deployments/${d.id}/run`, {
-        method: "POST",
-        body: "{}",
-      });
+      const res = await managedApi.deployments.run(d.id);
+      if (res.error || !res.session_id) throw new Error(res.error?.message ?? "Deployment did not start a session");
+      void refetchRuns();
       toast.success(`${d.name} started`, {
         action: {
           label: "View session",
@@ -171,8 +176,8 @@ export function DeploymentsList() {
         },
       });
       void refetch();
-    } catch {
-      /* api wrapper already toasted */
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -187,20 +192,20 @@ export function DeploymentsList() {
       },
       {
         id: "agent",
-        accessorFn: (d) => d.agent_id,
+        accessorFn: (d) => d.agent.id,
         header: "Agent",
         cell: ({ row }) => (
-          <span className="text-fg-muted">{agentName(row.original.agent_id)}</span>
+          <span className="text-fg-muted">{agentName(row.original.agent.id)}</span>
         ),
       },
       {
         id: "trigger",
-        accessorFn: (d) => d.trigger.type,
+        accessorFn: (d) => d.schedule ? "schedule" : "manual",
         header: "Trigger",
         cell: ({ row }) => {
-          const t = row.original.trigger;
-          return t.type === "schedule" ? (
-            <span className="font-mono text-xs text-fg">{t.cron}</span>
+          const t = row.original.schedule;
+          return t ? (
+            <span className="font-mono text-xs text-fg">{t.expression}</span>
           ) : (
             <span className="text-fg-subtle text-xs">manual</span>
           );
@@ -208,27 +213,29 @@ export function DeploymentsList() {
       },
       {
         id: "next_run",
-        accessorFn: (d) => d.next_run_at ?? "",
+        accessorFn: (d) => d.schedule?.upcoming_runs_at?.[0] ?? "",
         header: "Next run",
         cell: ({ row }) => (
           <span className="text-fg-muted text-xs">
-            {row.original.next_run_at
-              ? new Date(row.original.next_run_at).toLocaleString()
+            {row.original.schedule?.upcoming_runs_at?.[0]
+              ? new Date(row.original.schedule?.upcoming_runs_at?.[0]).toLocaleString()
               : "—"}
           </span>
         ),
       },
       {
         id: "last_run",
-        accessorFn: (d) => d.last_run_at ?? "",
+        accessorFn: (d) => latestRun(d.id)?.created_at ?? d.schedule?.last_run_at ?? "",
         header: "Last run",
         cell: ({ row }) => {
           const d = row.original;
-          if (!d.last_run_at) return <span className="text-fg-subtle text-xs">never</span>;
-          const label = new Date(d.last_run_at).toLocaleString();
-          return d.last_session_id ? (
+          const run = latestRun(d.id);
+          const date = run?.created_at ?? d.schedule?.last_run_at;
+          if (!date) return <span className="text-fg-subtle text-xs">never</span>;
+          const label = new Date(date).toLocaleString();
+          return run?.session_id ? (
             <Link
-              to={`/sessions/${d.last_session_id}`}
+              to={`/sessions/${run.session_id}`}
               onClick={(e) => e.stopPropagation()}
               className="text-xs text-brand hover:underline"
             >
@@ -239,63 +246,9 @@ export function DeploymentsList() {
           );
         },
       },
-      {
-        id: "actions",
-        header: "",
-        cell: ({ row }) => {
-          const d = row.original;
-          const archived = !!d.archived_at;
-          return (
-            <RowActionsMenu
-              label={`Actions for ${d.name}`}
-              actions={[
-                {
-                  label: "Run now",
-                  icon: <PlayIcon className="size-4" />,
-                  disabled: archived,
-                  onSelect: () => void runNow(d),
-                },
-                {
-                  label: "Edit",
-                  icon: <PencilIcon className="size-4" />,
-                  onSelect: () => openEdit(d),
-                },
-                {
-                  label: "Archive",
-                  icon: <ArchiveIcon className="size-4" />,
-                  disabled: archived,
-                  onSelect: async () => {
-                    try {
-                      await api(`/v1/oma/deployments/${d.id}/archive`, {
-                        method: "POST",
-                        body: "{}",
-                      });
-                      void refetch();
-                    } catch {}
-                  },
-                },
-                {
-                  label: "Delete",
-                  icon: <TrashIcon className="size-4" />,
-                  destructive: true,
-                  onSelect: async () => {
-                    if (!confirm(`Delete deployment ${d.name}? This can't be undone.`)) return;
-                    try {
-                      await api(`/v1/oma/deployments/${d.id}`, { method: "DELETE" });
-                      void refetch();
-                    } catch {}
-                  },
-                },
-              ]}
-            />
-          );
-        },
-        enableHiding: false,
-        size: 56,
-      },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [api, refetch, agentsRes],
+    [managedApi, refetch, agentsRes, runsRes],
   );
 
   const inputCls =
@@ -312,17 +265,24 @@ export function DeploymentsList() {
       searchValue={search}
       onSearchChange={setSearch}
       filters={
-        <label className="flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer px-2">
-          <input
-            type="checkbox"
+        <Label className="flex items-center gap-1.5 text-xs text-fg-muted cursor-pointer px-2">
+          <Checkbox
             checked={includeArchived}
-            onChange={(e) => setIncludeArchived(e.target.checked)}
+            onCheckedChange={(checked) => setIncludeArchived(checked === true)}
             className="rounded accent-brand"
           />
           Include archived
-        </label>
+        </Label>
       }
-      data={deployments}
+      data={deployments.filter((deployment) => `${deployment.name} ${deployment.id}`.toLowerCase().includes(search.toLowerCase()))}
+      rowActions={(d) => [
+        { label: "Run now", icon: <PlayIcon className="size-4" />, disabled: !!d.archived_at || d.status !== "active", onSelect: () => void runNow(d) },
+        { label: "Edit", icon: <PencilIcon className="size-4" />, onSelect: () => openEdit(d) },
+        { label: d.status === "paused" ? "Resume schedule" : "Pause schedule", icon: <PauseIcon className="size-4" />, disabled: !!d.archived_at,
+          onSelect: () => { void (d.status === "paused" ? managedApi.deployments.unpause(d.id) : managedApi.deployments.pause(d.id)).then(() => refetch()); } },
+        { label: "Archive", icon: <ArchiveIcon className="size-4" />, disabled: !!d.archived_at,
+          onSelect: () => { void managedApi.deployments.archive(d.id).then(() => refetch()); } },
+      ]}
       loading={loading}
       getRowId={(d) => d.id}
       onRowClick={(d) => openEdit(d)}
@@ -344,7 +304,7 @@ export function DeploymentsList() {
             </Button>
             <Button
               onClick={() => void save()}
-              disabled={saving || !form.name || !form.agentId || !form.initialMessage}
+              disabled={saving || !form.name || !form.agentId || !form.environmentId || !form.initialMessage}
             >
               {formTarget === "new" ? "Create" : "Save Changes"}
             </Button>
@@ -358,10 +318,10 @@ export function DeploymentsList() {
             </div>
           )}
           <div>
-            <label htmlFor="deployment-name" className="text-sm text-fg-muted block mb-1">
+            <Label htmlFor="deployment-name" className="text-sm text-fg-muted block mb-1">
               Name *
-            </label>
-            <input
+            </Label>
+            <Input
               id="deployment-name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -370,7 +330,7 @@ export function DeploymentsList() {
             />
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Agent *</label>
+            <Label className="text-sm text-fg-muted block mb-1">Agent *</Label>
             <Combobox<{ id: string; name: string }>
               value={form.agentId}
               onValueChange={(v) => setForm({ ...form, agentId: v })}
@@ -386,9 +346,9 @@ export function DeploymentsList() {
             />
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">
-              Environment <span className="text-fg-subtle">(optional for local-runtime agents)</span>
-            </label>
+            <Label className="text-sm text-fg-muted block mb-1">
+              Environment *
+            </Label>
             <Combobox<{ id: string; name: string }>
               value={form.environmentId}
               onValueChange={(v) => setForm({ ...form, environmentId: v })}
@@ -404,13 +364,13 @@ export function DeploymentsList() {
             />
           </div>
           <div>
-            <label
+            <Label
               htmlFor="deployment-message"
               className="text-sm text-fg-muted block mb-1"
             >
               Initial message *
-            </label>
-            <textarea
+            </Label>
+            <Textarea
               id="deployment-message"
               value={form.initialMessage}
               onChange={(e) => setForm({ ...form, initialMessage: e.target.value })}
@@ -421,35 +381,33 @@ export function DeploymentsList() {
           </div>
           {(vaultsRes?.data?.length ?? 0) > 0 && (
             <div>
-              <label className="text-sm text-fg-muted block mb-1">Credential Vaults</label>
+              <Label className="text-sm text-fg-muted block mb-1">Credential Vaults</Label>
               <div className="space-y-1 max-h-32 overflow-y-auto">
                 {vaultsRes!.data.map((v) => (
-                  <label key={v.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
+                  <Label key={v.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                    <Checkbox
                       checked={form.vaultIds.includes(v.id)}
-                      onChange={() =>
+                      onCheckedChange={() =>
                         setForm({ ...form, vaultIds: toggleIn(form.vaultIds, v.id) })
                       }
                       className="rounded accent-brand"
                     />
-                    <span className="text-fg">{v.name}</span>
+                    <span className="text-fg">{v.display_name}</span>
                     <span className="text-fg-subtle font-mono text-xs">{v.id}</span>
-                  </label>
+                  </Label>
                 ))}
               </div>
             </div>
           )}
           {(storesRes?.data?.length ?? 0) > 0 && (
             <div>
-              <label className="text-sm text-fg-muted block mb-1">Memory Stores</label>
+              <Label className="text-sm text-fg-muted block mb-1">Memory Stores</Label>
               <div className="space-y-1 max-h-32 overflow-y-auto">
                 {storesRes!.data.map((s) => (
-                  <label key={s.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
+                  <Label key={s.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                    <Checkbox
                       checked={form.memoryStoreIds.includes(s.id)}
-                      onChange={() =>
+                      onCheckedChange={() =>
                         setForm({
                           ...form,
                           memoryStoreIds: toggleIn(form.memoryStoreIds, s.id),
@@ -459,13 +417,13 @@ export function DeploymentsList() {
                     />
                     <span className="text-fg">{s.name}</span>
                     <span className="text-fg-subtle font-mono text-xs">{s.id}</span>
-                  </label>
+                  </Label>
                 ))}
               </div>
             </div>
           )}
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Trigger</label>
+            <Label className="text-sm text-fg-muted block mb-1">Trigger</Label>
             <div className="flex gap-2 items-start">
               <div className="w-36 shrink-0">
                 <Select
@@ -480,7 +438,7 @@ export function DeploymentsList() {
               </div>
               {form.triggerType === "schedule" && (
                 <div className="flex-1">
-                  <input
+                  <Input
                     value={form.cron}
                     onChange={(e) => setForm({ ...form, cron: e.target.value })}
                     className={`${inputCls} font-mono`}

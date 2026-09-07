@@ -1,3 +1,5 @@
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { useState } from "react";
 import { Modal } from "../../components/Modal";
 import { Button } from "@/components/ui/button";
@@ -176,10 +178,10 @@ export function GitHubImportFields({
   return (
     <>
       <div>
-        <label className="text-sm text-fg-muted block mb-1">
+        <Label className="text-sm text-fg-muted block mb-1">
           Repository <span className="text-danger">*</span>
-        </label>
-        <input
+        </Label>
+        <Input
           value={url}
           onChange={(e) => onUrlChange(e.target.value)}
           className={inputCls}
@@ -189,10 +191,10 @@ export function GitHubImportFields({
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className="text-sm text-fg-muted block mb-1">
+          <Label className="text-sm text-fg-muted block mb-1">
             Ref <span className="text-fg-subtle">(optional)</span>
-          </label>
-          <input
+          </Label>
+          <Input
             value={refName}
             onChange={(e) => onRefChange(e.target.value)}
             className={inputCls}
@@ -201,10 +203,10 @@ export function GitHubImportFields({
           />
         </div>
         <div>
-          <label className="text-sm text-fg-muted block mb-1">
+          <Label className="text-sm text-fg-muted block mb-1">
             Path <span className="text-fg-subtle">(optional)</span>
-          </label>
-          <input
+          </Label>
+          <Input
             value={path}
             onChange={(e) => onPathChange(e.target.value)}
             className={inputCls}
@@ -214,13 +216,13 @@ export function GitHubImportFields({
         </div>
       </div>
       <div>
-        <label className="text-sm text-fg-muted block mb-1">
+        <Label className="text-sm text-fg-muted block mb-1">
           Access Token{" "}
           <span className="text-fg-subtle">
             (only for private repos — never stored)
           </span>
-        </label>
-        <input
+        </Label>
+        <Input
           type="password"
           value={token}
           onChange={(e) => onTokenChange(e.target.value)}
@@ -263,7 +265,7 @@ export function SyncGitHubModal({ open, onClose, api, onSynced }: SyncGitHubModa
     try {
       const body: Record<string, string> = {};
       if (syncToken.trim()) body.token = syncToken.trim();
-      const res = await api<GitHubSyncResponse>("/v1/skills/sync/github", {
+      const res = await api<GitHubSyncResponse>("/v1/oma/skills/sync/github", {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -351,13 +353,13 @@ export function SyncGitHubModal({ open, onClose, api, onSynced }: SyncGitHubModa
               kept here untouched (reported as orphaned).
             </p>
             <div>
-              <label className="text-sm text-fg-muted block mb-1">
+              <Label className="text-sm text-fg-muted block mb-1">
                 Access Token{" "}
                 <span className="text-fg-subtle">
                   (only for private repos — never stored)
                 </span>
-              </label>
-              <input
+              </Label>
+              <Input
                 type="password"
                 value={syncToken}
                 onChange={(e) => setSyncToken(e.target.value)}

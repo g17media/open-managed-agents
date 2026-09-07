@@ -33,6 +33,8 @@
     "@open-managed-agents/vaults-store": "workspace:*",
     "fflate": "^0.8.2",
     "hono": "^4.7.0",
-    "nanoid": "^5.1.0"
+    "nanoid": "^5.1.0",
+    "@open-managed-agents/managed-agents-application": "workspace:*",
+    "@open-managed-agents/credential-store": "workspace:*"
   }
 }

@@ -1,3 +1,4 @@
+import { listManagedVaultCredentials, matchManagedCredential, credentialBearer, refreshManagedCredential, forwardManagedMcpRequest, forwardManagedOutboundRequest, matchManagedRepositoryResource } from "@open-managed-agents/vault-forward/managed";
 import { Hono } from "hono";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "@open-managed-agents/shared";
@@ -6,6 +7,7 @@ import {
   servicesMiddleware,
   tenantDbMiddleware,
   getCfServicesForTenant,
+  forEachShardServices,
 } from "@open-managed-agents/services";
 import {
   buildAgentRoutes as buildLegacyAgentRoutes,
@@ -19,6 +21,8 @@ import {
   buildModelCardRoutes,
   buildSkillRoutes,
   buildSkillGitHubRoutes,
+  nativeGitHubSkillPersistence,
+  nativeOAuthCredentials,
   buildStatsRoutes,
   buildClawhubRoutes,
   buildOAuthRoutes,
@@ -96,7 +100,7 @@ import {
   createCloudflareManagedAgentsApp,
 } from "@open-managed-agents/platform-cloudflare";
 import { buildOmaModelsHttpRoutes } from "@open-managed-agents/managed-agents-adapters-http";
-import type { CredentialDocumentCipher } from "@open-managed-agents/credential-store-sql";
+import { SqlCredentialStore, type CredentialDocumentCipher } from "@open-managed-agents/credential-store-sql";
 import type { DeploymentResourceSecretCipher } from "@open-managed-agents/deployment-store-sql";
 import type { EnvironmentWorkSecretCipher } from "@open-managed-agents/environment-work-store-sql";
 import {
@@ -518,16 +522,11 @@ const managedVaultsRoutes = buildManagedVaultRoutes((context) => {
   }).port(managedAgentsPortTokens.vaults);
 });
 
-const managedCredentialValidation = new IndeterminateCredentialValidationProbe();
-const managedCredentialsRoutes = buildManagedCredentialRoutes((context) => {
-  const request = context.var as {
-    tenant_id: string;
-    tenantDb: D1Database;
-  };
-  const credentialCrypto = context.env.PLATFORM_ROOT_SECRET === undefined
+function managedCredentialCipherFor(env: Env): CredentialDocumentCipher {
+  const credentialCrypto = env.PLATFORM_ROOT_SECRET === undefined
     ? null
     : new WebCryptoAesGcm(
-        context.env.PLATFORM_ROOT_SECRET,
+        env.PLATFORM_ROOT_SECRET,
         "managed.vault.credentials",
       );
   const cipher: CredentialDocumentCipher = {
@@ -548,6 +547,41 @@ const managedCredentialsRoutes = buildManagedCredentialRoutes((context) => {
       return { plaintext: await credentialCrypto.decrypt(ciphertext) };
     },
   };
+  return cipher;
+}
+
+async function managedOAuthCredentialsFor(env: Env, workspaceId: string) {
+  const tenantDb = await buildCfTenantDbProvider(env).resolve(workspaceId);
+  const sql = new CfD1SqlClient(tenantDb);
+  const vaults = createCloudflareManagedAgentsApp({ workspaceId, sql }, {
+    features: { preset: "none", vaults: true }, clock: { now: () => new Date() },
+    ids: { next: () => `vlt_${crypto.randomUUID().replaceAll("-", "")}` },
+  }).port(managedAgentsPortTokens.vaults);
+  return nativeOAuthCredentials({ workspaceId, vaults,
+    store: new SqlCredentialStore(sql, managedCredentialCipherFor(env)),
+    nextId: () => `vcrd_${crypto.randomUUID().replaceAll("-", "")}`,
+  });
+}
+
+async function managedProxySessionFor(env: Env, workspaceId: string, sessionId: string) {
+  const db = await buildCfTenantDbProvider(env).resolve(workspaceId);
+  const sql = new CfD1SqlClient(db);
+  const session = await new SqlSessionSource(sql).find({ workspaceId, sessionId });
+  if (!session) return null;
+  const activeVaults: string[] = [];
+  for (const vaultId of session.vaultIds) {
+    if (await sql.prepare("SELECT id FROM managed_vaults WHERE workspace_id = ? AND id = ? AND archived_at IS NULL").bind(workspaceId, vaultId).first()) activeVaults.push(vaultId);
+  }
+  return { sql, workspaceId, session: { ...session, vaultIds: activeVaults }, credentials: new SqlCredentialStore(sql, managedCredentialCipherFor(env)) };
+}
+
+const managedCredentialValidation = new IndeterminateCredentialValidationProbe();
+const managedCredentialsRoutes = buildManagedCredentialRoutes((context) => {
+  const request = context.var as {
+    tenant_id: string;
+    tenantDb: D1Database;
+  };
+  const cipher = managedCredentialCipherFor(context.env);
   return createCloudflareManagedAgentsApp({
     workspaceId: request.tenant_id,
     sql: new CfD1SqlClient(request.tenantDb),
@@ -590,7 +624,10 @@ const legacySkillsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: str
   // GitHub import/sync mounts first so its static /import/github and
   // /sync/github paths are matched before buildSkillRoutes' /:id routes.
   const app = new Hono<{ Variables: { tenant_id: string } }>();
-  app.route("/", buildSkillGitHubRoutes(deps));
+  app.route("/", buildSkillGitHubRoutes({ ...deps, persistenceFor: () => {
+    const managed = managedSkillsApplicationFor(ctx);
+    return nativeGitHubSkillPersistence(managed.port(managedAgentsPortTokens.skills), managed.port(managedAgentsPortTokens.skillVersions));
+  } }));
   app.route("/", buildSkillRoutes(deps));
   return invokePackage(c, app);
 });
@@ -612,13 +649,14 @@ const oauthRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }
   const app = buildOAuthRoutes({
     services: () => cfRouteServicesFromCtx(ctx),
     env: ctx.env as unknown as Partial<Record<string, string>>,
+    credentialsFor: (workspaceId) => managedOAuthCredentialsFor(ctx.env, workspaceId),
   });
   return invokePackage(c, app);
 });
 
 const capCliOauthRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
   const ctx = c as unknown as AppCtx;
-  const app = buildCapCliOauthRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
+  const app = buildCapCliOauthRoutes({ services: () => cfRouteServicesFromCtx(ctx), credentialsFor: (workspaceId) => managedOAuthCredentialsFor(ctx.env, workspaceId) });
   return invokePackage(c, app);
 });
 
@@ -754,7 +792,13 @@ function managedSessionEnvironmentSource(
   };
 }
 
-function managedSessionsCompositionFor(ctx: AppCtx): SqlManagedSessionsComposition {
+type ManagedRuntimeAppContext = {
+  env: Env;
+  var: { tenant_id: string; tenantDb: D1Database };
+  req?: { url: string };
+};
+
+function managedSessionsCompositionFor(ctx: ManagedRuntimeAppContext): SqlManagedSessionsComposition {
   const client = new CfD1SqlClient(ctx.var.tenantDb);
   const environments = managedSessionEnvironmentSource(client);
   const runtime = new CfManagedSessionRuntimeAdapter(
@@ -810,7 +854,7 @@ const managedDeploymentSchedulePlanner = new CronDeploymentSchedulePlanner();
 const managedEnvironmentWorkAvailability =
   new TimerEnvironmentWorkAvailabilityWaiter();
 
-function managedDeploymentCipherFor(ctx: AppCtx): DeploymentResourceSecretCipher {
+function managedDeploymentCipherFor(ctx: ManagedRuntimeAppContext): DeploymentResourceSecretCipher {
   const deploymentCrypto = ctx.env.PLATFORM_ROOT_SECRET === undefined
     ? null
     : new WebCryptoAesGcm(
@@ -838,7 +882,7 @@ function managedDeploymentCipherFor(ctx: AppCtx): DeploymentResourceSecretCipher
 }
 
 function managedEnvironmentWorkCipherFor(
-  ctx: AppCtx,
+  ctx: ManagedRuntimeAppContext,
 ): EnvironmentWorkSecretCipher {
   const workCrypto = ctx.env.PLATFORM_ROOT_SECRET === undefined
     ? null
@@ -866,7 +910,7 @@ function managedEnvironmentWorkCipherFor(
   };
 }
 
-function managedEnvironmentWorkApplicationFor(ctx: AppCtx) {
+function managedEnvironmentWorkApplicationFor(ctx: ManagedRuntimeAppContext) {
   const client = new CfD1SqlClient(ctx.var.tenantDb);
   return createCloudflareManagedAgentsApp({
     workspaceId: ctx.var.tenant_id,
@@ -890,17 +934,21 @@ function managedEnvironmentWorkApplicationFor(ctx: AppCtx) {
       ),
       providePort(
         environmentWorkSessionCredentialIssuerPort,
-        new OpaqueEnvironmentWorkSessionCredentialIssuer({
-          nextToken: () => crypto.randomUUID().replaceAll("-", ""),
-          apiBaseUrl: new URL(ctx.req.url).origin,
-        }),
+        { issue: async (input) => {
+          // Cron only enqueues work; credentials are issued later by the authenticated poll request.
+          if (!ctx.req) throw new Error("Session credentials must be issued from an HTTP request");
+          return new OpaqueEnvironmentWorkSessionCredentialIssuer({
+            nextToken: () => crypto.randomUUID().replaceAll("-", ""),
+            apiBaseUrl: new URL(ctx.req.url).origin,
+          }).issue(input);
+        } },
       ),
       environmentWorkEnqueuerModule(),
     ],
   });
 }
 
-function managedDeploymentsApplicationFor(ctx: AppCtx) {
+function managedDeploymentsApplicationFor(ctx: ManagedRuntimeAppContext) {
   const client = new CfD1SqlClient(ctx.var.tenantDb);
   const workspaceId = ctx.var.tenant_id;
   const sessions = managedSessionsCompositionFor(ctx).portsFor(workspaceId);
@@ -1159,7 +1207,7 @@ function invokePackage(
   const url = new URL(c.req.url);
   // Strip the outer mount prefix so e.g. `/v1/agents/abc` becomes `/abc`
   // before the package's `app.get("/:id")` sees it.
-  const knownPrefixes = ["/v1/oma/", "/v1/cap-cli/", "/v1/"];
+  const knownPrefixes = ["/v1/oma/", "/v1/"];
   let stripped = url.pathname;
   for (const p of knownPrefixes) {
     if (stripped.startsWith(p)) {
@@ -1366,7 +1414,24 @@ export default {
   // Each registered handler runs under ctx.waitUntil so a slow tick
   // doesn't block the runtime.
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    const scheduler = buildCfScheduler(env);
+    const scheduler = buildCfScheduler(env, { managedDeploymentsTick: async () => {
+      await forEachShardServices(env, async (_services, shardName) => {
+        const tenantDb = (env as unknown as Record<string, D1Database>)[shardName]!;
+        const sql = new CfD1SqlClient(tenantDb);
+        const records = await sql.prepare("SELECT workspace_id, id, document FROM managed_deployments WHERE status = 'active' AND archived_at IS NULL")
+          .all<{ workspace_id: string; id: string; document: string }>();
+        const now = new Date().toISOString();
+        for (const record of records.results ?? []) {
+          const deployment = JSON.parse(record.document) as import("@open-managed-agents/managed-agents-application").Deployment;
+          const scheduledAt = deployment.schedule?.upcomingRunsAt?.[0];
+          if (!scheduledAt || scheduledAt > now) continue;
+          try {
+            const application = managedDeploymentsApplicationFor({ env, var: { tenantDb, tenant_id: record.workspace_id } });
+            await application.port(managedAgentsPortTokens.deployments).runDeployment({ deploymentId: record.id, scheduledAt });
+          } catch (err) { logError({ op: "cron.managed_deployments_tick", err }, "Scheduled deployment failed"); }
+        }
+      });
+    } });
     for (const job of scheduler.list()) {
       if (job.cron !== controller.cron) continue;
       ctx.waitUntil(
@@ -1477,6 +1542,13 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     headers: Record<string, string>;
     body: string;
   }> {
+    const native = await managedProxySessionFor(this.env, opts.tenantId, opts.sessionId);
+    if (native) {
+      const response = await forwardManagedMcpRequest({ ...native, serverName: opts.serverName,
+        request: new Request("https://mcp.internal/", { method: opts.method, headers: opts.headers,
+          body: ["GET", "HEAD"].includes(opts.method) ? undefined : opts.body }) });
+      return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
+    }
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
     const target = await resolveProxyTargetByTenant(
       services,
@@ -1552,6 +1624,8 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
         { status: 400, headers: { "content-type": "application/json" } },
       );
     }
+    const native = await managedProxySessionFor(this.env, tenantId, sessionId);
+    if (native) return forwardManagedMcpRequest({ ...native, request, serverName });
     const services = await getCfServicesForTenant(this.env, tenantId);
     const target = await resolveProxyTargetByTenant(
       services,
@@ -1616,6 +1690,20 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     sessionId: string;
     hostname: string;
   }): Promise<{ type: "bearer"; token: string } | null> {
+    const native = await managedProxySessionFor(this.env, opts.tenantId, opts.sessionId);
+    if (native) {
+      if (native.session.archivedAt) return null;
+      const records = await listManagedVaultCredentials(native.credentials, native.workspaceId, native.session.vaultIds);
+      const matched = matchManagedCredential(records.map((record) => record.credential), `https://${opts.hostname}/`);
+      let record = records.find((record) => record.credential.id === matched?.id && record.credential.vaultId === matched?.vaultId);
+      if (!record) return null;
+      const auth = record.credential.auth;
+      if (auth.type === "mcp_oauth" && auth.expiresAt && Date.parse(auth.expiresAt) <= Date.now() + 60_000) {
+        record = await refreshManagedCredential(native.credentials, native.workspaceId, record);
+      }
+      const token = credentialBearer(record.credential.auth);
+      return token ? { type: "bearer", token } : null;
+    }
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
     const cred = await resolveOutboundCredentialByHost(
       this.env,
@@ -1648,6 +1736,18 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     hostname: string;
     pathname: string;
   }): Promise<{ scheme: "Basic" | "Bearer"; token: string; slug: string } | null> {
+    const native = await managedProxySessionFor(this.env, opts.tenantId, opts.sessionId);
+    if (native) {
+      if (native.session.archivedAt || !this.env.PLATFORM_ROOT_SECRET) return null;
+      const resource = matchManagedRepositoryResource(native.session, `https://${opts.hostname}${opts.pathname}`);
+      if (!resource || resource.type !== "github_repository") return null;
+      const secret = await native.sql.prepare("SELECT sealed_value FROM managed_session_resource_secrets WHERE workspace_id = ? AND session_id = ? AND resource_id = ? AND secret_type = 'github_token'")
+        .bind(opts.tenantId, opts.sessionId, resource.id).first<{ sealed_value: string }>();
+      if (!secret) return null;
+      const token = await new WebCryptoAesGcm(this.env.PLATFORM_ROOT_SECRET, "managed.sessions.resources").decrypt(secret.sealed_value);
+      const slug = new URL(resource.url).pathname.replace(/^\//, "").replace(/\.git\/?$/, "").replace(/\/$/, "");
+      return { scheme: opts.hostname === "api.github.com" ? "Bearer" : "Basic", token, slug };
+    }
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
     return resolveGithubCredentials(
       services,
@@ -1706,6 +1806,13 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       };
     }
 
+    const native = await managedProxySessionFor(this.env, opts.tenantId, opts.sessionId);
+    if (native) {
+      const response = await forwardManagedOutboundRequest({ ...native,
+        request: new Request(opts.url, { method: opts.method, headers: opts.headers,
+          body: ["GET", "HEAD"].includes(opts.method) ? undefined : opts.body }) });
+      return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.arrayBuffer() };
+    }
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
     const cred = await resolveOutboundCredentialByHost(
       this.env,

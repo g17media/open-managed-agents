@@ -47,6 +47,7 @@ export class FilesApplicationService
       mimeType: command.mimeType,
       sizeBytes: command.content.byteLength,
       downloadable: true,
+      ...(command.scope !== undefined && { scope: command.scope }),
     };
     const location = {
       workspaceId: this.dependencies.workspaceId,

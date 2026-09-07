@@ -3,6 +3,7 @@ import type {
   EnvironmentConfig,
   EnvironmentNetwork,
   EnvironmentPackages,
+  EnvironmentStartup,
 } from "../domain/environment";
 
 export type EnvironmentNetworkInput =
@@ -32,6 +33,10 @@ export type EnvironmentConfigInput =
       type: "cloud";
       networking?: EnvironmentNetworkInput | null;
       packages?: EnvironmentPackagesInput | null;
+      image?: string;
+      imageRegistryAuth?: { vaultId: string; credentialId: string };
+      context?: string;
+      startup?: EnvironmentStartup;
     }
   | { type: "self_hosted" };
 

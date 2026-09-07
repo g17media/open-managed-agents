@@ -177,6 +177,7 @@ export function toSendSessionEventsCommand(
   return {
     sessionId,
     events: body.events.map(toSendableSessionEvent),
+    ...(body.vault_ids !== undefined && { vaultIds: body.vault_ids }),
   };
 }
 
@@ -447,6 +448,16 @@ function fromSpanModelUsage(usage: SpanModelUsageView): object {
 
 export function toSessionEventResponse(event: SessionEventView): object {
   switch (event.type) {
+    case "session.sandbox_startup":
+      return { id: event.id, type: event.type, processed_at: event.processedAt, boot_id: event.bootId,
+        trigger: event.trigger, status: event.status,
+        ...(event.scriptSha256 !== undefined && { script_sha256: event.scriptSha256 }),
+        ...(event.durationMs !== undefined && { duration_ms: event.durationMs }),
+        ...(event.exitCode !== undefined && { exit_code: event.exitCode }),
+        ...(event.stdout !== undefined && { stdout: event.stdout }),
+        ...(event.stderr !== undefined && { stderr: event.stderr }),
+        ...(event.message !== undefined && { message: event.message }),
+      };
     case "user.message":
     case "user.interrupt":
     case "user.tool_confirmation":

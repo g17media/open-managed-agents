@@ -92,7 +92,7 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
     if (!session) return c.json({ error: "Unauthorized" }, 401);
 
     // 3. Tenant resolution. The query param covers popup/navigation
-    // requests (e.g. /v1/oauth/authorize opened via window.open) where
+    // requests (e.g. /v1/oma/oauth/authorize opened via window.open) where
     // the Console can't attach the x-active-tenant header; it goes
     // through the same membership validation, so it grants nothing the
     // header doesn't.

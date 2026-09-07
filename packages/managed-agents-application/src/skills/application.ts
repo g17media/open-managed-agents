@@ -88,6 +88,7 @@ export class SkillsApplicationService implements SkillsApplicationPort {
     const skillId = this.dependencies.ids.nextSkillId();
     const versionValue = this.dependencies.ids.nextSkillVersion();
     const skill: Skill = {
+      ...(command.githubSource !== undefined && { githubSource: structuredClone(command.githubSource) }),
       id: skillId,
       createdAt: timestamp,
       displayTitle: command.displayTitle ?? null,

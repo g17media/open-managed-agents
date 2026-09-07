@@ -2,6 +2,7 @@ import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { DeploymentRun } from "@open-managed-agents/domain/deployments";
 import type {
   BeginManualDeploymentRun,
+  BeginScheduledDeploymentRun,
   BeginManualDeploymentRunResult,
   DeploymentRunLocation,
   DeploymentRunStore,
@@ -46,6 +47,29 @@ function toStoredDeploymentRun(row: DeploymentRunRow): StoredDeploymentRun {
 
 export class SqlDeploymentRunStore implements DeploymentRunStore {
   constructor(private readonly client: SqlClient) {}
+
+  async beginScheduled(input: BeginScheduledDeploymentRun): Promise<BeginManualDeploymentRunResult> {
+    if (input.run.triggerContext.kind !== "schedule" || input.run.deploymentId !== input.deploymentId ||
+      input.nextDeployment.id !== input.deploymentId || input.nextDeployment.schedule?.lastRunId !== input.run.id ||
+      input.run.error !== null || input.run.sessionId !== null) throw new Error("Scheduled deployment reservation is inconsistent");
+    const document = JSON.stringify(input.nextDeployment);
+    const results = await this.client.batch([
+      this.client.prepare(`UPDATE managed_deployments SET document = ?, revision = revision + 1, updated_at = ?
+        WHERE workspace_id = ? AND id = ? AND revision = ? AND status = 'active' AND archived_at IS NULL`)
+        .bind(document, timestamp(input.nextDeployment.updatedAt), input.workspaceId, input.deploymentId, input.expectedDeploymentRevision),
+      this.client.prepare(`INSERT INTO managed_deployment_runs
+        (workspace_id, id, deployment_id, document, revision, has_error, trigger_type, created_at)
+        SELECT ?, ?, ?, ?, 1, 0, 'schedule', ? FROM managed_deployments
+        WHERE workspace_id = ? AND id = ? AND revision = ? AND document = ? AND status = 'active' AND archived_at IS NULL`)
+        .bind(input.workspaceId, input.run.id, input.deploymentId, JSON.stringify(input.run), timestamp(input.run.createdAt),
+          input.workspaceId, input.deploymentId, input.expectedDeploymentRevision + 1, document),
+    ]);
+    if (results[0]?.meta.changes !== 1) return { type: "not_runnable" };
+    if (results[1]?.meta.changes !== 1) throw new Error("Scheduled deployment reservation did not create its run");
+    const record = await this.find({ workspaceId: input.workspaceId, deploymentRunId: input.run.id });
+    if (!record) throw new Error("Scheduled deployment run vanished after reservation");
+    return { type: "began", record };
+  }
 
   async beginManual(
     input: BeginManualDeploymentRun,

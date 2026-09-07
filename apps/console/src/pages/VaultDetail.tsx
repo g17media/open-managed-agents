@@ -53,18 +53,18 @@ function credentialTypeView(credential: Credential): {
       return {
         label: "OAuth",
         className: "bg-info-subtle text-info",
-        target: credential.auth.mcp_server_url,
+        target: ("mcp_server_url" in credential.auth ? credential.auth.mcp_server_url : ""),
       };
     case "static_bearer":
       return {
         label: "Bearer",
         className: "bg-success-subtle text-success",
-        target: credential.auth.mcp_server_url,
+        target: ("mcp_server_url" in credential.auth ? credential.auth.mcp_server_url : ""),
       };
     case "container_registry":
       return { label: "Registry", className: "bg-warning-subtle text-warning", target: credential.auth.registry ?? "" };
     case "cap_cli":
-      return { label: "CLI", className: "bg-brand-subtle text-brand", target: credential.auth.mcp_server_url ?? credential.auth.cli_id };
+      return { label: "CLI", className: "bg-brand-subtle text-brand", target: ("mcp_server_url" in credential.auth ? credential.auth.mcp_server_url : "") ?? credential.auth.cli_id };
     case "environment_variable":
       return {
         label: "Environment variable",
@@ -614,7 +614,7 @@ function EditCredentialModal({
             <>
               {" · "}
               <span className="font-mono">
-                {credential.auth.mcp_server_url}
+                {("mcp_server_url" in credential.auth ? credential.auth.mcp_server_url : "")}
               </span>
             </>
           )}
@@ -1232,7 +1232,7 @@ function AddCredentialModal({
               supply a pre-issued OAuth access_token without a handshake. */}
           {customForm.type === "bearer" && (
             <div>
-              <label
+              <Label
                 htmlFor="vault-mcp-handle"
                 className="block text-sm font-medium text-fg mb-1"
               >
@@ -1240,8 +1240,8 @@ function AddCredentialModal({
                 <span className="text-xs text-fg-muted ml-1 px-1.5 py-0.5 rounded bg-bg-surface">
                   Optional
                 </span>
-              </label>
-              <input
+              </Label>
+              <Input
                 id="vault-mcp-handle"
                 value={customForm.handle}
                 onChange={(e) =>
@@ -1412,7 +1412,7 @@ function AddCredentialModal({
                   Registration (GitHub, Feishu) — supply a client_id/secret from
                   a pre-registered app.
                 </div>
-                <input
+                <Input
                   value={customForm.scopes}
                   onChange={(e) =>
                     setCustomForm({ ...customForm, scopes: e.target.value })
@@ -1560,12 +1560,12 @@ function AddCredentialModal({
           {cliIsGit && (
             <>
               <div>
-                <label
+                <Label
                   htmlFor="vault-cli-host"
                   className="text-sm text-fg-muted block mb-1"
                 >
                   Host
-                </label>
+                </Label>
                 <TextInput
                   id="vault-cli-host"
                   value={cliForm.host}
@@ -1583,13 +1583,13 @@ function AddCredentialModal({
                 </div>
               </div>
               <div>
-                <label
+                <Label
                   htmlFor="vault-cli-handle"
                   className="text-sm text-fg-muted block mb-1"
                 >
                   Handle{" "}
                   <span className="text-fg-subtle">(optional)</span>
-                </label>
+                </Label>
                 <TextInput
                   id="vault-cli-handle"
                   value={cliForm.handle}
@@ -1621,12 +1621,12 @@ function AddCredentialModal({
             exposed to the sandbox itself.
           </div>
           <div>
-            <label
+            <Label
               htmlFor="vault-registry-name"
               className="text-sm text-fg-muted block mb-1"
             >
               Display Name <span className="text-fg-subtle">(optional)</span>
-            </label>
+            </Label>
             <TextInput
               id="vault-registry-name"
               value={registryForm.display_name}
@@ -1638,12 +1638,12 @@ function AddCredentialModal({
             />
           </div>
           <div>
-            <label
+            <Label
               htmlFor="vault-registry-host"
               className="text-sm text-fg-muted block mb-1"
             >
               Registry host <span className="text-fg-subtle">(optional)</span>
-            </label>
+            </Label>
             <TextInput
               id="vault-registry-host"
               value={registryForm.registry}
@@ -1658,12 +1658,12 @@ function AddCredentialModal({
             </div>
           </div>
           <div>
-            <label
+            <Label
               htmlFor="vault-registry-username"
               className="text-sm text-fg-muted block mb-1"
             >
               Username
-            </label>
+            </Label>
             <TextInput
               id="vault-registry-username"
               value={registryForm.username}
@@ -1676,12 +1676,12 @@ function AddCredentialModal({
             />
           </div>
           <div>
-            <label
+            <Label
               htmlFor="vault-registry-password"
               className="text-sm text-fg-muted block mb-1"
             >
               Password / access token
-            </label>
+            </Label>
             <SecretInput
               id="vault-registry-password"
               value={registryForm.password}
@@ -1694,7 +1694,7 @@ function AddCredentialModal({
             />
           </div>
           <div>
-            <label
+            <Label
               htmlFor="vault-registry-identity"
               className="text-sm text-fg-muted block mb-1"
             >
@@ -1702,7 +1702,7 @@ function AddCredentialModal({
               <span className="text-fg-subtle">
                 (alternative to username/password)
               </span>
-            </label>
+            </Label>
             <SecretInput
               id="vault-registry-identity"
               value={registryForm.identityToken}

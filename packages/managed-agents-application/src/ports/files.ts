@@ -22,6 +22,7 @@ export interface RetrieveFileMetadataQuery {
 }
 
 export interface UploadFileCommand {
+  scope?: FileScope;
   filename: string;
   mimeType: string;
   content: Uint8Array;

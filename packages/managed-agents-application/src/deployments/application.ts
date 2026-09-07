@@ -158,7 +158,7 @@ function validateDeploymentDefinition(input: {
       }
       if (
         "authorizationToken" in resource &&
-        resource.authorizationToken.length === 0
+        resource.authorizationToken === ""
       ) {
         return "GitHub authorization token must not be empty";
       }
@@ -275,6 +275,7 @@ export class DeploymentsApplicationService
         resources.push({ ...resource });
         continue;
       }
+      if (!resource.authorizationToken) return { type: "invalid_request", message: "GitHub authorization token is required for new repositories" };
       resources.push({
         kind: resource.kind,
         url: resource.url,
@@ -452,6 +453,12 @@ export class DeploymentsApplicationService
           resources.push({ ...resource });
           continue;
         }
+        const previousIndex = current.deployment.resources.findIndex((existing) =>
+          existing.kind === "github_repository" && existing.url === resource.url &&
+          (existing.mountPath ?? null) === (resource.mountPath ?? null));
+        const authorizationToken = resource.authorizationToken ?? current.resourceSecrets.find((secret) =>
+          secret.resourceIndex === previousIndex)?.authorizationToken;
+        if (!authorizationToken) return { type: "invalid_request", message: "GitHub authorization token is required for new repositories" };
         resources.push({
           kind: resource.kind,
           url: resource.url,
@@ -461,7 +468,7 @@ export class DeploymentsApplicationService
         resourceSecrets.push({
           kind: "github_repository_token",
           resourceIndex,
-          authorizationToken: resource.authorizationToken,
+          authorizationToken,
         });
       }
     }
@@ -730,14 +737,28 @@ export class DeploymentsApplicationService
       deploymentId: current.deployment.id,
       error: null,
       sessionId: null,
-      triggerContext: { kind: "manual" },
+      triggerContext: command.scheduledAt ? { kind: "schedule", scheduledAt: command.scheduledAt } : { kind: "manual" },
     };
-    const began = await this.dependencies.runs.beginManual({
+    const admission = {
       workspaceId: this.dependencies.workspaceId,
       deploymentId: current.deployment.id,
       expectedDeploymentRevision: current.revision,
       run: pendingRun,
-    });
+    };
+    let began;
+    if (command.scheduledAt) {
+      const schedule = current.deployment.schedule;
+      if (!schedule || schedule.upcomingRunsAt?.[0] !== command.scheduledAt || command.scheduledAt > pendingRun.createdAt) {
+        return { type: "conflict", message: "Deployment schedule slot is not due" };
+      }
+      if (!this.dependencies.runs.beginScheduled) return { type: "conflict", message: "Scheduled deployment admission is unavailable" };
+      const planned = await this.dependencies.schedules.plan({ expression: schedule.expression, timezone: schedule.timezone, after: pendingRun.createdAt });
+      if (planned.type !== "planned") return { type: "conflict", message: planned.message };
+      began = await this.dependencies.runs.beginScheduled({ ...admission,
+        nextDeployment: { ...current.deployment, updatedAt: pendingRun.createdAt,
+          schedule: { ...planned.schedule, lastRunAt: pendingRun.createdAt, lastRunId: pendingRun.id } },
+      });
+    } else began = await this.dependencies.runs.beginManual(admission);
     if (began.type === "not_found") return { type: "not_found" };
     if (began.type === "not_runnable") {
       return {
@@ -763,19 +784,23 @@ export class DeploymentsApplicationService
         },
       };
     } else {
-      const launched = await this.dependencies.sessions.launch({
-        workspaceId: this.dependencies.workspaceId,
-        deployment: current.deployment,
-        resourceSecrets: current.resourceSecrets,
-        run: began.record.run,
-      });
-      next =
-        launched.type === "launched"
-          ? { ...began.record.run, sessionId: launched.sessionId }
-          : {
-              ...began.record.run,
-              error: { type: launched.errorType, message: launched.message },
-            };
+      try {
+        const launched = await this.dependencies.sessions.launch({
+          workspaceId: this.dependencies.workspaceId,
+          deployment: current.deployment,
+          resourceSecrets: current.resourceSecrets,
+          run: began.record.run,
+        });
+        next =
+          launched.type === "launched"
+            ? { ...began.record.run, sessionId: launched.sessionId }
+            : {
+                ...began.record.run,
+                error: { type: launched.errorType, message: launched.message },
+              };
+      } catch (error) {
+        next = { ...began.record.run, error: { type: "unknown_error", message: error instanceof Error ? error.message : String(error) } };
+      }
     }
     const finalized = await this.dependencies.runs.finalize({
       workspaceId: this.dependencies.workspaceId,

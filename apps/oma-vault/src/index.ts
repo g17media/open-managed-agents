@@ -48,6 +48,11 @@ import { createNodeLogger } from "@open-managed-agents/observability/logger/node
 import { setRootLogger, type Logger } from "@open-managed-agents/observability";
 import { evaluateEgress, type NetworkingPolicy } from "./egress-policy";
 
+import { SqlCredentialStore } from "@open-managed-agents/credential-store-sql";
+import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-node";
+import { SqlSessionExecutionContextSource } from "@open-managed-agents/session-runtime-sql";
+import { credentialBearer, listManagedVaultCredentials, matchManagedCredential } from "@open-managed-agents/vault-forward/managed";
+
 const logger: Logger = await createNodeLogger({ bindings: { service: "oma-vault" } });
 setRootLogger(logger);
 
@@ -84,6 +89,21 @@ mkdirSync(resolve(caDir), { recursive: true });
 const sql: SqlClient = usePostgres
   ? await createPostgresSqlClient(dbUrl)
   : await createBetterSqlite3SqlClient(dbPath);
+const managedSessions = new SqlSessionExecutionContextSource(sql);
+const credentialCrypto = process.env.PLATFORM_ROOT_SECRET
+  ? new WebCryptoAesGcm(process.env.PLATFORM_ROOT_SECRET, "managed.vault.credentials") : null;
+const resourceCrypto = process.env.PLATFORM_ROOT_SECRET
+  ? new WebCryptoAesGcm(process.env.PLATFORM_ROOT_SECRET, "managed.sessions.resources") : null;
+const managedCredentials = new SqlCredentialStore(sql, {
+  seal: async ({ plaintext }) => {
+    if (!credentialCrypto) throw new Error("PLATFORM_ROOT_SECRET is required for vault credentials");
+    return { ciphertext: await credentialCrypto.encrypt(plaintext) };
+  },
+  open: async ({ ciphertext }) => {
+    if (!credentialCrypto) throw new Error("PLATFORM_ROOT_SECRET is required for vault credentials");
+    return { plaintext: await credentialCrypto.decrypt(ciphertext) };
+  },
+});
 logger.info(
   { op: "oma_vault.sql_backend", backend: usePostgres ? "postgres" : "sqlite", dsn: usePostgres ? new URL(dbUrl).host : dbPath },
   `sql backend: ${usePostgres ? `postgres ${new URL(dbUrl).host}` : `sqlite ${dbPath}`}`,
@@ -235,6 +255,47 @@ async function findCredentialForUrl(
   }
   type Row = { id: string; tenant_id: string; vault_id: string; auth: string };
 
+  if (attr.sessionId && attr.tenantId) {
+    if (scopeTenantId !== "*" && attr.tenantId !== scopeTenantId) return null;
+    const context = await managedSessions.find({ workspaceId: attr.tenantId, sessionId: attr.sessionId });
+    if (context) {
+      if (context.session.archivedAt) return null;
+      // Repository resource tokens are sealed separately and only authorize that repository's git endpoints.
+      if (resourceCrypto && GIT_SMART_HTTP_RE.test(url)) {
+        const requestUrl = new URL(url);
+        const repository = context.session.resources.find((resource) => {
+          if (resource.type !== "github_repository") return false;
+          const target = new URL(resource.url);
+          const base = target.pathname.replace(/\.git\/?$/, "").replace(/\/$/, "");
+          const path = requestUrl.pathname.replace(/\.git(?=\/)/, "");
+          return target.host === requestUrl.host && ["/info/refs", "/git-upload-pack", "/git-receive-pack"].some((suffix) => path === `${base}${suffix}`);
+        });
+        if (repository && repository.type === "github_repository") {
+          const secret = await sql.prepare("SELECT sealed_value FROM managed_session_resource_secrets WHERE workspace_id = ? AND session_id = ? AND resource_id = ? AND secret_type = 'github_token'")
+            .bind(attr.tenantId, attr.sessionId, repository.id).first<{ sealed_value: string }>();
+          if (secret) {
+            const token = await resourceCrypto.decrypt(secret.sealed_value);
+            const value = `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+            return { vaultId: "repository", credentialId: repository.id, injectHeader: { name: "authorization", value }, gitBasicHeader: value };
+          }
+        }
+      }
+      const activeVaults: string[] = [];
+      for (const vaultId of context.session.vaultIds) {
+        if (await sql.prepare("SELECT id FROM managed_vaults WHERE workspace_id = ? AND id = ? AND archived_at IS NULL").bind(attr.tenantId, vaultId).first()) activeVaults.push(vaultId);
+      }
+      const records = await listManagedVaultCredentials(managedCredentials, attr.tenantId, activeVaults);
+      const credential = matchManagedCredential(records.map((record) => record.credential), url, selector);
+      if (!credential) return null;
+      const token = credentialBearer(credential.auth)!;
+      return { credentialId: credential.id, vaultId: credential.vaultId,
+        injectHeader: { name: "authorization", value: `Bearer ${token}` },
+        ...((credential.auth.type === "static_bearer" || credential.auth.type === "cap_cli") && {
+          gitBasicHeader: `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+        }),
+      };
+    }
+  }
   if (attr.sessionId) {
     // Session-scoped path: live vault_ids read → strictly that vault set.
     type SessRow = { tenant_id: string; vault_ids: string | null };
@@ -250,6 +311,7 @@ async function findCredentialForUrl(
       );
       return null;
     }
+    if (attr.tenantId && row.tenant_id !== attr.tenantId) return null;
     if (scopeTenantId !== "*" && row.tenant_id !== scopeTenantId) return null;
     let vaultIds: string[] = [];
     try {
@@ -431,6 +493,21 @@ async function checkEgress(url: string, attr: VaultProxyAttribution): Promise<st
     return unattributedEgress === "deny"
       ? "unattributed sandbox traffic is denied (OMA_VAULT_UNATTRIBUTED_EGRESS=deny)"
       : null;
+  }
+  if (attr.tenantId) {
+    if (scopeTenantId !== "*" && attr.tenantId !== scopeTenantId) return "Session workspace is unavailable";
+    const context = await managedSessions.find({ workspaceId: attr.tenantId, sessionId: attr.sessionId });
+    if (context) {
+      if (context.session.archivedAt) return "Session is archived";
+      const config = context.environment.config;
+      if (config.type !== "cloud") return null;
+      const network = config.networking;
+      return evaluateEgress(hostname, network.type === "unrestricted" ? network : {
+        type: "limited", allowed_hosts: network.allowedHosts,
+        allow_mcp_servers: network.allowMcpServers,
+        allow_package_managers: network.allowPackageManagers,
+      });
+    }
   }
   return evaluateEgress(hostname, await networkingForSession(attr.sessionId));
 }

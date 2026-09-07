@@ -125,7 +125,7 @@ A **vault** is a secure credential store. Credentials in vaults are **never expo
 |---|---|---|---|
 | `name` | string | Yes | Display name for the agent |
 | `description` | string | No | Human-readable description |
-| `model` | string or object | Yes | Model identifier (e.g. `"claude-sonnet-4-6"`) or `{ id, speed?, reasoning? }`. `speed`: `"standard"` (default) or `"fast"` (Anthropic fast mode). `reasoning`: `none` / `low` / `medium` / `high` / `xhigh` / `max`; unset = provider default. |
+| `model` | string or object | Yes | Model identifier (e.g. `"claude-sonnet-4-6"`) or `{ id, speed?, effort? }`. `speed`: `"standard"` (default) or `"fast"` (Anthropic fast mode). `effort`: `{ "type": "low" }` with `low` / `medium` / `high` / `xhigh` / `max`; omit for the provider default. |
 | `system` | string | Yes | System prompt — defines the agent's behavior and persona |
 | `tools` | array | No | Tool configurations (toolsets, custom tools) |
 | `mcp_servers` | array | No | External MCP server connections |
@@ -490,35 +490,34 @@ session detail page.
 ## Deployments
 
 A **deployment** is a stored launch recipe — agent + environment + vaults +
-memory stores + an initial message — fired manually or on a cron schedule.
-Every run creates a regular session (tagged `metadata.deployment_id`) and
-sends the initial message; the deployment records `last_session_id` /
-`last_run_at`. OMA-only extension, mounted at `/v1/oma/deployments`.
+resources + initial events — fired manually or on a cron schedule. Deployments
+use upstream's `/v1/deployments` API. Each run creates a regular session and a
+`/v1/deployment_runs` record containing its `session_id` or error. Schedule
+state lives in `schedule.last_run_at` and `schedule.upcoming_runs_at`.
 
 ```bash
 # Create a scheduled deployment (daily at 09:00 UTC)
-curl -s $BASE/v1/oma/deployments \
+curl -s $BASE/v1/deployments \
   -H "x-api-key: $KEY" -H "content-type: application/json" \
   -d '{
     "name": "Morning triage",
-    "agent_id": "agent_xxx",
+    "agent": "agent_xxx",
     "environment_id": "env_xxx",
-    "initial_message": "Triage new issues and summarize.",
+    "initial_events": [{"type": "user.message", "content": [{"type": "text", "text": "Triage new issues and summarize."}]}],
     "vault_ids": ["vlt_xxx"],
-    "memory_store_ids": ["memstore_xxx"],
-    "trigger": { "type": "schedule", "cron": "0 9 * * *" }
+    "resources": [{"type": "memory_store", "memory_store_id": "memstore_xxx", "access": "read_write"}],
+    "schedule": {"type": "cron", "expression": "0 9 * * *", "timezone": "UTC"}
   }'
 
-# Fire one on demand — returns the spawned session id
-curl -s $BASE/v1/oma/deployments/$DPL_ID/run -X POST \
+# Fire one on demand — returns a deployment run containing the session ID
+curl -s $BASE/v1/deployments/$DPL_ID/run -X POST \
   -H "x-api-key: $KEY" -H "content-type: application/json" -d '{}'
 ```
 
-Scheduled deployments are swept by the `deployments-tick` cron job (every
-minute on both runtimes; override with `DEPLOYMENTS_TICK_CRON`). A failed
-run defers `next_run_at` to the next cron slot rather than retrying every
-tick. The console exposes deployments under **Managed Agents →
-Deployments** with a "Run now" action.
+Scheduled deployments are swept every minute on both runtimes; override with
+`DEPLOYMENTS_TICK_CRON`. A revision-guarded reservation admits each due slot
+once and advances the schedule before launching, including on failure. The
+Deployments page exposes editing, "Run now", pause, unpause and archive.
 
 ---
 

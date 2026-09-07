@@ -60,10 +60,16 @@ function toTokenEndpointAuthUpdate(
 }
 
 function toCredentialAuthInput(auth: WireCreateAuth): CredentialAuthInput {
+  if (auth.type === "container_registry") return { ...auth };
+  if (auth.type === "cap_cli") {
+    const { cli_id, mcp_server_url, ...fields } = auth;
+    return { ...fields, cliId: cli_id, ...(mcp_server_url !== undefined && { mcpServerUrl: mcp_server_url }) };
+  }
   if (auth.type === "static_bearer") {
     return {
       type: auth.type,
       token: auth.token,
+      ...(auth.handle !== undefined && { handle: auth.handle }),
       mcpServerUrl: auth.mcp_server_url,
     };
   }
@@ -113,10 +119,16 @@ function toCredentialAuthInput(auth: WireCreateAuth): CredentialAuthInput {
 }
 
 function toCredentialAuthUpdate(auth: WireUpdateAuth): CredentialAuthUpdate {
+  if (auth.type === "container_registry") return { ...auth };
+  if (auth.type === "cap_cli") {
+    const { mcp_server_url, ...fields } = auth;
+    return { ...fields, ...(mcp_server_url !== undefined && { mcpServerUrl: mcp_server_url }) };
+  }
   if (auth.type === "static_bearer") {
     return {
       type: auth.type,
       ...(auth.token !== undefined && { token: auth.token }),
+      ...(auth.handle !== undefined && { handle: auth.handle }),
     };
   }
   if (auth.type === "environment_variable") {
@@ -241,8 +253,13 @@ export function toValidateCredentialCommand(
 }
 
 function fromCredentialAuth(auth: CredentialAuthView): object {
+  if (auth.type === "container_registry") return { ...auth };
+  if (auth.type === "cap_cli") {
+    const { cliId, mcpServerUrl, ...fields } = auth;
+    return { ...fields, cli_id: cliId, ...(mcpServerUrl !== undefined && { mcp_server_url: mcpServerUrl }) };
+  }
   if (auth.type === "static_bearer") {
-    return { type: auth.type, mcp_server_url: auth.mcpServerUrl };
+    return { type: auth.type, mcp_server_url: auth.mcpServerUrl, ...(auth.handle !== undefined && { handle: auth.handle }) };
   }
   if (auth.type === "environment_variable") {
     return {

@@ -1,3 +1,4 @@
+import type { SkillGitHubSource } from "../domain/skill";
 export interface SkillVersionUploadFileInput {
   filename: string;
   mimeType: string;
@@ -15,6 +16,7 @@ export interface SkillVersionView {
 }
 
 export interface CreateSkillVersionCommand {
+  githubSource?: SkillGitHubSource;
   skillId: string;
   files: SkillVersionUploadFileInput[];
 }

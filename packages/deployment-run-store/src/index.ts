@@ -1,4 +1,4 @@
-import type { DeploymentRun } from "@open-managed-agents/domain/deployments";
+import type { Deployment, DeploymentRun } from "@open-managed-agents/domain/deployments";
 
 export interface StoredDeploymentRun {
   run: DeploymentRun;
@@ -22,6 +22,10 @@ export type BeginManualDeploymentRunResult =
   | { type: "not_found" }
   | { type: "deployment_revision_conflict"; actualRevision: number }
   | { type: "not_runnable" };
+
+export interface BeginScheduledDeploymentRun extends BeginManualDeploymentRun {
+  nextDeployment: Deployment;
+}
 
 export interface FinalizeDeploymentRun extends DeploymentRunLocation {
   expectedRevision: number;
@@ -56,6 +60,7 @@ export interface ListDeploymentRunRecords {
  * against an exact active Deployment revision.
  */
 export interface DeploymentRunStore {
+  beginScheduled?(input: BeginScheduledDeploymentRun): Promise<BeginManualDeploymentRunResult>;
   beginManual(
     input: BeginManualDeploymentRun,
   ): Promise<BeginManualDeploymentRunResult>;

@@ -4,7 +4,16 @@ import type { CredentialAuth } from "@open-managed-agents/shared";
 import type { RouteServicesArg } from "../types";
 import { resolveServices } from "../types";
 
+export interface OAuthCredentialPersistence {
+  vaultExists(vaultId: string): Promise<boolean>;
+  scope(vaultId: string, credentialId: string): Promise<string | undefined>;
+  saveGrant(input: { vaultId: string; credentialId?: string; displayName: string; auth: CredentialAuth }): Promise<string>;
+  saveCliGrant(input: { vaultId: string; cliId: string; auth: CredentialAuth }): Promise<string>;
+  refresh(vaultId: string, credentialId: string): Promise<{ expires_at?: string | null }>;
+}
+
 export interface OAuthRoutesDeps {
+  credentialsFor?: (workspaceId: string) => OAuthCredentialPersistence | Promise<OAuthCredentialPersistence>;
   services: RouteServicesArg;
   /** Provider OAuth client credentials — CF passes worker env, Node passes
    *  process.env. Only <PROVIDER>_OAUTH_CLIENT_ID/_SECRET keys are read. */
@@ -304,7 +313,8 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     // OAuth flow returned 404 "Vault not found" because KV was always
     // empty. Read via the service like every other route does.
     const t = c.get("tenant_id");
-    const vault = await services.vaults.get({ tenantId: t, vaultId });
+    const native = await deps.credentialsFor?.(t);
+    const vault = native ? await native.vaultExists(vaultId) : await services.vaults.get({ tenantId: t, vaultId });
     if (!vault) {
       return c.json({ error: "Vault not found" }, 404);
     }
@@ -312,7 +322,8 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     // Re-authorization of an existing credential with no explicit scope
     // override: reuse the scopes stored on the credential so user-added
     // scopes survive reconnects.
-    if (!extraScope && credentialId) {
+    if (!extraScope && credentialId && native) extraScope = await native.scope(vaultId, credentialId) ?? "";
+    if (!extraScope && credentialId && !native) {
       const existing = await services.credentials
         .get({ tenantId: t, vaultId, credentialId })
         .catch(() => null);
@@ -648,7 +659,11 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       scope: tokens.scope || oauthState.scope,
     };
 
-    if (oauthState.credential_id) {
+    const native = await deps.credentialsFor?.(oauthState.tenant_id);
+    if (native) {
+      await native.saveGrant({ vaultId: oauthState.vault_id, credentialId: oauthState.credential_id,
+        displayName: `${serverName} (OAuth)`, auth: credAuth });
+    } else if (oauthState.credential_id) {
       // Update existing credential — refresh on a known credential row. If the
       // row vanished mid-flow (race with delete/archive), swallow: the OAuth
       // dance still completes for UX and the operator can retry attaching.
@@ -756,6 +771,8 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     }
 
     const t = c.get("tenant_id");
+    const native = await deps.credentialsFor?.(t);
+    if (native) return c.json(await native.refresh(body.vault_id, body.credential_id));
     const service = services.credentials;
     const cred = await service.get({
       tenantId: t,
