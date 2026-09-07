@@ -38,6 +38,11 @@ PG database (no separate `auth.db` file); in SQLite mode they live in
 
 ## Quick start (Docker, SQLite)
 
+**Upgrading an existing SQLite installation to v1:** startup automatically
+backs up, migrates and verifies existing data before serving requests. See
+[SQLite migration and recovery](sqlite-v1-migration.md) for the backup location,
+optional rehearsal commands and rollback procedure.
+
 ```bash
 # 1. Get an Anthropic API key. Any Anthropic-compatible endpoint works.
 cp .env.example .env

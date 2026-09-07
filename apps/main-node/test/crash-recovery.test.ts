@@ -27,6 +27,10 @@ import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { planMigration } from "../src/migrations/v0-data-plan";
+import { applyMigration } from "../src/migrations/v0-data";
 import {
   detachedProcessOptions,
   killProcessTree,
@@ -103,6 +107,7 @@ async function startMainNode(opts: { dataDir: string }): Promise<ProcessHandle> 
   // init add a few seconds to cold-start vs the pre-P6 boot path.
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error(`main-node exited during startup: ${logBuf.join("")}`);
     try {
       const res = await fetch(`http://localhost:${port}/health`);
       if (res.ok) {
@@ -160,9 +165,19 @@ describe("main-node crash recovery (real process, SIGKILL)", () => {
   let dataDir: string;
   let h: ProcessHandle | null = null;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     dataDir = join(tmpdir(), `oma-test-${randomBytes(6).toString("hex")}`);
     mkdirSync(dataDir, { recursive: true });
+    // This suite exercises the retained integration runtime's crash markers.
+    // Complete the real migration on its empty fixture before seeding those
+    // markers. A populated, unmigrated v0 DB must now refuse to start.
+    const db = new Database(join(dataDir, "oma.db"));
+    let report;
+    try {
+      migrate(drizzle(db), { migrationsFolder: join(REPO_ROOT, "apps/main-node/migrations-sqlite") });
+      report = (await planMigration(db, { dataDir, rootSecret: "" })).report;
+    } finally { db.close(); }
+    await applyMigration({ dataDir, rootSecret: "", expected: report, maintenance: true });
   });
 
   afterEach(async () => {

@@ -71,6 +71,32 @@ Validation ran on the available Node 25.6.1; the repository specifies Node
 storage conflicting with jsdom. The interface build reports its existing
 large-chunk warning.
 
-These checks cover local execution and test adapters. No live Belljar
-deployment or production database conversion was performed. The rebased
-branch has not been pushed or deployed.
+## Local Docker data upgrade — 8 September 2026
+
+SQLite data conversion now runs automatically at application startup, before
+the HTTP listener and scheduled jobs. It takes a verified backup, converts
+the old records and blobs transactionally, verifies the result and records
+completion. Restarts skip completed migrations. The manual command remains
+available for optional rehearsals and recovery; see
+[SQLite migration and recovery](sqlite-v1-migration.md).
+
+Normal Docker startup migrated the existing local database at
+`2026-09-07T23:03:11.601Z` (8 September in London). The authenticated API
+verified 65 sessions and all 3,996 events belonging to them, both deployments,
+8 agents, 11 environments, 3 vaults, 3 credentials, all 23 file downloads,
+2 memories and 4 skill archives. Original source tables still match the
+pre-migration backup, including history whose parent records were already
+absent before the upgrade.
+
+The automatic backup is
+`data/.backups/20260907-v0-data-to-v1-sqlite-1-rAjQPy/`, with its verified
+manifest hash recorded in SQLite. The original Git branch and bundle above
+remain intact.
+
+Additional validation: 177 Node tests, 182 API contract tests and 36 runtime
+adapter tests pass, including real application startup on an old database,
+concurrent migration attempts, SQL rollback, repeat application, frozen
+session configuration and preserved tool arguments/provider signatures.
+Repository-wide typechecks passed; the Docker image builds and runs locally.
+
+Production has not been changed, and the rebased branch has not been pushed.
