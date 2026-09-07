@@ -1,0 +1,12 @@
+.git
+.agents
+.codex
+**/node_modules
+**/.wrangler
+**/.env
+**/.env.*
+**/.DS_Store
+**/*.tsbuildinfo
+.pnpm-store
+data
+apps/console/dist

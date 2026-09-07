@@ -373,7 +373,9 @@ export class SessionRegistry {
       tenantId,
       memoryMounts,
       mountOutputs: true,
-      backup: { restoreOnWarm: true },
+      // Managed startup restores on fresh creation through its scoped callback,
+      // after all Docker binds have been collected and before the script runs.
+      backup: { restoreOnWarm: !sandbox.initializesWorkspace },
     });
 
     const eventLog = this.deps.newEventLog(sessionId);

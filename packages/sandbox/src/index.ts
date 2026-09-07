@@ -1,6 +1,7 @@
 export type {
   ProcessHandle,
   SandboxExecutor,
+  SandboxExecResult,
   SandboxFactory,
   SandboxFactoryContext,
   SandboxFactoryEnv,

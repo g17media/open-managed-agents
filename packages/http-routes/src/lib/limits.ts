@@ -165,6 +165,31 @@ export function validateEnvironmentLimits(
     };
   }
   if (input.config) {
+    const startup = input.config.startup;
+    if (startup !== undefined) {
+      if (!startup || typeof startup !== "object" || Array.isArray(startup)) {
+        return { ok: false, error: "config.startup must be an object" };
+      }
+      const s = startup as Record<string, unknown>;
+      if (typeof s.script !== "string" || s.script.includes("\u0000") || new TextEncoder().encode(s.script).length > 65536) {
+        return { ok: false, error: "config.startup.script must be text without NUL bytes, at most 64 KiB" };
+      }
+      if (s.enabled !== undefined && typeof s.enabled !== "boolean") {
+        return { ok: false, error: "config.startup.enabled must be a boolean" };
+      }
+      if (s.triggers !== undefined && (!Array.isArray(s.triggers) || s.triggers.length > 3 ||
+        s.triggers.some((t) => !["create", "wake", "revive"].includes(t as string)) ||
+        new Set(s.triggers).size !== s.triggers.length)) {
+        return { ok: false, error: "config.startup.triggers must contain unique create, wake, or revive values" };
+      }
+      if (s.timeout_seconds !== undefined && (typeof s.timeout_seconds !== "number" ||
+        !Number.isInteger(s.timeout_seconds) || s.timeout_seconds < 1 || s.timeout_seconds > 600)) {
+        return { ok: false, error: "config.startup.timeout_seconds must be an integer from 1 to 600" };
+      }
+      if (s.enabled !== false && (!Array.isArray(s.triggers) || s.triggers.length > 0) && !s.script.trim()) {
+        return { ok: false, error: "An enabled startup script must not be empty" };
+      }
+    }
     const dockerfile = input.config.dockerfile;
     if (typeof dockerfile === "string" && dockerfile.length > DOCKERFILE_MAX) {
       return {
