@@ -15,6 +15,8 @@ import { DataTable, type ColumnDef } from "../components/DataTable";
 import { FacetedFilter } from "../components/FacetedFilter";
 import { FilterChip, CreatedFilterChip } from "../components/FilterChip";
 import { useI18n } from "../i18n";
+import { StartupScriptEditor } from "../components/StartupScriptEditor";
+import type { EnvironmentStartupConfig } from "@open-managed-agents/api-types";
 
 type StatusValue = "any" | "active" | "archived";
 
@@ -30,6 +32,7 @@ export function EnvironmentsList() {
   const { t } = useI18n();
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ name: "", description: "" });
+  const [startup, setStartup] = useState<EnvironmentStartupConfig>();
 
   // Server-driven filter state. Each piece flows into envsParams below
   // → useInfiniteApiQuery resets to page 1 on params change → the list
@@ -68,10 +71,11 @@ export function EnvironmentsList() {
   const create = async () => {
     await managedApi.environments.create({
       name: form.name,
-      config: { type: "cloud" },
+      config: { type: "cloud", ...(startup ? { startup } : {}) },
       description: form.description || undefined,
     });
     setShowCreate(false); setForm({ name: "", description: "" }); load();
+    setStartup(undefined);
   };
 
   // TanStack column defs. Order, filtering, and search all flow through
@@ -263,6 +267,10 @@ export function EnvironmentsList() {
               placeholder="Production environment for customer-facing agents..."
             />
           </div>
+          <details>
+            <summary className="mb-3 cursor-pointer text-sm text-fg">Startup script (Belljar)</summary>
+            <StartupScriptEditor value={startup} onChange={setStartup} />
+          </details>
         </div>
       </Modal>
     </DataTable>

@@ -162,6 +162,8 @@ export interface SessionLifecycleHooks {
 }
 
 export interface SessionRoutesDeps {
+  /** Reject startup-enabled environments when the runtime cannot honor their lifecycle. */
+  supportsStartupScripts?: boolean;
   services: RouteServicesArg;
   /** Per-request SessionRouter — CF resolves per-tenant; Node returns
    *  the singleton router built at process start. */
@@ -426,6 +428,10 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
       return c.json({ error: "Environment not found" }, 404);
     }
     const vaultIds = body.vault_ids ?? [];
+    const startup = envSnap?.config?.startup;
+    if (startup && startup.enabled !== false && (startup.triggers === undefined || startup.triggers.length > 0) && !deps.supportsStartupScripts) {
+      return c.json({ error: "Startup scripts require the Belljar sandbox provider" }, 400);
+    }
 
     // GitHub fast-path: pre-mint installation tokens for unbound repo refs.
     const fastPathTokens = new Map<string, string>();

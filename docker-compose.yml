@@ -101,6 +101,8 @@ services:
     container_name: belljar
     environment:
       BELLJAR_TOKEN: ${BELLJAR_TOKEN:-}
+      # OMA runs environment startup scripts with its proxy/CA environment.
+      BELLJAR_LIFECYCLE_URL: http://oma-server:8787/internal/belljar/lifecycle
       BELLJAR_NETWORK: open-managed-agents_default
       BELLJAR_NETWORK_MODE: direct
       # Claim this stack's sandboxes. A belljar manages every sandbox it can

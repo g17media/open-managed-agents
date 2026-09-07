@@ -8,6 +8,7 @@ export type {
   SandboxCheckpointScope,
   SandboxPort,
   SandboxExecutor,
+  SandboxExecResult,
   SandboxFactory,
   SandboxFactoryContext,
   SandboxFactoryEnv,

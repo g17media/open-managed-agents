@@ -18,6 +18,8 @@ import { Select, SelectOption } from "../components/Select";
 import { toast } from "sonner";
 import { Page } from "../components/Page";
 import { Field } from "../components/Field";
+import { StartupScriptEditor } from "../components/StartupScriptEditor";
+import type { EnvironmentStartupConfig } from "@open-managed-agents/api-types";
 
 // =================================================================
 // Types
@@ -44,6 +46,7 @@ interface EnvironmentExtras {
   image?: string;
   image_registry_auth?: { vault_id: string; credential_id: string };
   context?: string;
+  startup?: EnvironmentStartupConfig;
 }
 type EnvConfigBlock = NonNullable<EnvironmentUpdateParams["config"]> & EnvironmentExtras;
 type Env = Omit<BetaEnvironment, "config"> & {
@@ -96,6 +99,7 @@ export function EnvironmentDetail() {
   const [registryVaultId, setRegistryVaultId] = useState("none");
   const [registryCredentialId, setRegistryCredentialId] = useState("");
   const [contextText, setContextText] = useState("");
+  const [startup, setStartup] = useState<EnvironmentStartupConfig>();
 
   // Vaults + per-vault registry credentials for the image pull picker.
   const { data: vaultsRes } = useApiQuery<{ data: Array<{ id: string; display_name: string }> }>(
@@ -156,6 +160,7 @@ export function EnvironmentDetail() {
     setRegistryVaultId(e.config.image_registry_auth?.vault_id ?? "none");
     setRegistryCredentialId(e.config.image_registry_auth?.credential_id ?? "");
     setContextText(e.config.context ?? "");
+    setStartup(e.config.startup);
   }
 
   async function save() {
@@ -166,6 +171,7 @@ export function EnvironmentDetail() {
         env.config.type === "cloud"
           ? {
               type: "cloud",
+              ...(startup ? { startup } : {}),
               ...(image.trim() ? { image: image.trim() } : {}),
               ...(image.trim() && registryVaultId !== "none" && registryCredentialId
                 ? { image_registry_auth: { vault_id: registryVaultId, credential_id: registryCredentialId } } : {}),
@@ -252,6 +258,10 @@ export function EnvironmentDetail() {
             />
           </div>
         </section>
+
+        <SectionCard title="Startup script" subtitle="Run a script on selected sandbox lifecycle events. Available with self-host Belljar.">
+          <StartupScriptEditor value={startup} onChange={setStartup} />
+        </SectionCard>
 
         {/* Networking */}
         <SectionCard

@@ -12,6 +12,7 @@ import { Modal } from "../components/Modal";
 import { Button } from "@/components/ui/button";
 import { AgentIcon, ClockIcon, DurationIcon, EnvIcon, VaultIcon } from "../components/icons";
 import { FilesPanel, ResourcePanel } from "./session-detail/Panels";
+import { StartupStatus } from "../components/StartupStatus";
 import {
   TrajectoryOutcomeChip,
   TrajectoryRewardChip,
@@ -1092,6 +1093,9 @@ export function SessionDetail() {
       {(() => null)()}
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 flex flex-col min-w-0">
+          <StartupStatus events={events} onRetry={async () => {
+            await api(`/v1/sessions/${id}/startup/retry`, { method: "POST", body: "{}" });
+          }} />
       {view === "chat" ? (
         <ManagedSessionConversation
           afterTurns={transientActivity}

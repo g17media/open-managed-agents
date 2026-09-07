@@ -401,6 +401,81 @@ The same demo works on the Postgres compose unchanged.
 
 Read-only memory mounts: Daytona and E2B enforce read-only on their mounted view. LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
 
+## Environment startup scripts (Belljar)
+
+The console's **Environments → Startup script** editor lets you save a Bash
+script, enable or disable it, select lifecycle triggers, and set a timeout.
+OMA executes it inside the sandbox, using the same proxy and CA environment
+as ordinary commands. Files, repository resources, and any workspace restore
+are prepared before the script runs. Memory and output binds are present at
+container creation. Saving an environment affects **new sessions**; existing
+sessions keep the script and trigger selection in their environment snapshot.
+
+```json
+{
+  "name": "Project workspace",
+  "config": {
+    "type": "cloud",
+    "startup": {
+      "enabled": true,
+      "triggers": ["create", "wake", "revive"],
+      "timeout_seconds": 120,
+      "script": "mkdir -p /workspace/cache\necho Starting: $OMA_LIFECYCLE_EVENT\n"
+    }
+  }
+}
+```
+
+The three triggers are mutually exclusive reasons for a container start:
+
+| Trigger | Meaning |
+| --- | --- |
+| `create` | Fresh container and workspace, including replacement after retention expires |
+| `wake` | The same stopped container starts again |
+| `revive` | A replacement container starts with its retained `/workspace` volume |
+
+Omitting `triggers` selects all three. An empty selection or `enabled: false`
+disables the script. Script size is capped at 64 KiB; timeout is 1–600 seconds
+(default 120). Scripts run with Bash `-e -o pipefail`, cwd `/workspace`, and
+receive `OMA_LIFECYCLE_EVENT` and `OMA_BOOT_ID`. An `export` inside the script
+affects its child processes; it does not update the environment of subsequent
+OMA commands. Command-prefix secrets are matched against the outer command,
+so invoking a CLI from inside a script does not automatically grant that CLI's
+prefix-specific environment secrets. Vault proxy credentials work normally.
+
+Both OMA and Belljar must be updated to versions supporting managed startup.
+Set `SANDBOX_PROVIDER=belljar`, `BELLJAR_URL`, and a nonempty `BELLJAR_TOKEN` on
+OMA. Set the same `BELLJAR_TOKEN` and
+`BELLJAR_LIFECYCLE_URL=http://oma-server:8787/internal/belljar/lifecycle` on
+Belljar. Compose supplies the callback URL. For separate hosts, use an OMA URL
+reachable from the Belljar server. The callback authenticates with the shared
+token; it is not a sandbox-facing endpoint.
+
+Belljar gates normal runtime, preview, and WebSocket traffic until OMA
+acknowledges the current boot. The callback uses a separate adapter and
+short-lived initialization access, preventing recursive waits. Readiness and
+the boot reason survive Belljar restarts in engine metadata; OMA also records
+completion durably in the session log. Script source and credentials are not
+stored in Belljar's metadata. A script execution copy is written under
+`/tmp/oma-startup/`; edit the environment or submit an API update to change
+the authoritative source.
+
+Startup failures block normal traffic. The session page shows the last
+startup's status, duration, exit code, and stdout/stderr (last 16,384 characters
+of each), with **Retry startup** after failure. The authenticated API action is
+`POST /v1/sessions/:id/startup/retry`. Lifecycle records use the OMA extension
+event `session.sandbox_startup`; include `chunks` when consuming filtered SSE.
+If OMA is unavailable, initialization stays blocked until a retry succeeds.
+Keep scripts idempotent: an interrupted attempt can run again, and the script
+may be invoked on multiple starts. Automatic pre-stop and pre-destroy hooks
+are not part of this feature.
+
+For large scripts, keep source in Git and publish the resolved contents into
+`config.startup.script`; this preserves review history while pinning each
+session's executable source. Stable system packages can remain in the image.
+
+## Vault credential injection (oma-vault sidecar)
+
 ## Vault credential injection
 
 For managed harnesses inside a sandbox, use the scoped HTTP MCP gateway:

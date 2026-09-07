@@ -181,7 +181,11 @@ export function supportsSessionOutputMount(
 }
 
 export interface SandboxPort {
+  /** A lifecycle callback restores the workspace before running startup scripts. */
+  readonly initializesWorkspace?: boolean;
   exec(command: string, timeout?: number): Promise<string>;
+  /** Structured command result for initialization, where a nonzero exit must block readiness. */
+  execResult?(command: string, timeout?: number): Promise<SandboxExecResult>;
   /** Start a process without blocking. Returns handle for kill/status/logs. */
   startProcess?(command: string): Promise<ProcessHandle | null>;
   /** Set global environment variables for all subsequent exec calls. */
@@ -291,6 +295,14 @@ export interface SandboxFactoryContext {
    *  from a vault by the host at provision time; adapters use them for
    *  the pull only and must never persist or expose them. */
   registryAuth?: SandboxRegistryAuth;
+  /** Ask Belljar to call OMA before allowing traffic on each container start. */
+  startupManaged?: boolean;
+}
+
+export interface SandboxExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
 }
 
 /** Pull credentials for a private registry — either username/password

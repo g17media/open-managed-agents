@@ -4,3 +4,13 @@
 **/coverage
 artifacts
 .DS_Store
+.agents
+.codex
+**/.wrangler
+**/.env
+**/.env.*
+**/.DS_Store
+**/*.tsbuildinfo
+.pnpm-store
+data
+apps/console/dist
