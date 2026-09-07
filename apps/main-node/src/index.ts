@@ -10,6 +10,10 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
+import { buildBelljarLifecycleRoutes } from "./lib/belljar-lifecycle.js";
+import { createEnvironmentSnapshotLoader } from "./lib/environment-snapshot.js";
+import { BelljarSandbox } from "@open-managed-agents/sandbox/adapters/belljar";
+import { startupEnabled } from "@open-managed-agents/sandbox/startup";
 import {
   createNodeLogger,
 } from "@open-managed-agents/observability/logger/node";
@@ -511,6 +515,7 @@ const sessionsService = createSqliteSessionService({ db: drizzleDb });
 const filesService = createSqliteFileService({ db: drizzleDb });
 const evalsService = createSqliteEvalRunService({ db: drizzleDb });
 const environmentsService = createSqliteEnvironmentService({ db: drizzleDb });
+const loadEnvironmentSnapshot = createEnvironmentSnapshotLoader(environmentsService);
 const modelCardsService = createSqliteModelCardService(
   { db: drizzleDb },
   {
@@ -809,12 +814,17 @@ async function buildSandbox(
   const mod = (await import(path)) as {
     sandboxFactory: import("@open-managed-agents/sandbox").SandboxFactory;
   };
+  const session = await sessionsService.getById({ sessionId });
+  const startupManaged = startupEnabled(session?.environment_snapshot?.config?.startup);
+  if (startupManaged && provider !== "belljar") throw new Error("Startup scripts require the Belljar sandbox provider");
+  if (startupManaged && !process.env.BELLJAR_TOKEN) throw new Error("Startup scripts require BELLJAR_TOKEN for authenticated lifecycle callbacks");
   return mod.sandboxFactory(
     {
       sessionId,
       workdir,
       memoryRoot: memoryBlobLocalDir ?? "",
       outputsRoot,
+      startupManaged,
       // Only belljar honors per-session images today — skip the lookups
       // for providers that would ignore the fields anyway.
       ...(provider === "belljar" ? await environmentImageOverrides(sessionId) : {}),
@@ -996,25 +1006,11 @@ async function mcpBindingFetch(request: Request): Promise<Response> {
   );
 }
 
-const sessionRegistry = new SessionRegistry({
-  sql,
-  hub,
-  agentsService,
-  memoryService,
-  sessionsService,
-  sandboxOrchestrator,
-  newEventLog,
-  buildSandbox,
-  sandboxWorkdirRoot: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
-  sqlDialect: dialect,
-  // Mount `file` + `github_repository` session resources into the sandbox
-  // before each turn. The CF SessionDO does this itself; the Node runtime
-  // did not, so attachments and repos were recorded but never appeared in
-  // the sandbox. Files use the sandbox's writeFileBytes primitive (same as
-  // the CF mountFile); repos reuse the CF mountGitRepo verbatim, which
-  // drives the sandbox's native gitCheckout (belljar proxies it to the
-  // cloudflare/sandbox git endpoint).
-  mountSessionResources: async ({ sessionId, tenantId, sandbox }) => {
+async function mountNodeSessionResources({ sessionId, tenantId, sandbox, strict = false }: {
+  sessionId: string; tenantId: string;
+  sandbox: import("@open-managed-agents/sandbox").SandboxExecutor;
+  strict?: boolean;
+}): Promise<void> {
     if (!filesBlob) return;
     const rows = await sessionsService.listResourcesBySession({ sessionId });
     for (const row of rows) {
@@ -1022,9 +1018,9 @@ const sessionRegistry = new SessionRegistry({
         if (row.type === "file" && row.resource.file_id) {
           const fileId = row.resource.file_id;
           const meta = await filesService.get({ tenantId, fileId });
-          if (!meta) continue;
+          if (!meta) { if (strict) throw new Error(`File ${fileId} is unavailable`); continue; }
           const obj = await filesBlob.get(meta.r2_key);
-          if (!obj) continue;
+          if (!obj) { if (strict) throw new Error(`File ${fileId} content is unavailable`); continue; }
           const bytes = await obj.bytes();
           // Default mount path matches the Anthropic Managed Agents
           // convention the ff-agents bot relies on (/workspace/<name>).
@@ -1033,7 +1029,7 @@ const sessionRegistry = new SessionRegistry({
           const dir = slash > 0 ? path.slice(0, slash) : "";
           // belljar's write endpoint does not create parent dirs; ensure
           // the target directory exists first (no-op for /workspace).
-          if (dir) await sandbox.exec(`mkdir -p ${JSON.stringify(dir)}`, 5000).catch(() => undefined);
+          if (dir) await sandbox.exec(`mkdir -p ${qsh(dir)}`, 5000).catch(() => undefined);
           if (sandbox.writeFileBytes) await sandbox.writeFileBytes(path, bytes);
           else await sandbox.writeFile(path, new TextDecoder().decode(bytes));
         } else if (row.type === "github_repository" || row.type === "github_repo") {
@@ -1092,6 +1088,7 @@ const sessionRegistry = new SessionRegistry({
             .exec(`test -d ${qsh(`${targetDir}/.git`)} && echo present || echo absent`, 5000)
             .catch(() => "absent");
           if (!ok.includes("present")) {
+            if (strict) throw new Error(`Repository checkout failed: ${repoUrl}`);
             logger.warn(
               { op: "node.mount_git_repo", session_id: sessionId, resource_id: row.resource.id, target_dir: targetDir },
               "github_repository clone did not produce a checkout",
@@ -1099,13 +1096,34 @@ const sessionRegistry = new SessionRegistry({
           }
         }
       } catch (err) {
+        if (strict) throw err;
         logger.warn(
           { op: "node.mount_session_resource", session_id: sessionId, resource_id: row.resource.id, resource_type: row.type, err },
           "session resource mount failed",
         );
       }
     }
-  },
+}
+
+const sessionRegistry = new SessionRegistry({
+  sql,
+  hub,
+  agentsService,
+  memoryService,
+  sessionsService,
+  sandboxOrchestrator,
+  newEventLog,
+  buildSandbox,
+  sandboxWorkdirRoot: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
+  sqlDialect: dialect,
+  // Mount `file` + `github_repository` session resources into the sandbox
+  // before each turn. The CF SessionDO does this itself; the Node runtime
+  // did not, so attachments and repos were recorded but never appeared in
+  // the sandbox. Files use the sandbox's writeFileBytes primitive (same as
+  // the CF mountFile); repos reuse the CF mountGitRepo verbatim, which
+  // drives the sandbox's native gitCheckout (belljar proxies it to the
+  // cloudflare/sandbox git endpoint).
+  mountSessionResources: mountNodeSessionResources,
   // Promote files the agent wrote to /mnt/session/outputs into the Files
   // API (scope_id = session, downloadable) at turn completion, so
   // files.list({scope_id}) surfaces them the way Anthropic's API does.
@@ -2075,6 +2093,48 @@ const app = new Hono<{
 app.use("*", requestMetrics({ recorder: metrics }));
 app.use("*", tracerMiddleware({ tracer }));
 
+app.route("/internal/belljar/lifecycle", buildBelljarLifecycleRoutes({
+  token: process.env.BELLJAR_TOKEN,
+  getSession: (sessionId) => sessionsService.getById({ sessionId }),
+  completed: async (sessionId, bootId) => {
+    const rows = await sql.prepare("SELECT data FROM session_events WHERE session_id = ? AND type = ? ORDER BY seq DESC")
+      .bind(sessionId, "session.sandbox_startup").all<{ data: string }>();
+    return (rows.results ?? []).some((row) => {
+      const event = JSON.parse(row.data) as { boot_id?: string; status?: string };
+      return event.boot_id === bootId && (event.status === "succeeded" || event.status === "skipped");
+    });
+  },
+  emit: async (sessionId, event) => {
+    logger.info({ op: "sandbox.startup", session_id: sessionId, boot_id: event.boot_id,
+      trigger: event.trigger, status: event.status, duration_ms: event.duration_ms, exit_code: event.exit_code }, "Sandbox startup");
+    const log = newEventLog(sessionId);
+    event.id = `sevt_${generateEventId()}`;
+    event.processed_at = new Date().toISOString();
+    await log.appendAsync(event);
+    const events = await log.getEventsAsync();
+    const stored = events.find((e) => e.id === event.id);
+    if (stored) hub.publish(sessionId, stored);
+  },
+  buildSandbox: (payload) => new BelljarSandbox({
+    baseUrl: process.env.BELLJAR_URL ?? "", token: process.env.BELLJAR_TOKEN,
+    sessionId: payload.ownerId, initialization: { bootId: payload.bootId, token: payload.initializationToken },
+  }),
+  prepare: async (session, sandbox, trigger) => {
+    // Revival/wake keep the authoritative workspace volume. Only a fresh
+    // container without retained workspace may need the archive fallback.
+    if (trigger === "create") {
+      const handle = await workspaceBackups.latest({ sessionId: session.id, tenantId: session.tenant_id });
+      if (handle) {
+        const restored = await workspaceBackups.restore({ sessionId: session.id, tenantId: session.tenant_id, sandbox, handle });
+        if (!restored.ok) throw new Error(`Workspace restore failed: ${restored.error ?? "unknown error"}`);
+      }
+    }
+    // Restore can contain an older CA file; always refresh trust afterwards.
+    await sandbox.prepareInitialization({ sessionId: session.id, tenantId: session.tenant_id });
+    await mountNodeSessionResources({ sessionId: session.id, tenantId: session.tenant_id, sandbox, strict: true });
+  },
+}));
+
 // Prometheus scrape endpoint. When METRICS_BIND_TOKEN is set, callers must
 // pass it in `x-metrics-token`; absent, the endpoint is open on the same
 // port (acceptable for self-host single-operator deploys, documented in
@@ -2311,6 +2371,7 @@ v1.route("/sessions", buildManagedSessionsApi({
 }));
 v1.route("/oma/sessions", buildSessionRoutes({
   services,
+  supportsStartupScripts: process.env.SANDBOX_PROVIDER?.toLowerCase() === "belljar",
   router: sessionRouter,
   outputs: nodeOutputsAdapter(outputsRoot),
   lifecycle: {
@@ -2325,18 +2386,23 @@ v1.route("/oma/sessions", buildSessionRoutes({
       await sessionRegistry.syncMemoryMounts(sessionId, tenantId);
     },
   },
-  // Node has no per-tenant cloud environments yet — every agent is treated
-  // as a local runtime. The package's loadEnvironment hook returns a
-  // synthetic snapshot so session create doesn't 404 on missing env_id.
+  // Preserve actual environment configuration in session snapshots. The
+  // synthetic fallback keeps legacy local-runtime environments working.
   localRuntimeEnvId: "env-local-runtime",
-  loadEnvironment: async ({ environmentId }) => {
-    return {
-      id: environmentId,
-      runtime: "local",
-      sandbox_template: null,
-    } as unknown as import("@open-managed-agents/shared").EnvironmentConfig;
-  },
+  loadEnvironment: loadEnvironmentSnapshot,
 }));
+v1.post("/sessions/:id/startup/retry", async (c) => {
+  const sessionId = c.req.param("id");
+  const session = await sessionsService.getById({ sessionId });
+  if (!session || session.tenant_id !== c.get("tenant_id")) return c.json({ error: "Session not found" }, 404);
+  if (session.status === "terminated" || !startupEnabled(session.environment_snapshot?.config?.startup)) {
+    return c.json({ error: "Session has no active startup script" }, 400);
+  }
+  if (process.env.SANDBOX_PROVIDER?.toLowerCase() !== "belljar") return c.json({ error: "Startup scripts require Belljar" }, 400);
+  const sandbox = new BelljarSandbox({ baseUrl: process.env.BELLJAR_URL ?? "", token: process.env.BELLJAR_TOKEN, sessionId });
+  try { await sandbox.retryStartup(); return c.json({ ready: true }); }
+  catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 503); }
+});
 v1.route("/vaults", managedVaultsRoutes);
 v1.route("/vaults", managedCredentialsRoutes);
 v1.route("/user_profiles", managedUserProfilesRoutes);
@@ -2817,15 +2883,8 @@ app.route("/v1/oma/deployments", buildDeploymentRoutes({
   services,
   router: sessionRouter,
   localRuntimeEnvId: "env-local-runtime",
-  // Same synthetic env snapshot as the sessions mount — Node has no
-  // per-tenant cloud environments yet.
-  loadEnvironment: async ({ environmentId }) => {
-    return {
-      id: environmentId,
-      runtime: "local",
-      sandbox_template: null,
-    } as unknown as import("@open-managed-agents/shared").EnvironmentConfig;
-  },
+  // Pin environment configuration for manual and scheduled deployments too.
+  loadEnvironment: loadEnvironmentSnapshot,
 }));
 // ─── Integrations gateway (OAuth callbacks, setup pages, Linear MCP,
 // GitHub internal refresh, webhooks) — mounted on `app` (NOT under /v1)
@@ -2940,13 +2999,7 @@ const scheduler = buildNodeScheduler({
     },
     router: sessionRouter,
     localRuntimeEnvId: "env-local-runtime",
-    loadEnvironment: async ({ environmentId }) => {
-      return {
-        id: environmentId,
-        runtime: "local",
-        sandbox_template: null,
-      } as unknown as import("@open-managed-agents/shared").EnvironmentConfig;
-    },
+    loadEnvironment: loadEnvironmentSnapshot,
   },
 });
 await scheduler.start();

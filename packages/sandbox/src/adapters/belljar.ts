@@ -63,7 +63,7 @@
 import { mkdirSync } from "node:fs";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
-import type { ProcessHandle, SandboxExecutor, SandboxFactory, SandboxRegistryAuth } from "../ports";
+import type { ProcessHandle, SandboxExecutor, SandboxExecResult, SandboxFactory, SandboxRegistryAuth } from "../ports";
 import { sessionVaultProxyUrl } from "../vault-proxy";
 import { getLogger } from "@open-managed-agents/observability";
 
@@ -88,6 +88,10 @@ interface BelljarProcessRecord {
 }
 
 export interface BelljarSandboxOptions {
+  /** OMA owns initialization; Belljar calls back before releasing traffic. */
+  startupManaged?: boolean;
+  /** Scoped setup access supplied by Belljar's lifecycle callback. Never persisted. */
+  initialization?: { bootId: string; token: string };
   /** belljar base URL, e.g. `http://127.0.0.1:8877`. */
   baseUrl: string;
   /** Bearer token (BELLJAR_TOKEN on the belljar side). Optional only for
@@ -132,6 +136,7 @@ export interface BelljarSandboxOptions {
 }
 
 export class BelljarSandbox implements SandboxExecutor {
+  get initializesWorkspace(): boolean { return this.opts.startupManaged === true; }
   private readonly sandboxId: string;
   private createPromise: Promise<void> | null = null;
   private volumes: Array<{ hostPath: string; containerPath: string; readOnly: boolean }> = [];
@@ -169,6 +174,14 @@ export class BelljarSandbox implements SandboxExecutor {
   // ── core API ─────────────────────────────────────────────────────────
 
   async exec(command: string, timeout?: number): Promise<string> {
+    const result = await this.execResult(command, timeout);
+    return (
+      (result.stdout + (result.stderr ? `\n${result.stderr}` : "")).replace(/\s+$/, "") +
+      (result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "")
+    );
+  }
+
+  async execResult(command: string, timeout?: number): Promise<SandboxExecResult> {
     // Subshell-wrap: the runtime executes commands in a session's
     // persistent shell, so a bare `exit 1` kills the shell and every
     // later exec 410s with SESSION_TERMINATED. `( … )` confines exit to
@@ -180,13 +193,7 @@ export class BelljarSandbox implements SandboxExecutor {
       env: this.buildEnv(command),
       timeoutMs: timeout ?? this.defaultTimeoutMs,
     });
-    const result = (await res.json()) as BelljarExecResult;
-    // Match @cloudflare/sandbox's behaviour: combined stdout+stderr,
-    // newline-trimmed, plus an exit-code suffix the harness can parse.
-    return (
-      (result.stdout + (result.stderr ? `\n${result.stderr}` : "")).replace(/\s+$/, "") +
-      (result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "")
-    );
+    return (await res.json()) as BelljarExecResult;
   }
 
   async startProcess(command: string): Promise<ProcessHandle | null> {
@@ -368,6 +375,18 @@ export class BelljarSandbox implements SandboxExecutor {
 
   // ── lifecycle ────────────────────────────────────────────────────────
 
+  /** Prepare the callback's independent adapter without recursively creating the sandbox. */
+  async prepareInitialization(context: { tenantId: string; sessionId: string }): Promise<void> {
+    if (!this.opts.initialization) throw new Error("Initialization access is required");
+    await this.setOutboundContext(context);
+    await this.uploadPendingCaRaw();
+  }
+
+  async retryStartup(): Promise<void> {
+    const res = await this.fetch(`/v1/sandboxes/${this.sandboxId}/initialization/retry`, { method: "POST" });
+    if (!res.ok) throw new Error(`Startup retry failed: ${res.status} ${await res.text()}`);
+  }
+
   async renewActivityTimeout(): Promise<void> {
     // Any proxied request resets belljar's idle timer (BELLJAR_SLEEP_AFTER)
     // and wakes a sleeping container. Ping only if we ever created it —
@@ -399,6 +418,9 @@ export class BelljarSandbox implements SandboxExecutor {
   // ── helpers ──────────────────────────────────────────────────────────
 
   private ensureSandbox(): Promise<void> {
+    // The callback runs while the original create/exec awaits readiness.
+    // It uses an independent adapter, bound to one live initialization attempt.
+    if (this.opts.initialization) return Promise.resolve();
     if (!this.createPromise) {
       this.createPromise = this.createSandbox();
       this.createPromise.catch(() => {
@@ -415,6 +437,7 @@ export class BelljarSandbox implements SandboxExecutor {
     if (this.volumes.length) body.mounts = this.volumes;
     if (this.opts.isolation) body.isolation = this.buildIsolation();
     if (this.bootEnv) body.env = this.bootEnv;
+    if (this.opts.startupManaged) body.lifecycle = { ownerId: this.opts.sessionId };
     const res = await this.fetch("/v1/sandboxes", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -422,6 +445,10 @@ export class BelljarSandbox implements SandboxExecutor {
     });
     if (!res.ok) {
       throw new Error(`belljar create failed: ${res.status} ${await res.text()}`);
+    }
+    if (this.opts.startupManaged) {
+      const result = await res.json() as { sandbox?: { lifecycle?: unknown } };
+      if (!result.sandbox?.lifecycle) throw new Error("Belljar does not support managed startup scripts; upgrade Belljar before using this environment");
     }
     this.logger.log(`sandbox ${this.sandboxId} ready (${this.opts.image ?? "server default image"})`);
     if (this.pendingCaUpload) {
@@ -520,7 +547,7 @@ export class BelljarSandbox implements SandboxExecutor {
     // reviving transparently inside that window — this error only fires
     // beyond it, or after a manual delete). Provision a fresh sandbox and
     // retry once; the workspace starts empty, so re-stage the vault CA.
-    if (res.status === 404) {
+    if (res.status === 404 && !this.opts.initialization) {
       const text = await res.text();
       if (!text.includes("SANDBOX_NOT_FOUND")) {
         throw new Error(`belljar ${path} failed: 404 ${text}`);
@@ -548,6 +575,10 @@ export class BelljarSandbox implements SandboxExecutor {
   private fetch(path: string, init: RequestInit = {}): Promise<Response> {
     const url = `${this.opts.baseUrl.replace(/\/$/, "")}${path}`;
     const headers = new Headers(init.headers);
+    if (this.opts.initialization) {
+      headers.set("x-belljar-boot-id", this.opts.initialization.bootId);
+      headers.set("x-belljar-initialization", this.opts.initialization.token);
+    }
     if (this.opts.token && !headers.has("Authorization")) {
       headers.set("Authorization", `Bearer ${this.opts.token}`);
     }
@@ -658,6 +689,7 @@ export const sandboxFactory: SandboxFactory = async (ctx, env) => {
     // unset to use the belljar server's BELLJAR_IMAGE default.
     image: ctx.image ?? env.SANDBOX_IMAGE,
     registryAuth: ctx.registryAuth,
+    startupManaged: ctx.startupManaged,
     sessionId: ctx.sessionId,
     memoryRoot: ctx.memoryRoot,
     outputsRoot: ctx.outputsRoot,
