@@ -1,3 +1,5 @@
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { startTransition, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, Link } from "react-router";
@@ -969,13 +971,13 @@ export function SessionDetail() {
           {/* Vault swap — mid-session credential switch. The outbound proxy
               resolves credentials live per call, so the new set governs the
               very next interaction; no session restart needed. */}
-          <button
+          <Button variant="ghost"
             onClick={() => setShowVaultSwap(true)}
             className="inline-flex items-center justify-center px-2 py-0.5 min-h-11 sm:min-h-0 rounded-md text-xs text-fg-subtle hover:text-fg hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             title="Swap the session's credential vaults — applies from the next message"
           >
             {sessionMeta.vaultIds?.length ? "Swap vaults" : "+ Vaults"}
-          </button>
+          </Button>
           <SessionDurationBadge events={events} />
           {sessionMeta.createdAt && <RelativeTimeBadge iso={sessionMeta.createdAt} />}
           <div className="ml-auto flex items-center gap-2">
@@ -1282,16 +1284,15 @@ function VaultSwapModal({
       ) : (
         <div className="space-y-1">
           {vaults.map((v) => (
-            <label key={v.id} className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="checkbox"
+            <Label key={v.id} className="flex items-center gap-2 text-sm cursor-pointer">
+              <Checkbox
                 checked={selected.includes(v.id)}
-                onChange={() => toggle(v.id)}
+                onCheckedChange={() => toggle(v.id)}
                 className="rounded accent-brand"
               />
               <span className="text-fg">{v.name}</span>
               <span className="text-fg-subtle font-mono text-xs">{v.id}</span>
-            </label>
+            </Label>
           ))}
         </div>
       )}

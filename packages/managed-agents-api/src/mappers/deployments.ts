@@ -17,7 +17,7 @@ import type {
 import { fromRubric, fromUserMessageContent, toSendableSessionEvent } from "./session-events";
 
 type WireDeploymentEvent = DeploymentCreateBody["initial_events"][number];
-type WireDeploymentResource = NonNullable<DeploymentCreateBody["resources"]>[number];
+type WireDeploymentResource = NonNullable<DeploymentUpdateBody["resources"]>[number];
 
 function toAgentSelector(
   agent: DeploymentCreateBody["agent"],

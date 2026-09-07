@@ -1,3 +1,4 @@
+import type { SkillGitHubSource } from "../domain/skill";
 export interface SkillUploadFileInput {
   filename: string;
   mimeType: string;
@@ -5,6 +6,7 @@ export interface SkillUploadFileInput {
 }
 
 export interface SkillView {
+  githubSource?: SkillGitHubSource;
   id: string;
   createdAt: string;
   displayTitle: string | null;
@@ -14,6 +16,7 @@ export interface SkillView {
 }
 
 export interface CreateSkillCommand {
+  githubSource?: SkillGitHubSource;
   files: SkillUploadFileInput[];
   displayTitle?: string | null;
 }

@@ -37,6 +37,8 @@ export type DeploymentResource =
     };
 
 export interface DeploymentSchedule {
+  /** Internal reservation identity used to admit a cron slot only once. */
+  lastRunId?: string;
   expression: string;
   timezone: string;
   lastRunAt?: string | null;

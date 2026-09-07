@@ -21,6 +21,8 @@ export const skillResponseSchema: z.ZodType<
   SkillCreateResponse | SkillRetrieveResponse | SkillListResponse
 > = z
   .object({
+    github_source: z.object({ repo: z.string(), ref: z.string().optional(), path: z.string().optional(),
+      skill_dir: z.string().optional(), commit: z.string().optional(), content_hash: z.string().optional(), synced_at: z.string().optional() }).strict().optional(),
     id: z.string().min(1),
     created_at: z.string(),
     display_title: z.string().nullable(),

@@ -80,7 +80,7 @@ function decodeCredentialCursor(
 }
 
 function resolveCreateAuth(input: CredentialAuthInput): CredentialAuth {
-  if (input.type === "static_bearer") return { ...input };
+  if (input.type === "static_bearer" || input.type === "container_registry" || input.type === "cap_cli") return structuredClone(input);
   if (input.type === "environment_variable") {
     return {
       type: input.type,
@@ -114,8 +114,16 @@ function resolveCreateAuth(input: CredentialAuthInput): CredentialAuth {
 }
 
 function toAuthView(auth: CredentialAuth): CredentialAuthView {
+  if (auth.type === "container_registry") {
+    return { type: auth.type, ...(auth.registry !== undefined && { registry: auth.registry }) };
+  }
+  if (auth.type === "cap_cli") {
+    return { type: auth.type, cliId: auth.cliId,
+      ...(auth.mcpServerUrl !== undefined && { mcpServerUrl: auth.mcpServerUrl }),
+      ...(auth.handle !== undefined && { handle: auth.handle }) };
+  }
   if (auth.type === "static_bearer") {
-    return { type: auth.type, mcpServerUrl: auth.mcpServerUrl };
+    return { type: auth.type, mcpServerUrl: auth.mcpServerUrl, ...(auth.handle !== undefined && { handle: auth.handle }) };
   }
   if (auth.type === "environment_variable") {
     return {
@@ -216,11 +224,21 @@ function patchAuth(
   update: CredentialAuthUpdate,
 ): CredentialAuth | null {
   if (current.type !== update.type) return null;
+  if (current.type === "container_registry" && update.type === "container_registry") {
+    return { ...current, ...update };
+  }
+  if (current.type === "cap_cli" && update.type === "cap_cli") {
+    const { handle, ...patch } = update;
+    const next = { ...current, ...patch };
+    if (handle === null) delete next.handle;
+    else if (handle !== undefined) next.handle = handle;
+    return next;
+  }
   if (current.type === "static_bearer" && update.type === "static_bearer") {
-    return {
-      ...current,
-      ...(update.token !== undefined && { token: update.token }),
-    };
+    const next = { ...current, ...(update.token !== undefined && { token: update.token }) };
+    if (update.handle === null) delete next.handle;
+    else if (update.handle !== undefined) next.handle = update.handle;
+    return next;
   }
   if (
     current.type === "environment_variable" &&

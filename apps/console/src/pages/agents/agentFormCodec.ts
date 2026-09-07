@@ -404,7 +404,8 @@ export function mergeFormIntoConfig(
     payload.multiagent = form.callableAgents.length
       ? { type: "coordinator", agents: form.callableAgents }
       : null;
-    payload.enable_general_subagent = form.enableGeneralSubagent;
+    if (form.enableGeneralSubagent || base?.enable_general_subagent !== undefined) payload.enable_general_subagent = form.enableGeneralSubagent;
+    else delete payload.enable_general_subagent;
   } else {
     if (form.system) payload.system = form.system;
     else delete payload.system;

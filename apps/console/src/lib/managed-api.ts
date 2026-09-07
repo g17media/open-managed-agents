@@ -352,7 +352,9 @@ export function createManagedApiClient(
         ),
       update: (
         deploymentId: string,
-        params: WithoutBetas<DeploymentUpdateParams>,
+        params: Omit<WithoutBetas<DeploymentUpdateParams>, "resources"> & {
+          resources?: (NonNullable<DeploymentUpdateParams["resources"]>[number] | BetaManagedAgentsDeployment["resources"][number])[] | null;
+        },
       ) =>
         request<BetaManagedAgentsDeployment>(
           `/v1/deployments/${id(deploymentId)}`,

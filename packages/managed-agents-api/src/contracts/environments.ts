@@ -7,8 +7,32 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/environments/environments";
 import { z } from "zod";
 
-export type EnvironmentCreateBody = Omit<EnvironmentCreateParams, "betas">;
-export type EnvironmentUpdateBody = Omit<EnvironmentUpdateParams, "betas">;
+export interface EnvironmentRuntimeFields {
+  image?: string;
+  image_registry_auth?: { vault_id: string; credential_id: string };
+  context?: string;
+  startup?: {
+    script: string;
+    enabled?: boolean;
+    triggers?: Array<"create" | "wake" | "revive">;
+    timeout_seconds?: number;
+  };
+}
+type Config = NonNullable<EnvironmentCreateParams["config"]> & EnvironmentRuntimeFields;
+export type EnvironmentCreateBody = Omit<EnvironmentCreateParams, "betas" | "config"> & { config?: Config | null };
+export type EnvironmentUpdateBody = Omit<EnvironmentUpdateParams, "betas" | "config"> & { config?: Config | null };
+const runtimeFields = {
+  image: z.string().trim().min(1).optional(),
+  image_registry_auth: z.object({ vault_id: z.string().min(1), credential_id: z.string().min(1) }).strict().optional(),
+  context: z.string().optional(),
+  startup: z.object({
+    script: z.string().min(1).max(65_536),
+    enabled: z.boolean().optional(),
+    triggers: z.array(z.enum(["create", "wake", "revive"])).optional(),
+    timeout_seconds: z.number().int().min(1).max(600).optional(),
+  }).strict().optional(),
+};
+
 export type EnvironmentListQuery = Omit<EnvironmentListParams, "betas">;
 
 const limitedNetworkInputSchema = z
@@ -40,6 +64,7 @@ const environmentConfigInputSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("cloud"),
+      ...runtimeFields,
       networking: z
         .union([unrestrictedNetworkSchema, limitedNetworkInputSchema])
         .nullable()
@@ -106,6 +131,7 @@ const environmentConfigResponseSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("cloud"),
+      ...runtimeFields,
       networking: z.union([
         unrestrictedNetworkSchema,
         limitedNetworkResponseSchema,

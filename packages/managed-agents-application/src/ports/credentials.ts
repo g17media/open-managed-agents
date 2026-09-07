@@ -1,4 +1,6 @@
 import type {
+  ContainerRegistryAuth,
+  CliCredentialAuth,
   CredentialInjectionLocation,
   CredentialNetworking,
 } from "../domain/credential";
@@ -54,6 +56,8 @@ export interface CredentialOAuthRefreshUpdate {
 }
 
 export type CredentialAuthInput =
+  | ContainerRegistryAuth
+  | (Omit<CliCredentialAuth, "token"> & { token: string })
   | {
       type: "mcp_oauth";
       accessToken: string;
@@ -65,6 +69,7 @@ export type CredentialAuthInput =
       type: "static_bearer";
       token: string;
       mcpServerUrl: string;
+      handle?: string;
     }
   | {
       type: "environment_variable";
@@ -75,13 +80,15 @@ export type CredentialAuthInput =
     };
 
 export type CredentialAuthView =
+  | Pick<ContainerRegistryAuth, "type" | "registry">
+  | Pick<CliCredentialAuth, "type" | "cliId" | "mcpServerUrl" | "handle">
   | {
       type: "mcp_oauth";
       mcpServerUrl: string;
       expiresAt?: string | null;
       refresh?: CredentialOAuthRefreshView | null;
     }
-  | { type: "static_bearer"; mcpServerUrl: string }
+  | { type: "static_bearer"; mcpServerUrl: string; handle?: string }
   | {
       type: "environment_variable";
       injectionLocation: CredentialInjectionLocationView;
@@ -90,13 +97,15 @@ export type CredentialAuthView =
     };
 
 export type CredentialAuthUpdate =
+  | ContainerRegistryAuth
+  | { type: "cap_cli"; token?: string | null; handle?: string | null; mcpServerUrl?: string; extras?: Record<string, string> }
   | {
       type: "mcp_oauth";
       accessToken?: string | null;
       expiresAt?: string | null;
       refresh?: CredentialOAuthRefreshUpdate | null;
     }
-  | { type: "static_bearer"; token?: string | null }
+  | { type: "static_bearer"; token?: string | null; handle?: string | null }
   | {
       type: "environment_variable";
       injectionLocation?: CredentialInjectionLocationInput;

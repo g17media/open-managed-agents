@@ -879,7 +879,7 @@ function BasicTab({
       {!form.runtimeId && (
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Speed</label>
+            <Label className="text-sm text-fg-muted block mb-1">Speed</Label>
             <Select
               value={form.modelSpeed === "fast" ? "fast" : "standard"}
               onValueChange={(v) => setForm({ ...form, modelSpeed: v as "standard" | "fast" })}
@@ -889,7 +889,7 @@ function BasicTab({
             </Select>
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Reasoning</label>
+            <Label className="text-sm text-fg-muted block mb-1">Reasoning</Label>
             <Select
               value={form.modelReasoning || "__default__"}
               onValueChange={(v) =>

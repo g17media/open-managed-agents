@@ -32,7 +32,7 @@ export type DeploymentResourceInput =
     }
   | {
       kind: "github_repository";
-      authorizationToken: string;
+      authorizationToken?: string;
       url: string;
       checkout?: RepositoryCheckout | null;
       mountPath?: string | null;
@@ -101,6 +101,8 @@ export interface DeploymentsPage {
 }
 
 export interface DeploymentCommand {
+  /** Set by the scheduler; HTTP manual-run requests never accept this field. */
+  scheduledAt?: string;
   deploymentId: string;
 }
 

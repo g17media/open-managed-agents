@@ -13,7 +13,10 @@ import {
 import { budgetSchema } from "./sessions";
 
 export type DeploymentCreateBody = Omit<DeploymentCreateParams, "betas">;
-export type DeploymentUpdateBody = Omit<DeploymentUpdateParams, "betas">;
+type WireDeploymentResource = NonNullable<DeploymentUpdateParams["resources"]>[number];
+type UpdateDeploymentResource = Exclude<WireDeploymentResource, { type: "github_repository" }> |
+  (Omit<Extract<WireDeploymentResource, { type: "github_repository" }>, "authorization_token"> & { authorization_token?: string });
+export type DeploymentUpdateBody = Omit<DeploymentUpdateParams, "betas" | "resources"> & { resources?: UpdateDeploymentResource[] | null };
 export type DeploymentListQuery = Omit<DeploymentListParams, "betas">;
 
 const deploymentAgentInputSchema = z.union([
@@ -80,6 +83,12 @@ const deploymentResourceInputSchema = z.discriminatedUnion("type", [
       instructions: z.string().nullable().optional(),
     })
     .strict(),
+]);
+
+const deploymentResourceUpdateSchema = z.discriminatedUnion("type", [
+  deploymentResourceInputSchema.options[0],
+  deploymentResourceInputSchema.options[1].partial({ authorization_token: true }),
+  deploymentResourceInputSchema.options[2],
 ]);
 
 const deploymentResourceResponseSchema = z.discriminatedUnion("type", [
@@ -180,7 +189,7 @@ export const deploymentUpdateBodySchema: z.ZodType<DeploymentUpdateBody> = z
       .optional(),
     name: z.string().min(1).optional(),
     resources: z
-      .array(deploymentResourceInputSchema)
+      .array(deploymentResourceUpdateSchema)
       .max(500)
       .nullable()
       .optional(),

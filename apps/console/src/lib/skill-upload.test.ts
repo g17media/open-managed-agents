@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { extractManagedSkillFiles } from "./skill-upload";
+import { zipSync } from "fflate";
+import { extractManagedSkillFiles, previewManagedSkillFiles } from "./skill-upload";
 
 function buffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
@@ -16,6 +17,17 @@ const SKILL_ZIP =
 const EMPTY_ZIP = "UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==";
 
 describe("extractManagedSkillFiles", () => {
+  it("previews native version downloads without corrupting binary attachments", () => {
+    const archive = zipSync({
+      "guide/SKILL.md": Uint8Array.from(new TextEncoder().encode("Skill instructions")),
+      "guide/asset.bin": new Uint8Array([0, 255, 128]),
+    });
+    expect(previewManagedSkillFiles(buffer(archive))).toEqual([
+      { filename: "guide/SKILL.md", content: "Skill instructions", encoding: "utf8" },
+      { filename: "guide/asset.bin", content: "AP+A", encoding: "base64" },
+    ]);
+  });
+
   it("turns a skill zip into SDK-style files[] while preserving paths", async () => {
     const zip = new File(
       [

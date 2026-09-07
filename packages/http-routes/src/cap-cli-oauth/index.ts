@@ -1,3 +1,4 @@
+import type { OAuthRoutesDeps } from "../oauth";
 // Cap CLI OAuth Device Authorization Grant routes.
 //
 // Distinct from /v1/oma/oauth/* (which is browser Authorization Code + PKCE
@@ -43,6 +44,7 @@ import {
 } from "@open-managed-agents/cap";
 
 export interface CapCliOauthRoutesDeps {
+  credentialsFor?: OAuthRoutesDeps["credentialsFor"];
   services: RouteServicesArg;
 }
 
@@ -79,7 +81,8 @@ export function buildCapCliOauthRoutes(deps: CapCliOauthRoutesDeps) {
     const tenantId = c.var.tenant_id;
     if (!tenantId) return c.json({ error: "no tenant" }, 401);
 
-    if (!(await services.vaults.exists({ tenantId, vaultId: body.vault_id }))) {
+    const native = await deps.credentialsFor?.(tenantId);
+    if (!(native ? await native.vaultExists(body.vault_id) : await services.vaults.exists({ tenantId, vaultId: body.vault_id }))) {
       return c.json({ error: "vault not found" }, 404);
     }
 
@@ -181,6 +184,12 @@ export function buildCapCliOauthRoutes(deps: CapCliOauthRoutesDeps) {
         // Write cap_cli credential into the vault. This is the only place
         // the access_token + refresh_token actually land in OMA storage.
         const auth = capCliAuthFromToken(session.cli_id, result.token);
+        const native = await deps.credentialsFor?.(tenantId);
+        if (native) {
+          const credentialId = await native.saveCliGrant({ vaultId: session.vault_id, cliId: session.cli_id, auth });
+          await services.kv.delete(kvSessionKey(body.session_id));
+          return c.json({ status: "ready", credential_id: credentialId });
+        }
         // Archive any existing non-archived cap_cli credentials in the same
         // vault that share the same cli_id. Without this, repeated re-auth
         // (user re-running the OAuth flow when a token went stale)

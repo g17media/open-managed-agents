@@ -27,7 +27,7 @@ export {
   userMessageContentSchema,
 } from "./session-event-inputs";
 
-export type SessionEventSendBody = Omit<EventSendParams, "betas">;
+export type SessionEventSendBody = Omit<EventSendParams, "betas"> & { vault_ids?: string[] };
 export type SessionEventListQuery = Omit<EventListParams, "betas">;
 export type SessionEventStreamQuery = Omit<EventStreamParams, "betas">;
 export type SessionEventListResponse = Pick<
@@ -57,7 +57,7 @@ export const sessionEventStreamQuerySchema: z.ZodType<SessionEventStreamQuery> =
   .strict();
 
 export const sessionEventSendBodySchema: z.ZodType<SessionEventSendBody> = z
-  .object({ events: z.array(sendableEventSchema).min(1) })
+  .object({ events: z.array(sendableEventSchema).min(1), vault_ids: z.array(z.string().min(1)).max(50).optional() })
   .strict()
   .superRefine(({ events }, context) => {
     for (const [index, event] of events.entries()) {
@@ -311,6 +311,13 @@ const spanModelUsageSchema = z
   .strict();
 
 const historySessionEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    id: z.string().min(1), type: z.literal("session.sandbox_startup"), processed_at: z.string(),
+    boot_id: z.string(), trigger: z.enum(["create", "wake", "revive"]),
+    status: z.enum(["running", "succeeded", "failed", "skipped"]),
+    script_sha256: z.string().optional(), duration_ms: z.number().optional(), exit_code: z.number().int().optional(),
+    stdout: z.string().optional(), stderr: z.string().optional(), message: z.string().optional(),
+  }).strict(),
   z
     .object({
       id: z.string().min(1),
@@ -598,7 +605,7 @@ const sessionEventDeltaSchema = z
   })
   .strict();
 
-export const sessionStreamEventResponseSchema: z.ZodType<BetaManagedAgentsStreamSessionEvents> =
+export const sessionStreamEventResponseSchema =
   z.union([
     sentEventSchema,
     sessionUsageEventSchema,

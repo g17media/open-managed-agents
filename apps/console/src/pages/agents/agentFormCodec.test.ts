@@ -98,7 +98,7 @@ describe("agentFormCodec lossless update", () => {
     form.modelReasoning = "max";
     expect(buildModelValue(form)).toEqual({ id: "claude-opus-4-7", effort: { type: "max" } });
 
-    expect(agentToForm(sampleAgent({ model: "claude-opus-4-7" })).modelReasoning).toBe("");
+    expect(agentToForm(sampleAgent({ model: { id: "claude-opus-4-7" } })).modelReasoning).toBe("");
     expect(
       agentToForm(sampleAgent({ model: { id: "x", effort: { type: "bogus" } } as unknown as AgentRecord["model"] })).modelReasoning,
     ).toBe("");

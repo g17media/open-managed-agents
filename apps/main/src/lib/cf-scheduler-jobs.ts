@@ -28,7 +28,7 @@ function envCron(env: Env, key: string, fallback: string): string {
   return raw && raw.trim() ? raw : fallback;
 }
 
-export function buildCfScheduler(env: Env): CfScheduler {
+export function buildCfScheduler(env: Env, deps: { managedDeploymentsTick?: () => Promise<void> } = {}): CfScheduler {
   const scheduler = createCfScheduler();
   const tickCron = envCron(env, "EVAL_TICK_CRON", "* * * * *");
   const memoryCron = envCron(env, "MEMORY_RETENTION_CRON", "* * * * *");
@@ -104,5 +104,10 @@ export function buildCfScheduler(env: Env): CfScheduler {
     }),
   });
 
+  if (deps.managedDeploymentsTick) scheduler.register({
+    name: "managed-deployments-tick",
+    cron: envCron(env, "DEPLOYMENTS_TICK_CRON", "* * * * *"),
+    handler: deps.managedDeploymentsTick,
+  });
   return scheduler;
 }

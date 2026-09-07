@@ -110,3 +110,9 @@ export type {
   WebhookHandlers,
   RateLimitHooks,
 } from "./integrations/gateway";
+
+export { nativeGitHubSkillPersistence } from "./skills/native-github";
+
+export type { OAuthCredentialPersistence } from "./oauth";
+
+export { nativeOAuthCredentials } from "./oauth/native";

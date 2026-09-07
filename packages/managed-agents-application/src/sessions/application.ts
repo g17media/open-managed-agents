@@ -313,6 +313,7 @@ export class SessionsApplicationService
       budget: command.budget ?? null,
       createdAt: timestamp,
       environmentId: command.environmentId,
+      environmentSnapshot: structuredClone(environment),
       metadata: command.metadata ?? {},
       outcomeEvaluations: [],
       resources: resolvedResources.resources,

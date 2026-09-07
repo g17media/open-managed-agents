@@ -11,7 +11,7 @@ import type {
 import { useApi } from "../lib/api";
 import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { useManagedApi } from "../lib/useManagedApi";
-import { extractManagedSkillFiles } from "../lib/skill-upload";
+import { extractManagedSkillFiles, previewManagedSkillFiles } from "../lib/skill-upload";
 import { Modal } from "../components/Modal";
 import { Button } from "@/components/ui/button";
 import { PopoverContent } from "@/components/ui/popover";
@@ -60,7 +60,6 @@ const SOURCE_OPTIONS: { value: SourceValue; label: string }[] = [
 // degradation for an unusual config.
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const SKILLS_API = "/v1/skills";
-const SKILLS_PREVIEW_API = "/v1/oma/skills";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -209,7 +208,7 @@ export function SkillsList() {
       if (ghRef.trim()) body.ref = ghRef.trim();
       if (ghPath.trim()) body.path = ghPath.trim();
       if (ghToken.trim()) body.token = ghToken.trim();
-      const res = await api<GitHubImportResponse>("/v1/skills/import/github", {
+      const res = await api<GitHubImportResponse>("/v1/oma/skills/import/github", {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -240,9 +239,9 @@ export function SkillsList() {
           skill_id: skill.id,
         }),
         managedApi.skills.versions.list(skill.id, { limit: 100 }),
-        api<Pick<VersionDetail, "files">>(
-          `${SKILLS_PREVIEW_API}/${skill.id}/versions/${skill.latest_version}`,
-        ).catch(() => ({ files: [] })),
+        managedApi.skills.versions.download(skill.latest_version, { skill_id: skill.id })
+          .then(async (response) => ({ files: previewManagedSkillFiles(await response.arrayBuffer()) }))
+          .catch(() => ({ files: [] })),
       ]);
       setDetail({
         ...skill,
@@ -562,7 +561,7 @@ export function SkillsList() {
           {/* Mode toggle */}
           <div className="inline-flex rounded-lg border border-border p-0.5 bg-bg-surface/50">
             {(["zip", "github"] as const).map((m) => (
-              <button
+              <Button variant="ghost"
                 key={m}
                 type="button"
                 disabled={createUploading || ghImporting}
@@ -578,7 +577,7 @@ export function SkillsList() {
                 ].join(" ")}
               >
                 {m === "zip" ? "Upload .zip" : "From GitHub"}
-              </button>
+              </Button>
             ))}
           </div>
 
@@ -715,9 +714,9 @@ export function SkillsList() {
               </div>
               {detail.github_source && (
                 <div className="col-span-2">
-                  <label className="text-xs text-fg-muted block mb-0.5">
+                  <Label className="text-xs text-fg-muted block mb-0.5">
                     GitHub Source
-                  </label>
+                  </Label>
                   <p className="text-sm font-mono text-fg-muted break-all">
                     {detail.github_source.repo}
                     {detail.github_source.ref ? `@${detail.github_source.ref}` : ""}

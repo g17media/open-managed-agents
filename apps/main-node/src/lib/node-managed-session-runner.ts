@@ -93,6 +93,8 @@ export interface DefaultNodeManagedSessionRunnerDependencies {
     input: ManagedRunnerContext & { sandbox: SandboxExecutor },
   ): Promise<HarnessContext["tools"]>;
   buildHarness(): HarnessInterface;
+  prepareSession?(input: ManagedRunnerContext & { sandbox: SandboxExecutor }): Promise<void>;
+  completeSession?(input: ManagedRunnerContext & { sandbox: SandboxExecutor }): Promise<void>;
   buildHarnessContext(input: ManagedRunnerContext & {
     acceptedEvents: NodeManagedSessionRunnerAcceptInput["events"];
     sandbox: SandboxExecutor;
@@ -171,6 +173,7 @@ export class DefaultNodeManagedSessionRunner
     });
     runtime.broadcastProducedEvent({ type: "session.status_running" });
     try {
+      await this.dependencies.prepareSession?.({ workspaceId: input.workspaceId, session: input.session, environment: input.environment, sandbox });
       if (event.type === "user.tool_confirmation") {
         const toolUse = input.historyEvents.findLast(
           (candidate): candidate is ManagedNodeConfirmableToolUse =>
@@ -318,6 +321,11 @@ export class DefaultNodeManagedSessionRunner
       });
       throw error;
     } finally {
+      try {
+        await this.dependencies.completeSession?.({ workspaceId: input.workspaceId, session: input.session, environment: input.environment, sandbox });
+      } catch (error) {
+        runtime.broadcastProducedEvent({ type: "session.error", error: { type: "unknown_error", message: `Session output persistence failed: ${error instanceof Error ? error.message : String(error)}`, retryStatus: "exhausted" } });
+      }
       runtime.broadcastProducedEvent({
         type: "session.status_idle",
         stopReason: { type: "end_turn" },

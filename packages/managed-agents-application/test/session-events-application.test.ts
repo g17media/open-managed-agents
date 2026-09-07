@@ -112,6 +112,26 @@ const executionEnvironment: Environment = {
 };
 
 describe("SessionEventsApplicationService", () => {
+  it("persists an explicit empty vault set before dispatching the interaction", async () => {
+    const store = new MemorySessionEventStore();
+    const session = { ...activeSession, vaultIds: ["old_vault"] };
+    const service = new SessionEventsApplicationService({
+      workspaceId: "workspace_01", store,
+      sessions: { find: async () => session },
+      execution: { find: async () => ({ session, environment: executionEnvironment, revision: 1 }) },
+      stream: emptySessionEventStream,
+      dispatch: { sessionEventsAccepted: async () => {
+        expect(store.appendCalls).toHaveLength(1);
+        expect(store.appendCalls[0]).toMatchObject({ nextSession: { vaultIds: [] } });
+      } },
+      clock: { now: () => new Date("2026-09-07T00:00:00Z") },
+      ids: { nextEventId: () => "event_swap", nextOutcomeId: () => "outcome_01" },
+    });
+    expect(await service.sendSessionEvents({ sessionId: session.id, vaultIds: [],
+      events: [{ type: "user.message", content: [{ type: "text", text: "Continue without credentials" }] }],
+    })).toMatchObject({ type: "accepted" });
+  });
+
   it("assigns semantic IDs and processing time before appending events", async () => {
     let nextEvent = 0;
     const dispatchSignals: object[] = [];

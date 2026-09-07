@@ -49,7 +49,7 @@ describe("DefaultHarness model span lifecycle", () => {
       runtime,
     } as unknown as HarnessContext;
 
-    await new DefaultHarness().run(context);
+    await expect(new DefaultHarness().run(context)).rejects.toThrow("provider stream failed");
 
     const starts = events.filter(
       (event) => event.type === "span.model_request_start",

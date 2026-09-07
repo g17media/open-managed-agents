@@ -173,6 +173,27 @@ function makeDependencies(overrides: {
 }
 
 describe("Deployments application", () => {
+  it("retains a stored repository token when changing memory resources without resubmitting the secret", async () => {
+    const app = new DeploymentsApplicationService(makeDependencies({
+      store: {
+        find: async () => ({ deployment, resourceSecrets, revision: 1 }),
+        replace: async (input) => {
+          expect(input.next.resourceSecrets).toEqual(resourceSecrets);
+          expect(input.next.deployment.resources).toHaveLength(2);
+          return { type: "replaced", record: { ...input.next, revision: 2 } };
+        },
+      },
+      memoryStores: { find: async () => memoryStore },
+    }));
+    expect(await app.updateDeployment({ deploymentId: deployment.id, resources: [
+      { kind: "github_repository", url: "https://github.com/example/repo", mountPath: "/workspace/repo" },
+      { kind: "memory_store", memoryStoreId: memoryStore.id, access: "read_only" },
+    ] })).toMatchObject({ type: "updated" });
+    expect(await app.updateDeployment({ deploymentId: deployment.id, resources: [
+      { kind: "github_repository", url: "https://github.com/another/repo", mountPath: "/workspace/repo" },
+    ] })).toMatchObject({ type: "invalid_request" });
+  });
+
   it.each([
     [
       { name: "" },

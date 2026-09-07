@@ -22,3 +22,19 @@ export async function extractManagedSkillFiles(zip: File): Promise<File[]> {
   }
   return files;
 }
+
+export function previewManagedSkillFiles(zip: ArrayBuffer): Array<{ filename: string; content: string; encoding: "utf8" | "base64" }> {
+  return Object.entries(unzipSync(new Uint8Array(zip)))
+    .filter(([path]) => path !== "" && !path.endsWith("/"))
+    .map(([filename, bytes]) => {
+      try {
+        const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        if (content.includes("\0")) throw new Error("Binary file");
+        return { filename, content, encoding: "utf8" as const };
+      } catch {
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return { filename, content: btoa(binary), encoding: "base64" as const };
+      }
+    });
+}

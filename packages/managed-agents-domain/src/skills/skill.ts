@@ -1,4 +1,15 @@
+export interface SkillGitHubSource {
+  repo: string;
+  ref?: string;
+  path?: string;
+  skillDir?: string;
+  commit?: string;
+  contentHash?: string;
+  syncedAt?: string;
+}
+
 export interface Skill {
+  githubSource?: SkillGitHubSource;
   id: string;
   createdAt: string;
   displayTitle: string | null;
