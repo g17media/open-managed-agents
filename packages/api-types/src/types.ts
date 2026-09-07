@@ -152,6 +152,32 @@ export interface AgentConfig {
 
 // --- Environment ---
 
+export type SandboxStartupTrigger = "create" | "wake" | "revive";
+
+export interface SandboxStartupEvent extends EventBase {
+  type: "session.sandbox_startup";
+  boot_id: string;
+  trigger: SandboxStartupTrigger;
+  status: "running" | "succeeded" | "failed" | "skipped";
+  script_sha256?: string;
+  duration_ms?: number;
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+  message?: string;
+}
+
+export interface EnvironmentStartupConfig {
+  /** Bash source, executed by OMA inside the sandbox with its command environment. */
+  script: string;
+  /** Defaults to true. Disabling preserves the script and selected triggers. */
+  enabled?: boolean;
+  /** Defaults to all three startup transitions; an empty array disables execution. */
+  triggers?: SandboxStartupTrigger[];
+  /** Maximum script runtime, 1–600 seconds. Defaults to 120. */
+  timeout_seconds?: number;
+}
+
 export interface EnvironmentConfig {
   /** Always `"environment"` on the wire — Anthropic SDK uses this discriminator
    *  to recognize the resource type. Optional so existing internal callers that
@@ -195,6 +221,8 @@ export interface EnvironmentConfig {
     /** Extra context injected into the system prompt of every agent
      *  running a session in this environment. */
     context?: string;
+    /** OMA-managed initialization on self-host Belljar. Pinned at session creation. */
+    startup?: EnvironmentStartupConfig;
   };
   metadata?: Record<string, unknown>;
   created_at: string;
@@ -881,6 +909,7 @@ export type SessionEvent =
   | SessionStatusEvent
   | SessionErrorEvent
   | SessionWarningEvent
+  | SandboxStartupEvent
   | SessionOutcomeEvaluatedEvent
   | SessionThreadCreatedEvent
   | SessionThreadIdleEvent

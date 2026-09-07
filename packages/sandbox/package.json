@@ -12,6 +12,7 @@
     "./adapters/boxrun": "./src/adapters/boxrun.ts",
     "./adapters/belljar": "./src/adapters/belljar.ts",
     "./orchestrator": "./src/orchestrator.ts",
+    "./startup": "./src/startup.ts",
     "./vault-proxy": "./src/vault-proxy.ts"
   },
   "scripts": {
