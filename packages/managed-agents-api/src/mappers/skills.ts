@@ -48,6 +48,11 @@ export function toDeleteSkillCommand(skillId: string): DeleteSkillCommand {
 
 export function toSkillResponse(skill: SkillView): object {
   return {
+    ...(skill.githubSource !== undefined && { github_source: {
+      repo: skill.githubSource.repo, ref: skill.githubSource.ref, path: skill.githubSource.path,
+      skill_dir: skill.githubSource.skillDir, commit: skill.githubSource.commit,
+      content_hash: skill.githubSource.contentHash, synced_at: skill.githubSource.syncedAt,
+    } }),
     id: skill.id,
     created_at: skill.createdAt,
     display_title: skill.displayTitle,

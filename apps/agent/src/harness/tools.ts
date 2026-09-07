@@ -885,6 +885,16 @@ export async function buildTools(
             const summarizeResult = await generateText({
               model: env.auxModel,
               ...env.auxCallOptions,
+              // The CF shell supplies `auxCallOptions` (derived from
+              // speed/reasoning); the Node shell supplies raw
+              // `auxProviderOptions`. Honour both, raw winning per provider
+              // key, so neither path silently drops its options.
+              ...(env.auxProviderOptions !== undefined && {
+                providerOptions: {
+                  ...(env.auxCallOptions?.providerOptions ?? {}),
+                  ...env.auxProviderOptions,
+                } as SharedV3ProviderOptions,
+              }),
               system: WEB_SUMMARIZE_SYSTEM_PROMPT,
               prompt: `URL: ${url}\n\nPAGE CONTENT (markdown):\n\n${markdown}`,
               maxOutputTokens: 1500,

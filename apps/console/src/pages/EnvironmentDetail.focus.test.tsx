@@ -69,7 +69,7 @@ describe("EnvironmentDetail focus treatment", () => {
       "console-settings-layout",
     );
     const sections = screen.getAllByTestId("settings-section");
-    expect(sections).toHaveLength(3);
+    expect(sections).toHaveLength(6);
     expect(sections[0]).toHaveClass("console-settings-section");
     expect(screen.getByTestId("settings-actions")).toHaveClass(
       "console-settings-actions",

@@ -425,6 +425,7 @@ describe("SessionsApplicationService", () => {
         budget: { amountMinor: "2500", currency: "USD" },
         createdAt: "2026-08-26T02:00:00.000Z",
         environmentId: "env_01",
+        environmentSnapshot: environment,
         metadata: { owner: "platform" },
         outcomeEvaluations: [],
         resources: [

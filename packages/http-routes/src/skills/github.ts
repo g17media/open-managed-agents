@@ -48,6 +48,12 @@ export interface GitHubSource {
   synced_at?: string;
 }
 
+/** Storage operations required by repository import, independent of the skill archive format. */
+export interface GitHubSkillPersistence {
+  list(): Promise<SkillMeta[]>;
+  save(input: { existing?: SkillMeta; files: SkillFileInput[]; name: string; description: string; provenance: GitHubSource }): Promise<{ id: string }>;
+}
+
 /** Compressed-download cap for GitHub zipballs. The unzip limits in
  *  ./index still apply to the uncompressed contents. */
 const GITHUB_ZIP_MAX_BYTES = 50 * 1024 * 1024;
@@ -234,11 +240,22 @@ interface ImportSourceArgs {
  *  by skill `name`: an existing tenant skill with the same name gets a new
  *  version (GitHub is the source of truth), a new name is created. Skills
  *  that exist locally but not in the repo are untouched (orphan-and-keep). */
+async function listStoredSkills(kv: KvStore, tenantId: string): Promise<SkillMeta[]> {
+  const keys = await kvListAll(kv, kvPrefix(tenantId, "skill"));
+  const result: SkillMeta[] = [];
+  for (const key of keys) {
+    const raw = await kv.get(key.name);
+    if (raw) { try { result.push(JSON.parse(raw) as SkillMeta); } catch {} }
+  }
+  return result;
+}
+
 async function importGitHubSource(
   kv: KvStore,
-  bucket: BlobStore,
+  bucket: BlobStore | null,
   tenantId: string,
   args: ImportSourceArgs,
+  persistence?: GitHubSkillPersistence,
 ): Promise<
   | { ok: true; commit: string; skills: ImportSkillResult[] }
   | { ok: false; status: number; error: string }
@@ -273,17 +290,7 @@ async function importGitHubSource(
   // Existing tenant skills by name for the upsert. When duplicates share a
   // name, prefer the one already tracking this repo so sync keeps updating
   // the row it created rather than hijacking an unrelated manual skill.
-  const keys = await kvListAll(kv, kvPrefix(tenantId, "skill"));
-  const existing: SkillMeta[] = [];
-  for (const k of keys) {
-    const data = await kv.get(k.name);
-    if (!data) continue;
-    try {
-      existing.push(JSON.parse(data) as SkillMeta);
-    } catch {
-      /* unparseable rows are skipped, same as the list endpoint */
-    }
-  }
+  const existing = persistence ? await persistence.list() : await listStoredSkills(kv, tenantId);
   const byName = new Map<string, SkillMeta>();
   for (const s of existing) {
     const prev = byName.get(s.name);
@@ -327,6 +334,21 @@ async function importGitHubSource(
     // aren't transactional across skills, so aborting mid-import would
     // leave earlier writes committed while reporting a global failure.
     const match = byName.get(d.name);
+    if (persistence) {
+      try {
+        if (match?.github_source?.content_hash === contentHash) {
+          results.push({ name: d.name, skill_id: match.id, dir: d.dir, action: "unchanged" });
+          continue;
+        }
+        const saved = await persistence.save({ existing: match?.source === "custom" ? match : undefined,
+          files: d.files, name: d.name, description: d.description, provenance });
+        results.push({ name: d.name, skill_id: saved.id, dir: d.dir, action: match?.source === "custom" ? "updated" : "created" });
+      } catch (error) {
+        results.push({ name: d.name, skill_id: match?.id ?? "", dir: d.dir, action: "failed", error: error instanceof Error ? error.message : String(error) });
+      }
+      continue;
+    }
+    if (!bucket) throw new Error("Skill archive storage is unavailable");
     if (match && match.source === "custom") {
       if (match.github_source?.content_hash === contentHash) {
         // Files identical — refresh provenance (commit / synced_at) and the
@@ -372,7 +394,7 @@ async function importGitHubSource(
  *  the fan-out per request — beyond this the tenant should split syncs. */
 const SYNC_MAX_SOURCES = 20;
 
-export function buildSkillGitHubRoutes(deps: SkillRoutesDeps) {
+export function buildSkillGitHubRoutes(deps: SkillRoutesDeps & { persistenceFor?: (tenantId: string) => GitHubSkillPersistence }) {
   const app = new Hono<{ Variables: { tenant_id: string } }>();
 
   // ---------------------------------------------------------------------------
@@ -388,7 +410,7 @@ export function buildSkillGitHubRoutes(deps: SkillRoutesDeps) {
     if (freqCheck) return freqCheck;
 
     const bucket = services.filesBlob ?? null;
-    if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+    if (!bucket && !deps.persistenceFor) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
     const body = await c.req.json<{ url?: string; ref?: string; path?: string; token?: string }>();
     if (!body.url) return c.json({ error: "url is required" }, 400);
@@ -407,7 +429,7 @@ export function buildSkillGitHubRoutes(deps: SkillRoutesDeps) {
       ref,
       path,
       token: body.token,
-    });
+    }, deps.persistenceFor?.(t));
     if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500 | 502);
     return c.json(
       { repo: parsed.repo, ref: ref ?? null, path: path ?? null, commit: result.commit, skills: result.skills },
@@ -431,7 +453,7 @@ export function buildSkillGitHubRoutes(deps: SkillRoutesDeps) {
     const freqCheck = deps.checkUploadFreq ? await deps.checkUploadFreq(t) : null;
     if (freqCheck) return freqCheck;
     const bucket = services.filesBlob ?? null;
-    if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+    if (!bucket && !deps.persistenceFor) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
     let token: string | undefined;
     try {
@@ -441,18 +463,8 @@ export function buildSkillGitHubRoutes(deps: SkillRoutesDeps) {
       /* empty body is fine */
     }
 
-    const keys = await kvListAll(services.kv, kvPrefix(t, "skill"));
-    const tracked: SkillMeta[] = [];
-    for (const k of keys) {
-      const data = await services.kv.get(k.name);
-      if (!data) continue;
-      try {
-        const s = JSON.parse(data) as SkillMeta;
-        if (s.github_source?.repo) tracked.push(s);
-      } catch {
-        /* skip unparseable rows */
-      }
-    }
+    const tracked = (deps.persistenceFor ? await deps.persistenceFor(t).list() : await listStoredSkills(services.kv, t))
+      .filter((skill) => skill.github_source?.repo);
     if (tracked.length === 0) {
       return c.json({ sources: [], message: "No skills with a GitHub source to sync." });
     }
@@ -482,7 +494,7 @@ export function buildSkillGitHubRoutes(deps: SkillRoutesDeps) {
         ref: group.ref,
         path: group.path,
         token,
-      });
+      }, deps.persistenceFor?.(t));
       if (!result.ok) {
         sources.push({
           repo: group.repo,

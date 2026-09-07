@@ -8,11 +8,13 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/vaults/credentials";
 import { z } from "zod";
 
-export type CredentialCreateBody = Omit<CredentialCreateParams, "betas">;
+export type CredentialCreateBody = Omit<CredentialCreateParams, "betas" | "auth"> & {
+  auth: z.infer<typeof credentialCreateAuthSchema>;
+};
 export type CredentialUpdateBody = Omit<
   CredentialUpdateParams,
-  "betas" | "vault_id"
->;
+  "betas" | "vault_id" | "auth"
+> & { auth?: z.infer<typeof credentialUpdateAuthSchema> };
 export type CredentialListQuery = Omit<CredentialListParams, "betas">;
 
 const unrestrictedNetworkingSchema = z
@@ -105,7 +107,21 @@ const oauthRefreshResponseSchema = z
   })
   .strict();
 
+const handleSchema = z.string().regex(/^[A-Za-z0-9._-]+$/u).max(128);
+const registryAuthSchema = z.object({
+  type: z.literal("container_registry"),
+  registry: z.string().min(1).optional(),
+  username: z.string().nullable().optional(),
+  password: z.string().nullable().optional(),
+  token: z.string().nullable().optional(),
+}).strict();
 const credentialCreateAuthSchema = z.discriminatedUnion("type", [
+  registryAuthSchema.refine((auth) => !!auth.token || (!!auth.username && !!auth.password), {
+    message: "Provide a registry token or both username and password",
+  }),
+  z.object({ type: z.literal("cap_cli"), cli_id: z.string().min(1), token: z.string(),
+    mcp_server_url: z.string().optional(), handle: handleSchema.optional(),
+    extras: z.record(z.string(), z.string()).optional() }).strict(),
   z
     .object({
       type: z.literal("mcp_oauth"),
@@ -118,6 +134,7 @@ const credentialCreateAuthSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("static_bearer"),
+      handle: handleSchema.optional(),
       token: z.string(),
       mcp_server_url: z.string(),
     })
@@ -134,6 +151,10 @@ const credentialCreateAuthSchema = z.discriminatedUnion("type", [
 ]);
 
 const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
+  registryAuthSchema,
+  z.object({ type: z.literal("cap_cli"), token: z.string().nullable().optional(),
+    mcp_server_url: z.string().optional(), handle: handleSchema.nullable().optional(),
+    extras: z.record(z.string(), z.string()).optional() }).strict(),
   z
     .object({
       type: z.literal("mcp_oauth"),
@@ -145,6 +166,7 @@ const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("static_bearer"),
+      handle: handleSchema.nullable().optional(),
       token: z.string().nullable().optional(),
     })
     .strict(),
@@ -159,6 +181,9 @@ const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
 ]);
 
 const credentialResponseAuthSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("container_registry"), registry: z.string().optional() }).strict(),
+  z.object({ type: z.literal("cap_cli"), cli_id: z.string(), mcp_server_url: z.string().optional(),
+    handle: handleSchema.optional() }).strict(),
   z
     .object({
       type: z.literal("mcp_oauth"),
@@ -170,6 +195,7 @@ const credentialResponseAuthSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("static_bearer"),
+      handle: handleSchema.optional(),
       mcp_server_url: z.string(),
     })
     .strict(),
@@ -213,7 +239,10 @@ export const credentialListQuerySchema = z
   })
   .strict();
 
-export const credentialResponseSchema: z.ZodType<BetaManagedAgentsCredential> =
+export type ManagedCredentialResponse = Omit<BetaManagedAgentsCredential, "auth"> & {
+  auth: z.infer<typeof credentialResponseAuthSchema>;
+};
+export const credentialResponseSchema: z.ZodType<ManagedCredentialResponse> =
   z
     .object({
       id: z.string().min(1),

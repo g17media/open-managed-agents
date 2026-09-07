@@ -80,6 +80,7 @@ const OFFICIAL_RUNTIME_EVENT_TYPES = new Set([
   "agent.tool_use",
   "session.deleted",
   "session.error",
+  "session.sandbox_startup",
   "session.status_idle",
   "session.status_rescheduled",
   "session.status_running",

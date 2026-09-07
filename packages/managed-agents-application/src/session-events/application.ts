@@ -206,7 +206,7 @@ export class SessionEventsApplicationService
         sessionId: command.sessionId,
         expectedRevision: execution.revision,
         events,
-        nextSession: applyAcceptedEvents(execution.session, events),
+        nextSession: applyAcceptedEvents({ ...execution.session, ...(command.vaultIds !== undefined && { vaultIds: [...command.vaultIds] }) }, events),
       });
       if (appended.type === "not_found") return { type: "not_found" };
       if (appended.type === "revision_conflict") continue;

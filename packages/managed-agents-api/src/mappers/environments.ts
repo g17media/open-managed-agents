@@ -56,6 +56,10 @@ function toConfigInput(
   if (config.type === "self_hosted") return { type: config.type };
   return {
     type: config.type,
+    ...(config.image !== undefined && { image: config.image }),
+    ...(config.image_registry_auth !== undefined && { imageRegistryAuth: { vaultId: config.image_registry_auth.vault_id, credentialId: config.image_registry_auth.credential_id } }),
+    ...(config.context !== undefined && { context: config.context }),
+    ...(config.startup !== undefined && { startup: { script: config.startup.script, enabled: config.startup.enabled, triggers: config.startup.triggers, timeoutSeconds: config.startup.timeout_seconds } }),
     ...(config.networking !== undefined && {
       networking:
         config.networking === null
@@ -141,6 +145,10 @@ function fromConfig(config: EnvironmentConfigView): object {
   if (config.type === "self_hosted") return { type: config.type };
   return {
     type: config.type,
+    ...(config.image !== undefined && { image: config.image }),
+    ...(config.imageRegistryAuth !== undefined && { image_registry_auth: { vault_id: config.imageRegistryAuth.vaultId, credential_id: config.imageRegistryAuth.credentialId } }),
+    ...(config.context !== undefined && { context: config.context }),
+    ...(config.startup !== undefined && { startup: { script: config.startup.script, enabled: config.startup.enabled, triggers: config.startup.triggers, timeout_seconds: config.startup.timeoutSeconds } }),
     networking:
       config.networking.type === "unrestricted"
         ? { type: config.networking.type }

@@ -168,12 +168,10 @@ export type FormState = {
   metadataJson: string;
   /** "" = provider default (model stays a plain string when speed is also unset). */
   modelReasoning: "" | ModelReasoning;
-  /** ACP runtime binding. Fork-only: upstream dropped these from the form,
-   *  but keeps `runtime_binding` as a lossless passthrough key, so the
-   *  console remains the only place that edits them. */
-  runtimeId: string;
-  acpAgentId: string;
-  localSkillBlocklist: string[];
+  /** Built-in general sub-agent, opt-in. Upstream dropped this from the
+   *  form, but the fork still edits it (see mergeFormIntoConfig) and the
+   *  domain model keeps `enableGeneralSubagent`. */
+  enableGeneralSubagent: boolean;
   system: string;
   description: string;
   modelCardId: string;
@@ -194,9 +192,7 @@ export const INITIAL_FORM: FormState = {
   appendablePrompts: [],
   metadataJson: "{}",
   modelReasoning: "",
-  runtimeId: "",
-  acpAgentId: "claude-agent-acp",
-  localSkillBlocklist: [],
+  enableGeneralSubagent: false,
   system: "",
   description: "",
   modelCardId: "",
@@ -299,24 +295,6 @@ function modelReasoningOf(model: unknown): "" | ModelReasoning {
   return MODEL_REASONING_LEVELS.includes(reasoning as ModelReasoning) ? (reasoning as ModelReasoning) : "";
 }
 
-/** `runtime_binding` lives under `_oma` on v1 configs; older snapshots put
- *  it at the top level. Read both so existing agents keep decoding. */
-function runtimeBindingOf(
-  openma: Record<string, unknown> | undefined,
-  config: Record<string, unknown>,
-): RuntimeBinding | undefined {
-  const raw = openma?.runtime_binding ?? config.runtime_binding;
-  return raw && typeof raw === "object" && !Array.isArray(raw)
-    ? raw as RuntimeBinding
-    : undefined;
-}
-
-type RuntimeBinding = {
-  runtime_id?: string;
-  acp_agent_id?: string;
-  local_skill_blocklist?: string[];
-};
-
 /** Map an API / pasted config into form state (lossy by design for the UI). */
 export function configToForm(config: Record<string, unknown>): FormState {
   const toolPolicy = parseToolPolicy(
@@ -348,9 +326,7 @@ export function configToForm(config: Record<string, unknown>): FormState {
         ? JSON.stringify(config.metadata, null, 2)
         : "{}",
     modelReasoning: modelReasoningOf(config.model),
-    runtimeId: runtimeBindingOf(openma, config)?.runtime_id ?? "",
-    acpAgentId: runtimeBindingOf(openma, config)?.acp_agent_id ?? "claude-agent-acp",
-    localSkillBlocklist: runtimeBindingOf(openma, config)?.local_skill_blocklist ?? [],
+    enableGeneralSubagent: config.enable_general_subagent === true,
     modelCardId: "",
     system: String(config.system || ""),
     description: String(config.description || ""),
@@ -762,7 +738,11 @@ export function mergeFormIntoConfig(
       ? mergeMcpServers(existingMcp, form.mcpServers)
       : null;
     payload.skills = form.skills.length ? form.skills : null;
-    payload.multiagent = mergeMultiagent(base?.multiagent, form.callableAgents);
+    payload.multiagent = form.callableAgents.length
+      ? { type: "coordinator", agents: form.callableAgents }
+      : null;
+    if (form.enableGeneralSubagent || base?.enable_general_subagent !== undefined) payload.enable_general_subagent = form.enableGeneralSubagent;
+    else delete payload.enable_general_subagent;
   } else {
     if (form.system) payload.system = form.system;
     else delete payload.system;

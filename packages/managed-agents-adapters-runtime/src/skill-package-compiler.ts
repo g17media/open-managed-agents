@@ -57,13 +57,19 @@ function manifest(text: string): { name: string; description: string } | null {
   const end = lines.indexOf("---", 1);
   if (end < 0) return null;
   const fields = new Map<string, string>();
-  for (const line of lines.slice(1, end)) {
-    if (line.trim().length === 0 || line.trimStart().startsWith("#")) continue;
+  for (let i = 1; i < end; i++) {
+    const line = lines[i]!;
     const match = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/u.exec(line);
-    if (match === null || match[1] === undefined || match[2] === undefined) {
-      continue;
+    if (!match?.[1] || match[2] === undefined) continue;
+    let value = scalar(match[2]);
+    const block = /^([>|])[+-]?$/.exec(value);
+    if (block) {
+      const body: string[] = [];
+      while (i + 1 < end && (!lines[i + 1]!.trim() || /^\s/.test(lines[i + 1]!))) body.push(lines[++i]!.trim());
+      while (body.at(-1) === "") body.pop();
+      value = block[1] === "|" ? body.join("\n") : body.reduce((text, line) => line === "" ? `${text}\n` : text + (text && !text.endsWith("\n") ? " " : "") + line, "");
     }
-    fields.set(match[1], scalar(match[2]));
+    fields.set(match[1], value);
   }
   const name = fields.get("name");
   const description = fields.get("description");

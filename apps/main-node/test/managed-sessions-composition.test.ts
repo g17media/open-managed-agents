@@ -195,6 +195,9 @@ describe("SqlManagedSessionsComposition", () => {
   });
 
   it("dispatches events with an archived Environment snapshot already referenced by the Session", async () => {
+    const savedConfig = { type: "cloud", context: "Original context", startup: { script: "echo original", triggers: ["create"] } };
+    await client.prepare("UPDATE managed_environments SET document = ? WHERE id = ?")
+      .bind(JSON.stringify({ ...environment, config: savedConfig }), environment.id).run();
     const dispatches: unknown[] = [];
     const lifecycleStarts: unknown[] = [];
     const lifecycle: SessionLifecycleCommandPort = {
@@ -240,6 +243,8 @@ describe("SqlManagedSessionsComposition", () => {
       }),
     ]);
     const archivedAt = "2026-08-26T02:00:00.000Z";
+    await client.prepare("UPDATE managed_environments SET document = ? WHERE id = ?")
+      .bind(JSON.stringify({ ...environment, config: { type: "cloud", context: "Changed context", startup: { script: "echo changed" } } }), environment.id).run();
     await client
       .prepare(
         `UPDATE managed_environments
@@ -269,6 +274,7 @@ describe("SqlManagedSessionsComposition", () => {
         environment: expect.objectContaining({
           id: environment.id,
           archivedAt,
+          config: savedConfig,
         }),
       }),
     ]);

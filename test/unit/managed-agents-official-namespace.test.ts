@@ -56,12 +56,13 @@ describe("official /v1 namespace", () => {
     ).toEqual([]);
   });
 
-  it("uses the official skills API while keeping file preview as an OMA extension", () => {
+  it("uses native skill version downloads for previews and the OMA extension for GitHub imports", () => {
     expect(nodeComposition).toContain('v1.route("/skills", managedSkillsRoutes)');
-    expect(nodeComposition).toContain('v1.route("/oma/skills", buildNodeSkillsRoutes');
-    expect(nodeComposition).not.toContain('v1.route("/skills", buildNodeSkillsRoutes');
+    expect(nodeComposition).toContain('v1.route("/oma/skills", buildSkillGitHubRoutes');
+    expect(nodeComposition).not.toContain('v1.route("/skills", buildSkillGitHubRoutes');
     expect(skillsConsole).toContain('const SKILLS_API = "/v1/skills"');
-    expect(skillsConsole).toContain('const SKILLS_PREVIEW_API = "/v1/oma/skills"');
+    expect(skillsConsole).toContain('managedApi.skills.versions.download(');
+    expect(skillsConsole).not.toContain('SKILLS_PREVIEW_API');
   });
 
   it("keeps every production caller off removed bare OMA aliases", () => {

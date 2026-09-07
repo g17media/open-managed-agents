@@ -9,6 +9,7 @@ import type {
 export type * from "../domain/session-event";
 
 export interface SendSessionEventsCommand {
+  vaultIds?: string[];
   sessionId: string;
   events: SendableSessionEvent[];
   /** Retries of the same logical input return its original accepted events. */

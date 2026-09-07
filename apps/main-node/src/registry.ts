@@ -184,7 +184,7 @@ export interface SessionRegistryDeps {
   mountSessionResources?(input: {
     sessionId: string;
     tenantId: string;
-    sandbox: SandboxExecutor;
+    sandbox: SandboxPort;
   }): Promise<void>;
 
   /** Promote agent-written /mnt/session/outputs files into the Files API
@@ -192,7 +192,7 @@ export interface SessionRegistryDeps {
   promoteSessionOutputs?(input: {
     sessionId: string;
     tenantId: string;
-    sandbox: SandboxExecutor;
+    sandbox: SandboxPort;
   }): Promise<void>;
 
   /** Sandbox workdir root, e.g. /app/data/sandboxes. Per-session dirs

@@ -362,6 +362,11 @@ export class DefaultNodeManagedSessionRuntimeDriver
     return subscription;
   }
 
+  /** Lifecycle callbacks use the same durable projection and SSE ordering as harness output. */
+  recordRuntimeEvent(workspaceId: string, sessionId: string, event: unknown): Promise<void> {
+    return this.enqueueOutput(workspaceId, sessionId, event);
+  }
+
   private async handleOutput(
     workspaceId: string,
     sessionId: string,

@@ -1,3 +1,6 @@
+import { nativeOAuthCredentials } from "@open-managed-agents/http-routes";
+import { ManagedMemoryFiles } from "./lib/managed-memory-files.js";
+import { mountManagedSessionResources, managedSessionReminders, promoteManagedSessionOutputs } from "./lib/managed-session-preparation.js";
 /**
  * apps/main-node — self-host Node entry for the Open Managed Agents API.
  *
@@ -77,6 +80,7 @@ import {
   resolveProxyTargetByTenant,
   forwardWithRefresh,
 } from "@open-managed-agents/vault-forward/proxy";
+import { forwardManagedMcpRequest } from "@open-managed-agents/vault-forward/managed";
 import { toFileRecord } from "@open-managed-agents/files-store";
 import { SqlEventLog } from "@open-managed-agents/event-log/sql";
 import type { SessionEvent } from "@open-managed-agents/shared";
@@ -123,6 +127,7 @@ import {
   buildEvalRoutes,
   buildSkillRoutes,
   buildSkillGitHubRoutes,
+  nativeGitHubSkillPersistence,
   buildClawhubRoutes,
   buildOAuthRoutes,
   buildCapCliOauthRoutes,
@@ -335,7 +340,6 @@ import {
 import { PgEventStreamHub } from "./lib/pg-event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
 import { SessionRegistry, resolveSessionMemoryBindings } from "./registry.js";
-import { buildNodeSkillsRoutes } from "./lib/node-skills-routes.js";
 import { ManagedNodeDefaultHarness } from "./lib/node-managed-default-harness.js";
 import {
   allowAllLegacyHarnessTools,
@@ -911,21 +915,36 @@ if (usePostgres) {
 async function buildSandbox(
   sessionId: string,
   workdir: string,
+  managed?: { workspaceId: string; environment: import("@open-managed-agents/managed-agents-application").Environment },
 ): Promise<import("@open-managed-agents/sandbox").SandboxExecutor> {
   const selection = standaloneSandboxProvider
     ?? resolveSandboxProviderForEnvironment(process.env);
   const mod = (await import(selection.modulePath)) as {
     sandboxFactory: import("@open-managed-agents/sandbox").SandboxFactory;
   };
-  const session = await sessionsService.getById({ sessionId });
-  const startupManaged = startupEnabled(session?.environment_snapshot?.config?.startup);
-  if (startupManaged && provider !== "belljar") throw new Error("Startup scripts require the Belljar sandbox provider");
+  const session = managed ? null : await sessionsService.getById({ sessionId });
+  const config = managed?.environment.config;
+  const startupManaged = config?.type === "cloud" ? startupEnabled(config.startup) : startupEnabled(session?.environment_snapshot?.config?.startup);
+  let overrides: Pick<import("@open-managed-agents/sandbox").SandboxFactoryContext, "image" | "registryAuth"> = {};
+  if (selection.provider === "belljar" && managed && config?.type === "cloud" && config.image) {
+    overrides.image = config.image;
+    if (config.imageRegistryAuth) {
+      const ref = config.imageRegistryAuth;
+      const vault = await new SqlVaultStore(sql).find({ workspaceId: managed.workspaceId, vaultId: ref.vaultId });
+      const record = await managedCredentialStore.find({ workspaceId: managed.workspaceId, vaultId: ref.vaultId, credentialId: ref.credentialId });
+      if (!vault || vault.vault.archivedAt || !record || record.credential.archivedAt || record.credential.auth.type !== "container_registry") throw new Error("Environment registry credential is unavailable");
+      const auth = record.credential.auth;
+      overrides.registryAuth = auth.token ? { identityToken: auth.token, serveraddress: auth.registry }
+        : { username: auth.username ?? undefined, password: auth.password ?? undefined, serveraddress: auth.registry };
+    }
+  } else if (!managed && selection.provider === "belljar") overrides = await environmentImageOverrides(sessionId);
+  if (startupManaged && selection.provider !== "belljar") throw new Error("Startup scripts require the Belljar sandbox selection.provider");
   if (startupManaged && !process.env.BELLJAR_TOKEN) throw new Error("Startup scripts require BELLJAR_TOKEN for authenticated lifecycle callbacks");
   return mod.sandboxFactory(
     {
       sessionId,
       workdir,
-      memoryRoot: memoryBlobLocalDir ?? "",
+      memoryRoot: managed ? join(memoryBlobLocalDir ?? "./data/memory", managed.workspaceId) : memoryBlobLocalDir ?? "",
       memoryWorkspace: {
         getText: (key) => memoryBlobs.getText(key),
         list: (prefix, cursor) => memoryBlobs.list(prefix, cursor),
@@ -936,7 +955,7 @@ async function buildSandbox(
       startupManaged,
       // Only belljar honors per-session images today — skip the lookups
       // for providers that would ignore the fields anyway.
-      ...(provider === "belljar" ? await environmentImageOverrides(sessionId) : {}),
+      ...overrides,
     },
     process.env,
   );
@@ -1124,6 +1143,22 @@ async function mcpBindingFetch(request: Request): Promise<Response> {
     body,
     { sessionId, serverName, callerKind: "rpc-mcp" },
   );
+}
+
+async function managedMcpBindingFetch(request: Request): Promise<Response> {
+  const workspaceId = request.headers.get("x-oma-tenant");
+  const sessionId = request.headers.get("x-oma-session");
+  const serverName = request.headers.get("x-oma-mcp-server");
+  if (!workspaceId || !sessionId || !serverName) return new Response("Missing session attribution", { status: 400 });
+  const context = await managedRuntimeReaders.executionContext.find({ workspaceId, sessionId });
+  if (!context) return new Response("Forbidden", { status: 403 });
+  const vaultIds = [];
+  const vaults = new SqlVaultStore(sql);
+  for (const vaultId of context.session.vaultIds) {
+    const record = await vaults.find({ workspaceId, vaultId });
+    if (record?.vault.archivedAt === null) vaultIds.push(vaultId);
+  }
+  return forwardManagedMcpRequest({ request, workspaceId, session: { ...context.session, vaultIds }, serverName, credentials: managedCredentialStore });
 }
 
 async function mountNodeSessionResources({ sessionId, tenantId, sandbox, strict = false }: {
@@ -1674,6 +1709,32 @@ const managedSessionOutputCollector = new NodeManagedSessionOutputCollector({
   isFenceActive: isManagedSessionExecutionFenceActive,
 });
 
+const managedMemoryFiles = new ManagedMemoryFiles(memoryBlobLocalDir ?? "./data/memory");
+const managedMemoryMounts = new WeakMap<import("@open-managed-agents/sandbox").SandboxPort, Set<string>>();
+const managedMemorySync = new WeakMap<import("@open-managed-agents/sandbox").SandboxPort, ReturnType<typeof setInterval>>();
+async function flushManagedMemoryFiles(workspaceId: string, session: import("@open-managed-agents/managed-agents-application").Session) {
+  const results = await Promise.allSettled(session.resources.filter((resource) => resource.type === "memory_store" && resource.access !== "read_only")
+    .map((resource) => resource.type === "memory_store"
+      ? managedMemoryFiles.flush(workspaceId, resource.memoryStoreId, memoriesForSession(workspaceId, session.id)) : Promise.resolve()));
+  const failed = results.filter((result) => result.status === "rejected");
+  if (failed.length) throw new Error(failed.map((result) => String(result.reason)).join("; "));
+}
+function memoriesForSession(workspaceId: string, sessionId: string) {
+  return managedMemoriesApplicationFor({ var: { tenant_id: workspaceId, session_id: sessionId } }).port(managedAgentsPortTokens.memories);
+}
+async function prepareManagedMemoryMounts(workspaceId: string, session: import("@open-managed-agents/managed-agents-application").Session, sandbox: import("@open-managed-agents/sandbox").SandboxPort) {
+  let mounted = managedMemoryMounts.get(sandbox);
+  if (!mounted) { mounted = new Set(); managedMemoryMounts.set(sandbox, mounted); }
+  for (const resource of session.resources) {
+    if (resource.type !== "memory_store") continue;
+    await managedMemoryFiles.prepare(workspaceId, resource.memoryStoreId, memoriesForSession(workspaceId, session.id), resource.access === "read_only");
+    if (mounted.has(resource.memoryStoreId)) continue;
+    if (!sandbox.mountMemoryStore) throw new Error("The selected sandbox provider does not support memory mounts");
+    await sandbox.mountMemoryStore({ storeId: resource.memoryStoreId, storeName: resource.name ?? resource.memoryStoreId, readOnly: resource.access === "read_only" });
+    mounted.add(resource.memoryStoreId);
+  }
+}
+
 const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
   subagentThreads: new SqlSessionThreadStore(sql),
   subagentPolicy: ({ session }) => nodeOpenAISubagentPolicy(session, openAIAgentsSecrets),
@@ -1702,6 +1763,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
         toMarkdown: toMarkdownProvider,
         tenantId: workspaceId,
         sessionId: session.id,
+        toolResultMaxChars: parseInt(process.env.OMA_TOOL_RESULT_MAX_CHARS ?? "", 10) || undefined,
         mcpBinding: nodeMcpProxyBinding,
         environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
         auxModel: auxiliary?.model,
@@ -1729,13 +1791,56 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       };
     },
   }),
-  buildSandbox: async ({ session }) =>
-    await isManagedNoEnvironmentSession(session, openAIAgentsSecrets)
-      ? createNoEnvironmentSandbox()
-      : buildSandbox(
-      session.id,
-      join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", session.id),
-    ),
+  buildSandbox: async ({ workspaceId, session, environment }) => {
+    // OpenAI-agents sessions without an environment get a stub sandbox —
+    // there is no workspace to scope, mount or provision.
+    if (await isManagedNoEnvironmentSession(session, openAIAgentsSecrets)) {
+      return createNoEnvironmentSandbox();
+    }
+    const sandbox = await buildSandbox(session.id,
+      join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", workspaceId, session.id), { workspaceId, environment });
+    await prepareManagedMemoryMounts(workspaceId, session, sandbox);
+    await sandboxOrchestrator.provision(sandbox, {
+      sessionId: session.id, tenantId: workspaceId, environmentId: environment.id,
+      mountOutputs: true, backup: { restoreOnWarm: !sandbox.initializesWorkspace },
+    });
+    return sandbox;
+  },
+  prepareSession: async ({ workspaceId, session, sandbox }) => {
+    await prepareManagedMemoryMounts(workspaceId, session, sandbox);
+    await mountManagedSessionResources({ session, sandbox,
+      files: managedAgentsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.files) });
+    if (session.resources.some((resource) => resource.type === "memory_store" && resource.access !== "read_only")) {
+      clearInterval(managedMemorySync.get(sandbox));
+      const timer = setInterval(() => {
+        void flushManagedMemoryFiles(workspaceId, session).catch((error) =>
+          logger.warn({ op: "session.memory_sync.failed", session_id: session.id, error }, "Memory sync failed"));
+      }, 30_000);
+      timer.unref();
+      managedMemorySync.set(sandbox, timer);
+    }
+  },
+  completeSession: async ({ workspaceId, session, sandbox }) => {
+    clearInterval(managedMemorySync.get(sandbox));
+    managedMemorySync.delete(sandbox);
+    const persistOutputs = async () => {
+      const outputs = [];
+      for (const entry of await sessionOutputs.list(workspaceId, session.id)) {
+        const file = await sessionOutputs.read(workspaceId, session.id, entry.filename);
+        if (file) outputs.push({ filename: entry.filename, mediaType: entry.media_type, content: new Uint8Array(await new Response(file.body).arrayBuffer()) });
+      }
+      await promoteManagedSessionOutputs({ sessionId: session.id, outputs,
+        files: managedAgentsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.files) });
+    };
+    // A memory conflict must not prevent output promotion or the workspace backup.
+    const results = await Promise.allSettled([
+      flushManagedMemoryFiles(workspaceId, session),
+      persistOutputs(),
+      sandboxOrchestrator.snapshotWorkspaceNow(sandbox, { tenantId: workspaceId, sessionId: session.id }),
+    ]);
+    const failed = results.filter((result) => result.status === "rejected");
+    if (failed.length) throw new Error(failed.map((result) => String(result.reason)).join("; "));
+  },
   prepareSandbox: async ({
     workspaceId,
     session,
@@ -1853,6 +1958,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       toMarkdown: toMarkdownProvider,
       tenantId: workspaceId,
       sessionId: session.id,
+      toolResultMaxChars: parseInt(process.env.OMA_TOOL_RESULT_MAX_CHARS ?? "", 10) || undefined,
       mcpBinding: nodeMcpProxyBinding,
       environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
       auxModel: auxiliary?.model,
@@ -1875,11 +1981,14 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     const agent = toLegacyHarnessAgentConfig(input.session);
     const creds = await resolveNodeModelCreds(input.workspaceId, agent.model);
     const rawSystemPrompt = input.session.agent.system ?? "";
-    const platformReminders = [
-      ...buildNodeManagedSkillReminders(input.session),
-      ...buildNodeManagedAppendablePromptReminders(input.session),
-    ];
     const feishuTools = await resolveFeishuAgentTools(input.session.id);
+    // managedSessionReminders covers environment context, memory stores and
+    // skills (it also mounts the skill archives), so upstream's skill builder
+    // would double them up. Appendable prompts are only in upstream's.
+    const platformReminders = await managedSessionReminders({ ...input,
+      versions: managedSkillsPlatform.app({ workspaceId: input.workspaceId }).port(managedAgentsPortTokens.skillVersions) });
+    platformReminders.push(...buildNodeManagedAppendablePromptReminders(input.session));
+    if (process.env.SANDBOX_PROVIDER === "belljar") platformReminders.push({ source: "sandbox:workspace", text: "The /workspace directory survives container recycling for the sandbox retention period. Store durable results in /mnt/session/outputs and long-term knowledge in /mnt/memory." });
     return {
       agent,
       userMessage: { type: "user.message", content: [] },
@@ -2377,16 +2486,20 @@ function managedMemoryActor(userId: string | undefined) {
 }
 function managedMemoriesApplicationFor(context: unknown) {
   const request = (context as {
-    var: { tenant_id: string; user_id?: string };
+    var: { tenant_id: string; user_id?: string; session_id?: string };
   }).var;
   return managedMemoriesApplicationForWorkspace(
     request.tenant_id,
     request.user_id,
+    request.session_id,
   );
 }
 function managedMemoriesApplicationForWorkspace(
   workspaceId: string,
   userId?: string,
+  /** Attribute memory versions to the session when the write comes from one;
+   *  agent-authored edits belong to the session, not the signed-in user. */
+  sessionId?: string,
 ) {
   return createNodeManagedAgentsApp({
     workspaceId,
@@ -2417,7 +2530,7 @@ function managedMemoriesApplicationForWorkspace(
       providePort(memoryContentDescriptorPort, managedMemoryContent),
       providePort(
         memoryVersionActorPort,
-        managedMemoryActor(userId),
+        sessionId ? { kind: "session", sessionId } : managedMemoryActor(userId),
       ),
     ],
   });
@@ -2490,8 +2603,8 @@ const managedCredentialCipher: CredentialDocumentCipher = {
     return { plaintext: await managedCredentialCrypto.decrypt(ciphertext) };
   },
 };
-const managedCredentialValidation = new IndeterminateCredentialValidationProbe();
 const managedCredentialStore = new SqlCredentialStore(sql, managedCredentialCipher);
+const managedCredentialValidation = new IndeterminateCredentialValidationProbe();
 const managedCredentialsPlatform = createNodePlatform({
   features: {
     preset: "none",
@@ -2688,10 +2801,37 @@ const app = new Hono<{
 app.use("*", requestMetrics({ recorder: metrics }));
 app.use("*", tracerMiddleware({ tracer }));
 
+async function managedLifecycleContext(sessionId: string) {
+  const rows = await sql.prepare("SELECT workspace_id FROM managed_sessions WHERE id = ? LIMIT 2").bind(sessionId).all<{ workspace_id: string }>();
+  if (!rows.results?.length) return null;
+  if (rows.results.length !== 1) throw new Error("Ambiguous sandbox owner");
+  const workspaceId = rows.results[0]!.workspace_id;
+  const context = await managedRuntimeReaders.executionContext.find({ workspaceId, sessionId });
+  return context ? { ...context, workspaceId } : null;
+}
+
 app.route("/internal/belljar/lifecycle", buildBelljarLifecycleRoutes({
   token: process.env.BELLJAR_TOKEN,
-  getSession: (sessionId) => sessionsService.getById({ sessionId }),
+  getSession: async (sessionId) => {
+    const context = await managedLifecycleContext(sessionId);
+    if (!context) return sessionsService.getById({ sessionId });
+    const startup = context.environment.config.type === "cloud" ? context.environment.config.startup : undefined;
+    return { id: sessionId, tenant_id: context.workspaceId, status: context.session.archivedAt ? "terminated" : context.session.status,
+      environment_snapshot: { id: context.environment.id, name: context.environment.name, created_at: context.environment.createdAt,
+        config: { type: "cloud" as const, ...(startup && { startup: { script: startup.script, enabled: startup.enabled,
+          triggers: startup.triggers, timeout_seconds: startup.timeoutSeconds } }) } },
+    };
+  },
   completed: async (sessionId, bootId) => {
+    const context = await managedLifecycleContext(sessionId);
+    if (context) {
+      const records = await sql.prepare("SELECT document FROM managed_session_events WHERE workspace_id = ? AND session_id = ? AND type = ?")
+        .bind(context.workspaceId, sessionId, "session.sandbox_startup").all<{ document: string }>();
+      return (records.results ?? []).some((record) => {
+        const event = JSON.parse(record.document) as { bootId: string; status: string };
+        return event.bootId === bootId && (event.status === "succeeded" || event.status === "skipped");
+      });
+    }
     const rows = await sql.prepare("SELECT data FROM session_events WHERE session_id = ? AND type = ? ORDER BY seq DESC")
       .bind(sessionId, "session.sandbox_startup").all<{ data: string }>();
     return (rows.results ?? []).some((row) => {
@@ -2702,9 +2842,14 @@ app.route("/internal/belljar/lifecycle", buildBelljarLifecycleRoutes({
   emit: async (sessionId, event) => {
     logger.info({ op: "sandbox.startup", session_id: sessionId, boot_id: event.boot_id,
       trigger: event.trigger, status: event.status, duration_ms: event.duration_ms, exit_code: event.exit_code }, "Sandbox startup");
-    const log = newEventLog(sessionId);
     event.id = `sevt_${generateEventId()}`;
     event.processed_at = new Date().toISOString();
+    const context = await managedLifecycleContext(sessionId);
+    if (context) {
+      await managedRuntimeDriver.recordRuntimeEvent(context.workspaceId, sessionId, event);
+      return;
+    }
+    const log = newEventLog(sessionId);
     await log.appendAsync(event);
     const events = await log.getEventsAsync();
     const stored = events.find((e) => e.id === event.id);
@@ -2726,7 +2871,10 @@ app.route("/internal/belljar/lifecycle", buildBelljarLifecycleRoutes({
     }
     // Restore can contain an older CA file; always refresh trust afterwards.
     await sandbox.prepareInitialization({ sessionId: session.id, tenantId: session.tenant_id });
-    await mountNodeSessionResources({ sessionId: session.id, tenantId: session.tenant_id, sandbox, strict: true });
+    const context = await managedRuntimeReaders.executionContext.find({ workspaceId: session.tenant_id, sessionId: session.id });
+    if (context) await mountManagedSessionResources({ session: context.session, sandbox,
+      files: managedAgentsPlatform.app({ workspaceId: session.tenant_id }).port(managedAgentsPortTokens.files) });
+    else await mountNodeSessionResources({ sessionId: session.id, tenantId: session.tenant_id, sandbox, strict: true });
   },
 }));
 
@@ -3078,10 +3226,18 @@ v1.route("/oma/mcp-proxy", buildNodeHttpMcpProxyRoutes({
 }));
 v1.post("/sessions/:id/startup/retry", async (c) => {
   const sessionId = c.req.param("id");
-  const session = await sessionsService.getById({ sessionId });
-  if (!session || session.tenant_id !== c.get("tenant_id")) return c.json({ error: "Session not found" }, 404);
-  if (session.status === "terminated" || !startupEnabled(session.environment_snapshot?.config?.startup)) {
-    return c.json({ error: "Session has no active startup script" }, 400);
+  const workspaceId = c.get("tenant_id");
+  const native = await managedRuntimeReaders.executionContext.find({ workspaceId, sessionId });
+  if (native) {
+    const config = native.environment.config;
+    if (native.session.archivedAt) return c.json({ error: "Session not found" }, 404);
+    if (config.type !== "cloud" || !startupEnabled(config.startup)) return c.json({ error: "Session has no active startup script" }, 400);
+  } else {
+    const session = await sessionsService.getById({ sessionId });
+    if (!session || session.tenant_id !== workspaceId) return c.json({ error: "Session not found" }, 404);
+    if (session.status === "terminated" || !startupEnabled(session.environment_snapshot?.config?.startup)) {
+      return c.json({ error: "Session has no active startup script" }, 400);
+    }
   }
   if (process.env.SANDBOX_PROVIDER?.toLowerCase() !== "belljar") return c.json({ error: "Startup scripts require Belljar" }, 400);
   const sandbox = new BelljarSandbox({ baseUrl: process.env.BELLJAR_URL ?? "", token: process.env.BELLJAR_TOKEN, sessionId });
@@ -3152,8 +3308,13 @@ v1.route("/oma/tenants", buildTenantRoutes({ services, memberSql: sql, loadMembe
 } }));
 v1.route("/oma/api_keys", buildApiKeyRoutes({ storage: apiKeyStorage }));
 v1.route("/oma/clawhub", buildClawhubRoutes({ services }));
-v1.route("/oma/oauth", buildOAuthRoutes({ services, env: process.env }));
-v1.route("/oma/cap-cli/oauth", buildCapCliOauthRoutes({ services }));
+const oauthCredentialsFor = (workspaceId: string) => nativeOAuthCredentials({
+  workspaceId, store: managedCredentialStore,
+  vaults: managedCredentialsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.vaults),
+  nextId: () => `vcrd_${nanoid()}`,
+});
+v1.route("/oma/oauth", buildOAuthRoutes({ services, env: process.env, credentialsFor: oauthCredentialsFor }));
+v1.route("/oma/cap-cli/oauth", buildCapCliOauthRoutes({ services, credentialsFor: oauthCredentialsFor }));
 v1.route("/oma/evals", buildEvalRoutes({
   evals: evalsService,
   agents: agentsService,
@@ -3183,7 +3344,12 @@ async function countManagedPages(
 }
 
 // OMA extensions shared with the Cloudflare entrypoint.
-v1.route("/oma/skills", buildSkillGitHubRoutes({ services }));
+v1.route("/oma/skills", buildSkillGitHubRoutes({ services,
+  persistenceFor: (workspaceId) => {
+    const app = managedSkillsPlatform.app({ workspaceId });
+    return nativeGitHubSkillPersistence(app.port(managedAgentsPortTokens.skills), app.port(managedAgentsPortTokens.skillVersions));
+  },
+}));
 v1.route("/oma/skills", buildSkillRoutes({ services }));
 v1.get("/oma/runtimes", (c) => c.json({ data: [] }));
 v1.get("/oma/stats", async (c) => {
@@ -3701,6 +3867,20 @@ app.onError((err, c) => {
 // because main-node doesn't construct a LinearProvider; pass `linearSweeper`
 // when an in-process gateway lands.
 const scheduler = buildNodeScheduler({
+  managedDeploymentsTick: async () => {
+    const records = await sql.prepare("SELECT workspace_id, id, document FROM managed_deployments WHERE status = 'active' AND archived_at IS NULL").all<{ workspace_id: string; id: string; document: string }>();
+    const now = new Date().toISOString();
+    for (const record of records.results ?? []) {
+      const deployment = JSON.parse(record.document) as import("@open-managed-agents/managed-agents-application").Deployment;
+      const scheduledAt = deployment.schedule?.upcomingRunsAt?.[0];
+      if (!scheduledAt || scheduledAt > now) continue;
+      try {
+        const result = await managedDeploymentsPlatform.app({ workspaceId: record.workspace_id }).port(managedAgentsPortTokens.deployments)
+          .runDeployment({ deploymentId: record.id, scheduledAt });
+        if (result.type === "started" && result.run.error) logger.warn({ op: "deployment.schedule.failed", deployment_id: record.id, error: result.run.error }, "Scheduled deployment failed");
+      } catch (error) { logger.warn({ op: "deployment.schedule.failed", deployment_id: record.id, error }, "Scheduled deployment failed"); }
+    }
+  },
   evalServices: {
     agents: agentsService,
     environments: environmentsService,

@@ -90,13 +90,13 @@ export interface SessionMachineDeps {
    *  Node's port of the CF resource-mounter; read fresh each turn so a
    *  resource attached mid-session is mounted on the next turn. Optional —
    *  shells that mount resources elsewhere (CF) leave it unset. */
-  mountSessionResources?(opts: { sandbox: SandboxExecutor }): Promise<void>;
+  mountSessionResources?(opts: { sandbox: SandboxPort }): Promise<void>;
 
   /** Promote files the agent wrote under /mnt/session/outputs into the
    *  Files API (scope_id = this session) at turn completion, so Anthropic
    *  Managed Agents SDK consumers that poll files.list({scope_id}) can
    *  fetch them. Optional; the shell owns the files-store wiring. */
-  promoteSessionOutputs?(opts: { sandbox: SandboxExecutor }): Promise<void>;
+  promoteSessionOutputs?(opts: { sandbox: SandboxPort }): Promise<void>;
 
   /** Build the LanguageModel for this turn. CF reads env from
    *  bindings; Node from process.env (and optionally a model card).

@@ -374,7 +374,23 @@ export type HistorySessionEvent =
       title?: string | null;
     };
 
+export interface SandboxStartupEvent {
+  id: string;
+  type: "session.sandbox_startup";
+  processedAt: string;
+  bootId: string;
+  trigger: "create" | "wake" | "revive";
+  status: "running" | "succeeded" | "failed" | "skipped";
+  scriptSha256?: string;
+  durationMs?: number;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  message?: string;
+}
+
 export type SessionEventView =
+  | SandboxStartupEvent
   | SentSessionEvent
   | SessionUsageEventView
   | HistorySessionEvent;

@@ -1,3 +1,4 @@
+import type { Environment } from "../environments";
 import type { AgentModel, AgentOpenMaExtensions } from "../agents";
 import type {
   AgentMcpServer,
@@ -71,6 +72,8 @@ export interface Session {
   budget: MonetaryAmount | null;
   createdAt: string;
   environmentId: string;
+  /** Execution configuration pinned when the session is created. Contains no secrets. */
+  environmentSnapshot?: Environment;
   metadata: Record<string, string>;
   outcomeEvaluations: SessionOutcomeEvaluation[];
   resources: SessionResource[];

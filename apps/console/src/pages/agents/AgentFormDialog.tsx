@@ -17,10 +17,6 @@ import { Combobox } from "../../components/Combobox";
 import { McpServerPickerModal } from "../../components/McpServerPickerModal";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../../data/templates";
 import type { ModelCard, ModelReasoning } from "@open-managed-agents/api-types";
-import {
-  KNOWN_ACP_AGENTS,
-  resolveKnownAgent,
-} from "@open-managed-agents/acp-runtime/known-agents";
 import type { AgentRecord as Agent } from "../../types/agent";
 import { useI18n } from "../../i18n";
 import {
@@ -502,16 +498,16 @@ export function AgentFormDialog({
               </div>
               <div className="flex-1 overflow-y-auto px-6 py-4">
                 <div className="grid grid-cols-2 gap-3">
-                  {filteredTemplates.map((tmpl) => (
-                    <Button variant="ghost"
-                      key={tmpl.id}
-                      onClick={() => selectTemplate(tmpl)}
-                      className="text-left border border-border rounded-lg p-4 hover:border-brand hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
-                    >
-                      <div className="font-medium text-sm text-fg">{tmpl.name}</div>
-                      <div className="text-xs text-fg-muted mt-1 line-clamp-2">
-                        {tmpl.description}
-                      </div>
+                {filteredTemplates.map((tmpl) => (
+                  <Button variant="ghost"
+                    key={tmpl.id}
+                    onClick={() => selectTemplate(tmpl)}
+                    className="text-left border border-border rounded-lg p-4 hover:border-brand hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                  >
+                    <div className="font-medium text-sm text-fg">{tmpl.name}</div>
+                    <div className="text-xs text-fg-muted mt-1 line-clamp-2">
+                      {tmpl.description}
+                    </div>
                       {tmpl.tags.length > 0 && (
                         <div className="flex flex-wrap gap-1 mt-2">
                           {tmpl.tags.map((tag) => (
@@ -868,10 +864,9 @@ function BasicTab({
             />
           </div>
         )}
-      {!form.runtimeId && (
-        <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Speed</label>
+            <Label className="text-sm text-fg-muted block mb-1">Speed</Label>
             <Select
               value={form.modelSpeed === "fast" ? "fast" : "standard"}
               onValueChange={(v) => setForm({ ...form, modelSpeed: v as "standard" | "fast" })}
@@ -881,7 +876,7 @@ function BasicTab({
             </Select>
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Reasoning</label>
+            <Label className="text-sm text-fg-muted block mb-1">Reasoning</Label>
             <Select
               value={form.modelReasoning || "__default__"}
               onValueChange={(v) =>
@@ -896,14 +891,7 @@ function BasicTab({
               ))}
             </Select>
           </div>
-        </div>
-      )}
-      {form.runtimeId && (
-        <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-          Model is determined by the ACP child on the runtime ({form.acpAgentId || "—"}) — it
-          uses its own LLM credentials.
-        </p>
-      )}
+      </div>
       <div className="grid grid-cols-[minmax(0,1fr)_9rem] gap-3">
         <div>
           <Label className="text-sm text-fg-muted block mb-1">
@@ -1446,6 +1434,30 @@ function AgentsTab({
 }) {
   return (
     <div className="space-y-5">
+      {/* Built-in general sub-agent — opt-in. */}
+      <div className="rounded-md border border-border bg-bg-surface px-3 py-3">
+        <Label className="flex items-start gap-2 text-sm cursor-pointer">
+          <Checkbox
+            checked={form.enableGeneralSubagent}
+            onCheckedChange={(checked) =>
+              setForm({ ...form, enableGeneralSubagent: checked === true })
+            }
+            className="mt-0.5"
+          />
+          <div>
+            <div className="font-medium text-fg">Enable general sub-agent</div>
+            <p className="text-xs text-fg-subtle mt-0.5">
+              Exposes a built-in{" "}
+              <span className="font-mono">general_subagent(task)</span> tool. Spawns a
+              generic sub-agent thread (reserved id{" "}
+              <span className="font-mono">general</span>) inheriting this agent's model +
+              sandbox, with a safe built-in tool subset
+              (bash/read/write/edit/grep/glob). No roster setup needed.
+            </p>
+          </div>
+        </Label>
+      </div>
+
       <div>
         <Label className="text-sm font-medium text-fg block">Callable Agents</Label>
         <p className="text-xs text-fg-subtle mb-2">

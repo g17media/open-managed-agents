@@ -171,7 +171,7 @@ export function EnvironmentDetail() {
         env.config.type === "cloud"
           ? {
               type: "cloud",
-              ...(startup ? { startup } : {}),
+              ...(startup?.script.trim() ? { startup } : {}),
               ...(image.trim() ? { image: image.trim() } : {}),
               ...(image.trim() && registryVaultId !== "none" && registryCredentialId
                 ? { image_registry_auth: { vault_id: registryVaultId, credential_id: registryCredentialId } } : {}),
@@ -325,7 +325,7 @@ export function EnvironmentDetail() {
         >
           <div className="space-y-4">
             <Field label="Image" hint="Leave empty to use the provider's default image.">
-              <input
+              <Input
                 value={image}
                 onChange={(e) => setImage(e.target.value)}
                 placeholder="ghcr.io/acme/sandbox:latest"
@@ -381,7 +381,7 @@ export function EnvironmentDetail() {
           title="Agent context"
           subtitle="Extra context injected into the system prompt of every agent running sessions in this environment."
         >
-          <textarea
+          <Textarea
             value={contextText}
             onChange={(e) => setContextText(e.target.value)}
             rows={5}

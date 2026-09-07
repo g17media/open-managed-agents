@@ -54,6 +54,7 @@ export class FilesApplicationService
       sizeBytes: command.content.byteLength,
       downloadable: true,
       ...(origin !== undefined && { origin: { ...origin }, scope: { type: "session" as const, id: origin.sessionId } }),
+      ...(command.scope !== undefined && { scope: command.scope }),
     };
     const location = {
       workspaceId: this.dependencies.workspaceId,
