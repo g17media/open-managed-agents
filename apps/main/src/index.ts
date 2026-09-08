@@ -16,13 +16,10 @@ import {
   buildApiKeyRoutes,
   buildMeRoutes,
   buildTenantRoutes,
-  buildEnvironmentRoutes,
-  buildModelCardRoutes,
   buildSkillRoutes,
   buildSkillGitHubRoutes,
   nativeGitHubSkillPersistence,
   nativeOAuthCredentials,
-  buildStatsRoutes,
   buildClawhubRoutes,
   buildOAuthRoutes,
   buildCapCliOauthRoutes,
@@ -158,14 +155,17 @@ import {
 import { validateAgentLimits } from "./lib/limits";
 import { checkUploadFreq, checkUploadSize } from "./quotas";
 import { listMemberships, hasMembership } from "./auth-config";
+import legacyEnvironmentsRoutes from "./routes/environments";
 import legacyMemoryRoutes from "./routes/memory";
 import dreamsRoutes from "./routes/dreams";
 import legacyFilesRoutes from "./routes/files";
+import modelCardsRoutes from "./routes/model-cards";
 import evalsRoutes from "./routes/evals";
 import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
+import statsRoutes from "./routes/stats";
 import mcpProxyRoutes, {
   resolveProxyTargetByTenant,
   resolveOutboundCredentialByHost,
@@ -601,18 +601,6 @@ const managedUserProfilesRoutes = buildManagedUserProfileRoutes((context) => {
     .port(managedAgentsPortTokens.userProfiles);
 });
 
-const legacyEnvironmentsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
-  const ctx = c as unknown as AppCtx;
-  const app = buildEnvironmentRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
-  return invokePackage(c, app);
-});
-
-const modelCardsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
-  const ctx = c as unknown as AppCtx;
-  const app = buildModelCardRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
-  return invokePackage(c, app);
-});
-
 const legacySkillsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
   const ctx = c as unknown as AppCtx;
   const deps = {
@@ -628,12 +616,6 @@ const legacySkillsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: str
     return nativeGitHubSkillPersistence(managed.port(managedAgentsPortTokens.skills), managed.port(managedAgentsPortTokens.skillVersions));
   } }));
   app.route("/", buildSkillRoutes(deps));
-  return invokePackage(c, app);
-});
-
-const statsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
-  const ctx = c as unknown as AppCtx;
-  const app = buildStatsRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
   return invokePackage(c, app);
 });
 
