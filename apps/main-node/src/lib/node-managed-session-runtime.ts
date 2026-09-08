@@ -112,6 +112,7 @@ export interface NodeManagedSessionRunner {
 export interface ApplicationBackedNodeManagedSessionRuntimeEngineDependencies {
   historyFor(workspaceId: string): SessionRuntimeHistoryApplicationPort;
   runner: NodeManagedSessionRunner;
+  initializeSession?(input: StartNodeManagedSessionRuntime): Promise<void>;
 }
 
 export class ApplicationBackedNodeManagedSessionRuntimeEngine
@@ -131,6 +132,7 @@ export class ApplicationBackedNodeManagedSessionRuntimeEngine
   ): Promise<void> {
     await this.dependencies.runner.start(input);
     this.outputs.set(input, output);
+    await this.dependencies.initializeSession?.(input);
   }
 
   async stop(input: StopNodeManagedSessionRuntime): Promise<void> {

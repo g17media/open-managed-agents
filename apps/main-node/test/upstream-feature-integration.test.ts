@@ -87,7 +87,8 @@ describe("fork features using upstream application and SQL stores", () => {
       type: "mcp_oauth", mcp_server_url: "https://example.com/mcp", access_token: "old-token", refresh_token: "refresh-secret",
       token_endpoint: "https://example.com/token", client_id: "client", scope: "read write extra",
     } });
-    expect(await persistence.scope(vault.id, "credential_oauth")).toBe("read write extra");
+    expect(await persistence.authorizationSettings(vault.id, "credential_oauth"))
+      .toEqual({ scope: "read write extra", clientId: "client", clientSecret: undefined });
     const current = await store.find({ workspaceId, vaultId: vault.id, credentialId: "credential_oauth" });
     const request = vi.fn<typeof fetch>(async (_url, init) => {
       expect(new URLSearchParams(init?.body as URLSearchParams).get("scope")).toBe("read write extra");

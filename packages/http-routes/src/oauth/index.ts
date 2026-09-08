@@ -6,7 +6,9 @@ import { resolveServices } from "../types";
 
 export interface OAuthCredentialPersistence {
   vaultExists(vaultId: string): Promise<boolean>;
-  scope(vaultId: string, credentialId: string): Promise<string | undefined>;
+  authorizationSettings(vaultId: string, credentialId: string): Promise<{
+    scope?: string; clientId?: string; clientSecret?: string;
+  } | null>;
   saveGrant(input: { vaultId: string; credentialId?: string; displayName: string; auth: CredentialAuth }): Promise<string>;
   saveCliGrant(input: { vaultId: string; cliId: string; auth: CredentialAuth }): Promise<string>;
   refresh(vaultId: string, credentialId: string): Promise<{ expires_at?: string | null }>;
@@ -322,7 +324,11 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     // Re-authorization of an existing credential with no explicit scope
     // override: reuse the scopes stored on the credential so user-added
     // scopes survive reconnects.
-    if (!extraScope && credentialId && native) extraScope = await native.scope(vaultId, credentialId) ?? "";
+    const savedAuthorization = credentialId && native
+      ? await native.authorizationSettings(vaultId, credentialId)
+      : null;
+    if (credentialId && native && !savedAuthorization) return c.json({ error: "Credential not found" }, 404);
+    if (!extraScope && savedAuthorization) extraScope = savedAuthorization.scope ?? "";
     if (!extraScope && credentialId && !native) {
       const existing = await services.credentials
         .get({ tenantId: t, vaultId, credentialId })
@@ -351,8 +357,10 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     const callerClientSecret = c.req.query("client_secret");
 
     // Dynamic Client Registration if supported (skipped when caller supplied creds).
-    let clientId: string | null = callerClientId || null;
-    let clientSecret: string | undefined = callerClientSecret || undefined;
+    let clientId: string | null = callerClientId || savedAuthorization?.clientId || null;
+    let clientSecret: string | undefined = callerClientSecret ||
+      ((!callerClientId || callerClientId === savedAuthorization?.clientId)
+        ? savedAuthorization?.clientSecret : undefined);
     if (!clientId && meta.authServer.registration_endpoint) {
       const reg = await dynamicClientRegistration(
         meta.authServer.registration_endpoint,

@@ -158,6 +158,43 @@ export function VaultDetail() {
     });
   }, [id, refetchCreds, queryClient]);
 
+  const [reconnectingCredentialId, setReconnectingCredentialId] = useState<string | null>(null);
+  const reconnectCredential = (credential: Credential) => {
+    if (!id || credential.auth.type !== "mcp_oauth") return;
+    const params = new URLSearchParams({
+      mcp_server_url: credential.auth.mcp_server_url,
+      vault_id: id,
+      credential_id: credential.id,
+      redirect_uri: window.location.href,
+    });
+    const tenant = getActiveTenantId();
+    if (tenant) params.set("active_tenant", tenant);
+    setReconnectingCredentialId(credential.id);
+    window.open(`/v1/oma/oauth/authorize?${params}`, "oauth", "width=600,height=700,popup=yes");
+  };
+
+  useEffect(() => {
+    if (!reconnectingCredentialId) return;
+    const complete = (event: MessageEvent) => {
+      if (event.type === "message" && event.origin && event.origin !== window.location.origin) return;
+      if (event.data?.type !== "oauth_complete") return;
+      setReconnectingCredentialId(null);
+      reloadCredentials();
+      if (event.data.probe_ok === false) toast.warning("Credential renewed, but the MCP server still rejected it.");
+      else toast.success("Credential reconnected");
+    };
+    window.addEventListener("message", complete);
+    let channel: BroadcastChannel | undefined;
+    try {
+      channel = new BroadcastChannel("openma-oauth");
+      channel.addEventListener("message", complete);
+    } catch { /* postMessage remains available when BroadcastChannel is unsupported. */ }
+    return () => {
+      window.removeEventListener("message", complete);
+      channel?.close();
+    };
+  }, [reconnectingCredentialId, reloadCredentials]);
+
   const reloadVault = useCallback(() => {
     if (!id) return;
     void queryClient.invalidateQueries({ queryKey: [`/v1/vaults/${id}`] });
@@ -376,6 +413,11 @@ export function VaultDetail() {
                           {new Date(c.updated_at).toLocaleString()}
                         </TableCell>
                         <TableCell className="text-right whitespace-nowrap">
+                          {!c.archived_at && c.auth.type === "mcp_oauth" && (
+                            <Button variant="ghost" onClick={() => reconnectCredential(c)}>
+                              Reconnect
+                            </Button>
+                          )}
                           {!c.archived_at && (
                             <Button variant="ghost"
                               onClick={() => setEditingCred(c)}
@@ -921,7 +963,7 @@ function AddCredentialModal({
   const createCapCliCred = async () => {
     const defaultName =
       CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.label ?? cliForm.cli_id;
-    await api(`/v1/oma/vaults/${vault.id}/credentials`, {
+    await api(`/v1/vaults/${vault.id}/credentials`, {
       method: "POST",
       body: JSON.stringify({
         display_name: cliForm.display_name || defaultName,

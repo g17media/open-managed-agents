@@ -663,9 +663,17 @@ describe("main-node official Managed Agents route", () => {
       },
       environment_id: "env-local-runtime",
       title: "Node managed session",
-      status: "running",
+      status: "idle",
     });
     expect(retrievedSession).toEqual(createdSession);
+
+    for (const suffix of ["", "/trajectory", "/pending", "/outputs"]) {
+      const response = await fetch(
+        `http://127.0.0.1:${handle.port}/v1/oma/sessions/${createdSession.id}${suffix}`,
+        { headers: { "x-api-key": "test-key" } },
+      );
+      expect(response.status, `session detail ${suffix || "metadata"}: ${await response.text()}`).toBe(200);
+    }
 
     const statsResponse = await fetch(
       `http://127.0.0.1:${handle.port}/v1/oma/stats`,

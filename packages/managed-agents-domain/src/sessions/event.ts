@@ -391,7 +391,17 @@ export interface SandboxStartupEvent {
   message?: string;
 }
 
+export interface SessionWarningEvent {
+  id: string;
+  type: "session.warning";
+  processedAt: string;
+  source: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
 export type SessionEventView =
+  | SessionWarningEvent
   | SandboxStartupEvent
   | SentSessionEvent
   | SessionUsageEventView

@@ -1246,17 +1246,19 @@ export async function buildTools(
           mcpClientsByToolSet.set(tools, clients);
         } catch (err) {
           if (mcpClient) await mcpClient.close().catch(() => undefined);
-          // An upstream MCP outage removes that server's tools for this
-          // turn, but must be visible in the managed event stream. This is
-          // an explicit degraded state rather than the previous silent skip.
-          const message =
-            `MCP setup failed for "${server.name}" (${server.url}): `
-            + (err instanceof Error ? err.message : String(err));
-          console.error(`[mcp] ${message}`);
+          // Connection / handshake / tools/list failure for one server
+          // (e.g. main worker unreachable, vault credential missing,
+          // upstream MCP server down, our timeout fired). Log + skip so
+          // a single misconfiguration doesn't take the whole turn down.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[mcp] cloud MCP setup failed for "${server.name}" (${server.url}): ${msg}`,
+          );
           env.broadcastEvent?.({
             type: "session.warning",
-            message,
-          } as SessionEvent);
+            source: "mcp",
+            message: `MCP server "${serverName}" is unavailable: ${msg}. Check its connection and vault credential.`,
+          });
         }
       }
     }

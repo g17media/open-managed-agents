@@ -93,6 +93,7 @@ interface RunnerConstructor {
       session: Session;
       environment: Environment;
       sandbox: SandboxExecutor;
+      runtime: { broadcast(event: SessionEvent): void };
     }): Promise<unknown>;
     disposeTools?(tools: unknown): Promise<void>;
     buildHarness(): { run(context: unknown): Promise<void> };
@@ -321,7 +322,11 @@ describe("DefaultNodeManagedSessionRunner", () => {
       confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
       buildSandbox: async () => sandbox,
       buildModel: async () => ({ type: "model" }),
-      buildTools: async () => builtTools,
+      buildTools: async ({ runtime }) => {
+        // Tools surface degraded state through the runtime; asserted below.
+        runtime.broadcast({ type: "session.warning", source: "mcp", message: "Dendrite authorization failed (HTTP 401)" });
+        return builtTools;
+      },
       disposeTools: async (tools) => {
         expect(tools).toBe(builtTools);
         lifecycle.push("dispose");
@@ -431,12 +436,19 @@ describe("DefaultNodeManagedSessionRunner", () => {
       },
       {
         id: "event_runtime_02",
+        type: "session.warning",
+        source: "mcp",
+        message: "Dendrite authorization failed (HTTP 401)",
+        processed_at: "2026-08-26T02:00:00.000Z",
+      },
+      {
+        id: "event_runtime_03",
         type: "agent.message",
         content: [{ type: "text", text: "Hello" }],
         processed_at: "2026-08-26T02:00:00.000Z",
       },
       {
-        id: "event_runtime_03",
+        id: "event_runtime_04",
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
         processed_at: "2026-08-26T02:00:00.000Z",

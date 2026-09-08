@@ -130,7 +130,7 @@ export interface DefaultNodeManagedSessionRunnerDependencies {
   }): Promise<void>;
   buildModel(input: ManagedRunnerContext): Promise<HarnessContext["model"]>;
   buildTools(
-    input: ManagedRunnerContext & ManagedRunnerSubagentContext & { sandbox: SandboxExecutor },
+    input: ManagedRunnerContext & ManagedRunnerSubagentContext & { sandbox: SandboxExecutor; runtime: ManagedNodeHarnessRuntime },
   ): Promise<HarnessContext["tools"]>;
   disposeTools?(tools: HarnessContext["tools"]): Promise<void>;
   buildHarness(): HarnessInterface;

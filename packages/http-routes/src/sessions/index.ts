@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import { nanoid } from "nanoid";
 import type { Context } from "hono";
 import {
+  buildTrajectory,
   generateFileId,
   generateEventId,
   guessSessionOutputMime,
@@ -27,8 +28,17 @@ import type {
   EnvironmentConfig,
   SessionEvent,
   SessionResource,
+  SessionRecord,
+  StoredEvent,
   UserMessageEvent,
 } from "@open-managed-agents/shared";
+import type {
+  EnvironmentsApplicationPort,
+  SessionEventsApplicationPort,
+  SessionsApplicationPort,
+} from "@open-managed-agents/managed-agents-application";
+import { toEnvironmentResponse, toSessionResponse } from "@open-managed-agents/managed-agents-api";
+import { encodeRuntimeHistoryEvent, encodeRuntimeSessionStart } from "@open-managed-agents/managed-agents-adapters-runtime";
 import {
   SessionArchivedError,
   SessionMemoryStoreMaxExceededError,
@@ -162,6 +172,13 @@ export interface SessionLifecycleHooks {
 }
 
 export interface SessionRoutesDeps {
+  /** The same workspace-scoped application used by /v1/sessions.
+   * Additional session views must not query the retired session rows. */
+  application: (c: Context) => {
+    sessions: Pick<SessionsApplicationPort, "retrieveSession">;
+    sessionEvents: Pick<SessionEventsApplicationPort, "listSessionEvents">;
+    environments: Pick<EnvironmentsApplicationPort, "retrieveEnvironment">;
+  };
   /** Reject startup-enabled environments when the runtime cannot honor their lifecycle. */
   supportsStartupScripts?: boolean;
   services: RouteServicesArg;
@@ -626,23 +643,20 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
   });
 
   app.get("/:id", async (c) => {
-    const services = resolveServices(deps.services, c);
-    const router = resolveRouter(deps.router, c);
-    const id = c.req.param("id");
-    const sess = await services.sessions.get({
-      tenantId: c.var.tenant_id,
-      sessionId: id,
+    const result = await deps.application(c).sessions.retrieveSession({
+      sessionId: c.req.param("id"),
     });
-    if (!sess) return c.json({ error: "Session not found" }, 404);
-    const response: Record<string, unknown> = { ...toApiSession(sess as never) };
-    const live = await router.getFullStatus(id);
-    if (live) {
-      response.status = live.status;
-      response.usage = live.usage;
-      if (live.outcome_evaluations) response.outcome_evaluations = live.outcome_evaluations;
-      if (live.resources) response.resources = live.resources;
+    if (result.type !== "found") return c.json({ error: "Session not found" }, 404);
+    const metadata: Record<string, unknown> = { ...result.session.metadata };
+    // These integration fields are objects in the OMA response. Migration
+    // preserves them as JSON strings in the SDK's string-valued metadata.
+    for (const key of ["linear", "slack"]) {
+      try {
+        const value: unknown = JSON.parse(result.session.metadata[key] ?? "null");
+        if (value !== null && typeof value === "object" && !Array.isArray(value)) metadata[key] = value;
+      } catch { /* Plain metadata strings retain their value. */ }
     }
-    return c.json(response);
+    return c.json({ ...toSessionResponse(result.session), agent_id: result.session.agent.id, metadata });
   });
 
   app.post("/:id/archive", async (c) => {
@@ -966,25 +980,60 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
 
   // ── Trajectory ────────────────────────────────────────────────────────
   app.get("/:id/trajectory", async (c) => {
-    const services = resolveServices(deps.services, c);
-    const router = resolveRouter(deps.router, c);
-    const id = c.req.param("id");
-    const sess = await services.sessions.get({
-      tenantId: c.var.tenant_id,
-      sessionId: id,
-    });
-    if (!sess) return c.json({ error: "Session not found" }, 404);
+    const application = deps.application(c);
+    const sessionId = c.req.param("id");
+    const result = await application.sessions.retrieveSession({ sessionId });
+    if (result.type !== "found") return c.json({ error: "Session not found" }, 404);
+    const { session } = result;
     try {
-      const trajectory = await router.getTrajectory(sess as never, {
-        fetchEnvironmentConfig: () =>
-          deps.loadEnvironment
-            ? deps.loadEnvironment({
-                tenantId: c.var.tenant_id,
-                environmentId: (sess as unknown as { environment_id: string }).environment_id,
-              })
-            : Promise.resolve(null),
+      let environment = session.environmentSnapshot;
+      if (!environment) {
+        const found = await application.environments.retrieveEnvironment({ environmentId: session.environmentId });
+        if (found.type !== "found") return c.json({ error: "Session environment not found" }, 404);
+        environment = found.environment;
+      }
+      const snapshot = encodeRuntimeSessionStart({
+        workspaceId: c.var.tenant_id, sessionId, session, environment, initialEvents: [],
       });
-      return c.json(trajectory);
+      const record: SessionRecord = {
+        id: session.id, agent_id: session.agent.id, environment_id: session.environmentId,
+        title: session.title ?? "", status: session.status, created_at: session.createdAt,
+        agent_snapshot: snapshot.agent_snapshot as SessionRecord["agent_snapshot"],
+        environment_snapshot: toEnvironmentResponse(environment) as SessionRecord["environment_snapshot"],
+      };
+      const events: StoredEvent[] = [];
+      let cursor: string | undefined;
+      const cursors = new Set<string>();
+      do {
+        const page = await application.sessionEvents.listSessionEvents({ sessionId, pageSize: 100, order: "asc", cursor });
+        if (page.type === "not_found") return c.json({ error: "Session not found" }, 404);
+        if (page.type !== "page") return c.json({ error: page.message }, 500);
+        for (const event of page.page.events) events.push({
+          seq: events.length, type: event.type, data: JSON.stringify(encodeRuntimeHistoryEvent(event)),
+          ts: event.processedAt ?? session.createdAt,
+        });
+        cursor = page.page.nextCursor ?? undefined;
+        if (cursor) {
+          if (cursors.has(cursor)) throw new Error("Session history pagination did not advance");
+          cursors.add(cursor);
+        }
+      } while (cursor);
+      return c.json(await buildTrajectory(record, {
+        fetchAllEvents: async () => events,
+        fetchFullStatus: async () => ({
+          status: session.status,
+          usage: {
+            input_tokens: session.usage.inputTokens, output_tokens: session.usage.outputTokens,
+            cache_read_input_tokens: session.usage.cacheReadInputTokens,
+            cache_creation_input_tokens: (session.usage.cacheCreation?.ephemeralOneHourInputTokens ?? 0) +
+              (session.usage.cacheCreation?.ephemeralFiveMinuteInputTokens ?? 0),
+          },
+          outcome_evaluations: session.outcomeEvaluations.map((evaluation) => ({
+            result: evaluation.result, iteration: evaluation.iteration,
+            ...(evaluation.explanation !== null && { feedback: evaluation.explanation }),
+          })),
+        }),
+      }));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ error: msg }, 500);
@@ -996,16 +1045,14 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
   // yet drained by the harness. Forwards opaque query string (?session_
   // thread_id, ?include_cancelled) to the SessionRouter.
   app.get("/:id/pending", async (c) => {
-    const services = resolveServices(deps.services, c);
     const router = resolveRouter(deps.router, c);
-    const tenantId = c.var.tenant_id;
     const sessionId = c.req.param("id");
-    const sess = await services.sessions.get({ tenantId, sessionId });
-    if (!sess) return c.json({ error: "Session not found" }, 404);
+    const result = await deps.application(c).sessions.retrieveSession({ sessionId });
+    if (result.type !== "found") return c.json({ error: "Session not found" }, 404);
     const url = new URL(c.req.url);
-    const result = await router.getPending(sessionId, { rawSearch: url.search });
-    return new Response(result.body, {
-      status: result.status,
+    const pending = await router.getPending(sessionId, { rawSearch: url.search, environmentId: result.session.environmentId });
+    return new Response(pending.body, {
+      status: pending.status,
       headers: { "content-type": "application/json" },
     });
   });
@@ -1015,13 +1062,12 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
   // LLM request/response body for one span.model_request_end event.
   // CF reads from R2 (FILES_BUCKET); other runtimes return 501.
   app.get("/:id/llm-calls/:event_id", async (c) => {
-    const services = resolveServices(deps.services, c);
     const router = resolveRouter(deps.router, c);
     const tenantId = c.var.tenant_id;
     const sessionId = c.req.param("id");
     const eventId = c.req.param("event_id");
-    const sess = await services.sessions.get({ tenantId, sessionId });
-    if (!sess) return c.json({ error: "Session not found" }, 404);
+    const session = await deps.application(c).sessions.retrieveSession({ sessionId });
+    if (session.type !== "found") return c.json({ error: "Session not found" }, 404);
     const result = await router.getLlmCallBody(tenantId, sessionId, eventId);
     return new Response(result.body, {
       status: result.status,
@@ -1320,29 +1366,24 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
 
   // ── Outputs (R2 / local FS — adapter-driven) ──────────────────────────
   app.get("/:id/outputs", async (c) => {
-    if (!deps.outputs) return c.json({ data: [], has_more: false });
-    const services = resolveServices(deps.services, c);
     const id = c.req.param("id");
     const t = c.var.tenant_id;
-    const sess = await services.sessions.get({ tenantId: t, sessionId: id });
-    if (!sess) return c.json({ error: "Session not found" }, 404);
+    const result = await deps.application(c).sessions.retrieveSession({ sessionId: id });
+    if (result.type !== "found") return c.json({ error: "Session not found" }, 404);
+    if (!deps.outputs) return c.json({ data: [], has_more: false });
     const data = await deps.outputs.list(t, id);
     return c.json({ data: data ?? [], has_more: false });
   });
 
   app.get("/:id/outputs/:filename", async (c) => {
     if (!deps.outputs) return c.json({ error: "outputs not configured" }, 404);
-    const services = resolveServices(deps.services, c);
     const id = c.req.param("id");
     const filename = c.req.param("filename");
     if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
       return c.json({ error: "Invalid filename" }, 400);
     }
-    const sess = await services.sessions.get({
-      tenantId: c.var.tenant_id,
-      sessionId: id,
-    });
-    if (!sess) return c.json({ error: "Session not found" }, 404);
+    const result = await deps.application(c).sessions.retrieveSession({ sessionId: id });
+    if (result.type !== "found") return c.json({ error: "Session not found" }, 404);
     const obj = await deps.outputs.read(c.var.tenant_id, id, filename);
     if (!obj) return c.json({ error: "Output file not found" }, 404);
     return new Response(obj.body, {

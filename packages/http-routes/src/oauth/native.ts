@@ -29,10 +29,15 @@ export function nativeOAuthCredentials(input: {
   };
   return {
     vaultExists,
-    async scope(vaultId, credentialId) {
+    async authorizationSettings(vaultId, credentialId) {
       const record = await input.store.find({ workspaceId: input.workspaceId, vaultId, credentialId });
       const auth = record?.credential.auth;
-      return auth?.type === "mcp_oauth" ? auth.scope ?? auth.refresh?.scope ?? undefined : undefined;
+      if (!record || record.credential.archivedAt || auth?.type !== "mcp_oauth") return null;
+      return {
+        scope: auth.scope ?? auth.refresh?.scope ?? undefined,
+        clientId: auth.refresh?.clientId,
+        clientSecret: auth.refresh?.tokenEndpointAuth.type === "none" ? undefined : auth.refresh?.tokenEndpointAuth.clientSecret ?? undefined,
+      };
     },
     async saveGrant({ vaultId, credentialId, displayName, auth }) {
       if (!auth.access_token || !auth.mcp_server_url) throw new Error("OAuth grant is incomplete");

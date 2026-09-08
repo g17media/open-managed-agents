@@ -439,7 +439,7 @@ describe("SessionsApplicationService", () => {
           },
         ],
         stats: {},
-        status: "running",
+        status: "idle",
         title: "Ship the migration",
         updatedAt: "2026-08-26T02:00:00.000Z",
         usage: {},

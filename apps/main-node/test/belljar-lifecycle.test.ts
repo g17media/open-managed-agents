@@ -102,6 +102,28 @@ describe("OMA-managed startup", () => {
     expect(f.prepare).not.toHaveBeenCalled();
   });
 
+  it("accepts the adapter's sandbox name for mixed-case session IDs without changing ownership", async () => {
+    const f = fixture();
+    const ownerId = "session_MixedCase_0123";
+    f.session.id = ownerId;
+    let sandboxId = "";
+    vi.stubGlobal("fetch", vi.fn(async (url, init) => {
+      if (String(url).endsWith("/v1/sandboxes")) {
+        const body = JSON.parse(init.body);
+        sandboxId = body.id;
+        expect(body.lifecycle.ownerId).toBe(ownerId);
+        return Response.json({ sandbox: { lifecycle: body.lifecycle } });
+      }
+      return Response.json({ exitCode: 0, stdout: "", stderr: "" });
+    }));
+    const adapter = new BelljarSandbox({ baseUrl: "http://belljar:8877", sessionId: ownerId, startupManaged: true });
+    await adapter.exec("true");
+    expect(sandboxId).toMatch(/^[a-z0-9][a-z0-9_-]*[a-z0-9]$/);
+    expect((await f.send({ ...payload, ownerId, sandboxId })).status).toBe(200);
+    expect(f.deps.getSession).toHaveBeenCalledWith(ownerId);
+    expect((await f.send({ ...payload, ownerId: ownerId.toLowerCase(), sandboxId })).status).toBe(400);
+  });
+
   it("uses a scoped initialization adapter with the same proxy/CA command environment", async () => {
     const dir = await mkdtemp(join(tmpdir(), "oma-startup-ca-"));
     tempDirs.push(dir);

@@ -3,6 +3,7 @@ import type { SqlClient } from "@open-managed-agents/sql-client";
 import type {
   SessionBootstrapEvent,
 } from "@open-managed-agents/domain/sessions";
+import { sessionInitialEventId } from "@open-managed-agents/domain/sessions";
 import type {
   LoadSessionRuntimeHistoryRecord,
   SessionRuntimeHistoryRecord,
@@ -64,11 +65,14 @@ export class SqlSessionRuntimeHistorySource
       ? (decoded as OrderedSessionEvent[]).slice().sort((left, right) =>
           left.position.revision - right.position.revision || left.position.index - right.position.index)
       : undefined;
+    const persistedIds = new Set(decoded.map(row => row.event.id));
     return {
       revision: session.revision,
-      initialEvents: initialRows.map(
-        (row) => JSON.parse(row.document!) as SessionBootstrapEvent,
-      ),
+      initialEvents: initialRows
+        .map((row) => JSON.parse(row.document!) as SessionBootstrapEvent)
+        // A bootstrap event that was also written to the event log would
+        // otherwise replay twice (see "remove duplicate writers").
+        .filter((_, sequence) => !persistedIds.has(sessionInitialEventId(input.sessionId, sequence))),
       events: decoded.map(row => row.event),
       ...(orderedEvents === undefined ? {} : { orderedEvents }),
     };

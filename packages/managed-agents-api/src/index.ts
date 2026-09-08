@@ -125,3 +125,5 @@ export function buildManagedAgentsApi(
 // Shared by persisted-history migration and the HTTP/SSE routes.
 export { toSessionEventResponse } from "./mappers/session-events";
 export { sessionStreamEventResponseSchema } from "./contracts/session-events";
+export { toSessionResponse } from "./mappers/sessions";
+export { toEnvironmentResponse } from "./mappers/environments";

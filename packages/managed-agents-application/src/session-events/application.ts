@@ -16,6 +16,7 @@ import type { SessionEventDispatchPort } from "../session-execution/events";
 import type {
   SessionExecutionContextSourcePort,
 } from "@open-managed-agents/session-runtime-contract/context";
+import { sessionInitialEventId, type SessionBootstrapEvent } from "../domain/session-bootstrap";
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -154,6 +155,57 @@ function applyAcceptedEvents(
     }
   }
   return next;
+}
+
+/** Admit saved startup events into the ordinary log before running a turn.
+ * The original bootstrap records remain intact; stable IDs and the Session
+ * revision prevent concurrent starts from dispatching the same input twice. */
+export class SessionInitialEventsApplicationService {
+  constructor(private readonly dependencies: Pick<SessionEventsApplicationServiceDependencies,
+    "workspaceId" | "store" | "execution" | "dispatch">) {}
+
+  async initialize(input: { sessionId: string; events: SessionBootstrapEvent[] }): Promise<void> {
+    if (input.events.length === 0) return;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const execution = await this.dependencies.execution.find({
+        workspaceId: this.dependencies.workspaceId, sessionId: input.sessionId,
+      });
+      if (!execution) throw new Error(`Session ${input.sessionId} is unavailable during initialization`);
+      const events = input.events.map((event, sequence) => toSentEvent(event,
+        sessionInitialEventId(input.sessionId, sequence), execution.session.createdAt,
+        () => `outc_initial_${input.sessionId}_${sequence}`));
+      const existing = new Set<string>();
+      let position: { processedAt: string; eventId: string } | undefined;
+      for (;;) {
+        const page = await this.dependencies.store.list({
+          workspaceId: this.dependencies.workspaceId, sessionId: input.sessionId,
+          createdAtOrAfter: execution.session.createdAt, createdAtOrBefore: execution.session.createdAt,
+          order: "asc", limit: 100, ...(position && { position }),
+        });
+        for (const event of page) existing.add(event.id);
+        if (page.length < 100) break;
+        const last = page.at(-1)!;
+        position = { eventId: last.id, processedAt: last.processedAt! };
+      }
+      const pending = events.filter((event) => !existing.has(event.id));
+      if (pending.length === 0) return;
+      const appended = await this.dependencies.store.append({
+        workspaceId: this.dependencies.workspaceId, sessionId: input.sessionId,
+        expectedRevision: execution.revision, events: pending,
+        nextSession: applyAcceptedEvents(execution.session, pending),
+      });
+      if (appended.type === "revision_conflict") continue;
+      if (appended.type === "not_found") throw new Error(`Session ${input.sessionId} disappeared during initialization`);
+      if (appended.events.some((event) => event.type !== "system.message")) {
+        await this.dependencies.dispatch.sessionEventsAccepted({
+          workspaceId: this.dependencies.workspaceId, sessionId: input.sessionId,
+          session: appended.session, environment: execution.environment, events: appended.events,
+        });
+      }
+      return;
+    }
+    throw new Error("Session changed concurrently while accepting initial events");
+  }
 }
 
 export class SessionEventsApplicationService
