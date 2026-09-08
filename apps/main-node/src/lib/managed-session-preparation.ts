@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { ManagedMemoryFiles } from "./managed-memory-files.js";
 import { unzipSync } from "fflate";
 import type { SandboxPort } from "@open-managed-agents/sandbox";
-import type { Environment, Session, FilesApplicationPort, SkillVersionsApplicationPort } from "@open-managed-agents/managed-agents-application";
+import type { Environment, Session, FilesApplicationPort, SkillVersionsApplicationPort, MemoriesApplicationPort } from "@open-managed-agents/managed-agents-application";
 
 const mountedResources = new WeakMap<SandboxPort, Set<string>>();
 const mountedSkills = new WeakMap<SandboxPort, Set<string>>();
@@ -129,4 +130,78 @@ export async function promoteManagedSessionOutputs(input: {
     if (result.type !== "uploaded") throw new Error(result.message);
     fingerprints.add(fingerprint);
   }
+}
+
+/** Bind memory synchronization and output persistence to the native runtime. */
+export function createManagedSessionPreparation(deps: {
+  memoryRoot: string;
+  memoriesForSession(workspaceId: string, sessionId: string): MemoriesApplicationPort;
+  filesFor(workspaceId: string): FilesApplicationPort;
+  sessionOutputs: ReturnType<typeof import("./node-outputs-adapter.js").nodeOutputsAdapter>;
+  sandboxOrchestrator: import("@open-managed-agents/sandbox/orchestrator").SandboxOrchestrator;
+  logger: Pick<import("@open-managed-agents/observability").Logger, "warn">;
+}) {
+  const { memoryRoot, memoriesForSession, filesFor, sessionOutputs, sandboxOrchestrator, logger } = deps;
+  const managedMemoryFiles = new ManagedMemoryFiles(memoryRoot);
+  const managedMemoryMounts = new WeakMap<SandboxPort, Set<string>>();
+  const managedMemorySync = new WeakMap<SandboxPort, ReturnType<typeof setInterval>>();
+  async function flushManagedMemoryFiles(workspaceId: string, session: Session) {
+    const results = await Promise.allSettled(session.resources.filter((resource) => resource.type === "memory_store" && resource.access !== "read_only")
+      .map((resource) => resource.type === "memory_store"
+        ? managedMemoryFiles.flush(workspaceId, resource.memoryStoreId, memoriesForSession(workspaceId, session.id)) : Promise.resolve()));
+    const failed = results.filter((result) => result.status === "rejected");
+    if (failed.length) throw new Error(failed.map((result) => String(result.reason)).join("; "));
+  }
+  async function prepareManagedMemoryMounts(workspaceId: string, session: Session, sandbox: SandboxPort) {
+    let mounted = managedMemoryMounts.get(sandbox);
+    if (!mounted) { mounted = new Set(); managedMemoryMounts.set(sandbox, mounted); }
+    for (const resource of session.resources) {
+      if (resource.type !== "memory_store") continue;
+      await managedMemoryFiles.prepare(workspaceId, resource.memoryStoreId, memoriesForSession(workspaceId, session.id), resource.access === "read_only");
+      if (mounted.has(resource.memoryStoreId)) continue;
+      if (!sandbox.mountMemoryStore) throw new Error("The selected sandbox provider does not support memory mounts");
+      await sandbox.mountMemoryStore({ storeId: resource.memoryStoreId, storeName: resource.name ?? resource.memoryStoreId, readOnly: resource.access === "read_only" });
+      mounted.add(resource.memoryStoreId);
+    }
+  }
+
+  const hooks: Pick<import("./node-managed-session-runner.js").DefaultNodeManagedSessionRunnerDependencies,
+    "prepareSession" | "completeSession"> = {
+    prepareSession: async ({ workspaceId, session, sandbox }) => {
+      await prepareManagedMemoryMounts(workspaceId, session, sandbox);
+      await mountManagedSessionResources({ session, sandbox,
+        files: filesFor(workspaceId) });
+      if (session.resources.some((resource) => resource.type === "memory_store" && resource.access !== "read_only")) {
+        clearInterval(managedMemorySync.get(sandbox));
+        const timer = setInterval(() => {
+          void flushManagedMemoryFiles(workspaceId, session).catch((error) =>
+            logger.warn({ op: "session.memory_sync.failed", session_id: session.id, error }, "Memory sync failed"));
+        }, 30_000);
+        timer.unref();
+        managedMemorySync.set(sandbox, timer);
+      }
+    },
+    completeSession: async ({ workspaceId, session, sandbox }) => {
+      clearInterval(managedMemorySync.get(sandbox));
+      managedMemorySync.delete(sandbox);
+      const persistOutputs = async () => {
+        const outputs = [];
+        for (const entry of await sessionOutputs.list(workspaceId, session.id)) {
+          const file = await sessionOutputs.read(workspaceId, session.id, entry.filename);
+          if (file) outputs.push({ filename: entry.filename, mediaType: entry.media_type, content: new Uint8Array(await new Response(file.body).arrayBuffer()) });
+        }
+        await promoteManagedSessionOutputs({ sessionId: session.id, outputs,
+          files: filesFor(workspaceId) });
+      };
+      // A memory conflict must not prevent output promotion or the workspace backup.
+      const results = await Promise.allSettled([
+        flushManagedMemoryFiles(workspaceId, session),
+        persistOutputs(),
+        sandboxOrchestrator.snapshotWorkspaceNow(sandbox, { tenantId: workspaceId, sessionId: session.id }),
+      ]);
+      const failed = results.filter((result) => result.status === "rejected");
+      if (failed.length) throw new Error(failed.map((result) => String(result.reason)).join("; "));
+    },
+  };
+  return { ...hooks, mountMemory: prepareManagedMemoryMounts };
 }

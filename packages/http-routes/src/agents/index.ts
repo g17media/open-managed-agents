@@ -122,7 +122,9 @@ function normalizeMcpServers<T extends AgentConfig["mcp_servers"] | null | undef
   return servers.map((s) => ({
     ...s,
     name: typeof s.name === "string" ? s.name.trim() : s.name,
-    url: typeof s.url === "string" ? s.url.trim() : s.url,
+    // stdio servers have no `url`; only trim it on the URL-typed variant so
+    // the key isn't materialised as undefined on the others.
+    ...("url" in s && typeof s.url === "string" ? { url: s.url.trim() } : {}),
   })) as T;
 }
 

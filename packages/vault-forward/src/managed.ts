@@ -105,7 +105,8 @@ export async function forwardManagedMcpRequest(input: {
   fetch?: typeof fetch;
 }): Promise<Response> {
   const server = input.session.agent.mcpServers.find((server) => server.name.trim() === input.serverName.trim());
-  if (input.session.archivedAt || !server) return new Response("Forbidden", { status: 403 });
+  // A stdio server has no URL to forward to — not proxyable over HTTP.
+  if (input.session.archivedAt || !server || !("url" in server)) return new Response("Forbidden", { status: 403 });
   const credentials = await listManagedVaultCredentials(input.credentials, input.workspaceId, input.session.vaultIds);
   let record = credentials.find(({ credential }) => "mcpServerUrl" in credential.auth && credential.auth.mcpServerUrl === server.url && credentialBearer(credential.auth));
   const headers = new Headers(input.request.headers);

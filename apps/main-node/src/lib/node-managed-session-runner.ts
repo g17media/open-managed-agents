@@ -366,7 +366,7 @@ export class DefaultNodeManagedSessionRunner
             let childTools: HarnessContext["tools"] | undefined;
             try {
               const model = await this.dependencies.buildModel(childContext);
-              childTools = await this.dependencies.buildTools({ ...childContext, sandbox: childSandbox });
+              childTools = await this.dependencies.buildTools({ ...childContext, sandbox: childSandbox, runtime: childRuntime });
               const harnessContext = await this.dependencies.buildHarnessContext({
                 ...childContext, acceptedEvents: [], sandbox: childSandbox,
                 runtime: childRuntime, model, tools: childTools,
@@ -392,7 +392,7 @@ export class DefaultNodeManagedSessionRunner
         };
       }
       const toolsPromise = this.dependencies
-        .buildTools({ ...context, ...subagentContext, sandbox })
+        .buildTools({ ...context, ...subagentContext, sandbox, runtime })
         .then((tools) => {
           turnTools = tools;
           return tools;
