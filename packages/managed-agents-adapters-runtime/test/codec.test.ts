@@ -13,6 +13,15 @@ import type {
 import * as runtimeCodec from "../src";
 
 describe("Managed session runtime codec", () => {
+  it.each(["agent.tool_result", "agent.mcp_tool_result"])("converts plain-text %s output into content blocks before persistence and streaming", (type) => {
+    const frame = { id: "result_1", type, content: "session-startup-ok", processed_at: "2026-09-08T00:00:00.000Z",
+      ...(type === "agent.tool_result" ? { tool_use_id: "tool_1" } : { mcp_tool_use_id: "tool_1" }) };
+    const expected = { type, content: [{ type: "text", text: "session-startup-ok" }] };
+    expect(decodeRuntimeProducedSessionEvent(frame)).toMatchObject(expected);
+    expect(decodeRuntimeEvent(frame, new Set())[0]).toMatchObject(expected);
+    expect(decodeRuntimeProducedSessionEvent({ ...frame, content: expected.content })).toMatchObject(expected);
+    expect(decodeRuntimeProducedSessionEvent({ ...frame, content: "" })).toMatchObject({ content: [{ type: "text", text: "" }] });
+  });
   it("keeps opaque tool arguments and signed thinking unchanged when resuming stored history", () => {
     const input = { snake_key: "value", camelKey: { another_key: true } };
     const [tool] = decodeRuntimeEvent({ id: "tool-1", type: "agent.tool_use", name: "custom", input, processed_at: "2026-08-26T00:00:00Z" }, new Set());

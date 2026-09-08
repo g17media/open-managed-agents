@@ -66,6 +66,7 @@ const OFFICIAL_RUNTIME_EVENT_TYPES = new Set([
   "agent.tool_use",
   "session.deleted",
   "session.error",
+  "session.warning",
   "session.sandbox_startup",
   "session.status_idle",
   "session.status_rescheduled",
@@ -225,6 +226,12 @@ export function decodeRuntimeEvent(
   if (!OFFICIAL_RUNTIME_EVENT_TYPES.has(raw.type)) return [];
 
   const decoded = camelCaseRuntimeValue(raw) as Record<string, unknown>;
+  // Harnesses may emit plain text for tool output; the public event contract
+  // stores content blocks. Normalize before persistence as well as live SSE.
+  if ((raw.type === "agent.tool_result" || raw.type === "agent.mcp_tool_result") &&
+    typeof raw.content === "string") {
+    decoded.content = [{ type: "text", text: raw.content }];
+  }
   // event_start/event_delta use the runtime's stable block ids. Preserve the
   // same id on the eventual committed event so SDK consumers can atomically
   // replace their in-flight projection instead of guessing from arrival order.

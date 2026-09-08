@@ -30,7 +30,6 @@
     "@open-managed-agents/deployment-store-sql": "workspace:*",
     "@open-managed-agents/deployment-run-store-sql": "workspace:*",
     "@open-managed-agents/db-schema": "workspace:*",
-    "@open-managed-agents/deployments-store": "workspace:*",
     "@open-managed-agents/dreams-store": "workspace:*",
     "@open-managed-agents/dream-store-sql": "workspace:*",
     "@open-managed-agents/email": "workspace:*",

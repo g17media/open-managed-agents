@@ -34,6 +34,16 @@ describe("fork features in upstream v1 contracts", () => {
     expect(toSendSessionEventsCommand("session_1", body)).toMatchObject({ vaultIds: [] });
   });
 
+  it("preserves MCP warnings through runtime decoding, history and streaming responses", () => {
+    const wire = { id: "event_warning", type: "session.warning", processed_at: "2026-09-08T10:29:37.000Z",
+      source: "mcp", message: "Dendrite authorization failed (HTTP 401). Check its vault credential." };
+    const event = decodeRuntimeProducedSessionEvent(wire);
+    if (!event) throw new Error("MCP warning was dropped");
+    expect(toSessionEventResponse(event)).toEqual(wire);
+    expect(sessionEventPageResponseSchema.parse({ data: [toSessionEventResponse(event)], next_page: null }).data).toEqual([wire]);
+    expect(sessionStreamEventResponseSchema.parse(toStreamSessionEventResponse(event))).toEqual(wire);
+  });
+
   it("permits retaining repository credentials on update while requiring credentials for new definitions", () => {
     const resources = [{ type: "github_repository", url: "https://github.com/team/repo" }];
     expect(deploymentUpdateBodySchema.safeParse({ resources }).success).toBe(true);

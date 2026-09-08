@@ -1299,6 +1299,11 @@ export async function buildTools(
           console.error(
             `[mcp] cloud MCP setup failed for "${server.name}" (${server.url}): ${msg}`,
           );
+          env.broadcastEvent?.({
+            type: "session.warning",
+            source: "mcp",
+            message: `MCP server "${serverName}" is unavailable: ${msg}. Check its connection and vault credential.`,
+          });
         }
       }
     }

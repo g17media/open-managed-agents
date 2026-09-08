@@ -69,6 +69,7 @@ interface RunnerConstructor {
       session: Session;
       environment: Environment;
       sandbox: SandboxExecutor;
+      runtime: { broadcast(event: SessionEvent): void };
     }): Promise<unknown>;
     buildHarness(): { run(context: unknown): Promise<void> };
     buildHarnessContext(input: {
@@ -151,7 +152,10 @@ describe("DefaultNodeManagedSessionRunner", () => {
       confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
       buildSandbox: async () => sandbox,
       buildModel: async () => ({ type: "model" }),
-      buildTools: async () => ({ bash: { type: "tool" } }),
+      buildTools: async ({ runtime }) => {
+        runtime.broadcast({ type: "session.warning", source: "mcp", message: "Dendrite authorization failed (HTTP 401)" });
+        return { bash: { type: "tool" } };
+      },
       buildHarness: () => ({
         run: async (context) => {
           const runtime = (context as {
@@ -215,12 +219,19 @@ describe("DefaultNodeManagedSessionRunner", () => {
       },
       {
         id: "event_runtime_02",
+        type: "session.warning",
+        source: "mcp",
+        message: "Dendrite authorization failed (HTTP 401)",
+        processed_at: "2026-08-26T02:00:00.000Z",
+      },
+      {
+        id: "event_runtime_03",
         type: "agent.message",
         content: [{ type: "text", text: "Hello" }],
         processed_at: "2026-08-26T02:00:00.000Z",
       },
       {
-        id: "event_runtime_03",
+        id: "event_runtime_04",
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
         processed_at: "2026-08-26T02:00:00.000Z",

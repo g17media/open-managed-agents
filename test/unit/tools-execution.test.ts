@@ -987,6 +987,24 @@ describe("Event IDs on history", () => {
   });
 });
 
+describe("MCP setup diagnostics", () => {
+  it("publishes the authorization failure instead of silently omitting the server's tools", async () => {
+    const events: unknown[] = [];
+    const tools = await buildTools(makeAgentConfig({
+      mcp_servers: [{ name: "dendrite", type: "url", url: "https://mcp-warning.test/mcp" }],
+    }), new TestSandbox(), {
+      tenantId: "tenant_warning", sessionId: "session_warning",
+      mcpBinding: { fetch: async () => new Response("unauthorized", { status: 401 }) },
+      broadcastEvent: (event) => events.push(event),
+    });
+    expect(tools.bash).toBeDefined();
+    expect(events).toEqual([expect.objectContaining({
+      type: "session.warning", source: "mcp",
+      message: expect.stringMatching(/dendrite.*401.*vault credential/),
+    })]);
+  });
+});
+
 describe("MCP event types in eventsToMessages", () => {
   it("converts agent.mcp_tool_use and agent.mcp_tool_result to messages", () => {
     const events: any[] = [

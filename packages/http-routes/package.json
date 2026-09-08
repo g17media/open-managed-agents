@@ -13,7 +13,6 @@
     "@open-managed-agents/browser-harness": "workspace:*",
     "@open-managed-agents/cap": "workspace:*",
     "@open-managed-agents/credentials-store": "workspace:*",
-    "@open-managed-agents/deployments-store": "workspace:*",
     "@open-managed-agents/dreams-pipeline": "workspace:*",
     "@open-managed-agents/dreams-store": "workspace:*",
     "@open-managed-agents/environments-store": "workspace:*",
@@ -34,7 +33,9 @@
     "fflate": "^0.8.2",
     "hono": "^4.7.0",
     "nanoid": "^5.1.0",
+    "@open-managed-agents/managed-agents-api": "workspace:*",
     "@open-managed-agents/managed-agents-application": "workspace:*",
+    "@open-managed-agents/managed-agents-adapters-runtime": "workspace:*",
     "@open-managed-agents/credential-store": "workspace:*"
   }
 }

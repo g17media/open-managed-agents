@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { EnvironmentConfig, SandboxStartupEvent, SandboxStartupTrigger } from "@open-managed-agents/shared";
-import { BelljarSandbox } from "@open-managed-agents/sandbox/adapters/belljar";
+import { BelljarSandbox, belljarSandboxId } from "@open-managed-agents/sandbox/adapters/belljar";
 import { runStartupScript } from "@open-managed-agents/sandbox/startup";
 
 export interface BelljarLifecyclePayload {
@@ -40,7 +40,7 @@ export function buildBelljarLifecycleRoutes(deps: {
     let payload: BelljarLifecyclePayload;
     try { payload = await c.req.json(); } catch { return c.json({ error: "Invalid JSON" }, 400); }
     if (!payload || typeof payload.ownerId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(payload.ownerId) ||
-      payload.sandboxId !== `oma-${payload.ownerId.slice(0, 40)}` ||
+      payload.sandboxId !== belljarSandboxId(payload.ownerId) ||
       typeof payload.bootId !== "string" || !/^[a-f0-9]{64}$/.test(payload.bootId) ||
       typeof payload.initializationToken !== "string" || !/^[a-f0-9]{64}$/.test(payload.initializationToken) ||
       !["create", "wake", "revive"].includes(payload.event)) {

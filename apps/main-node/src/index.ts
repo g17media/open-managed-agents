@@ -1,5 +1,7 @@
 import { migrateV0AtStartup } from "./migrations/v0-data.js";
 import { nativeOAuthCredentials } from "@open-managed-agents/http-routes";
+import { SessionInitialEventsApplicationService } from "@open-managed-agents/managed-agents-application";
+import { recoverEmptyManagedSessions } from "./lib/recover-empty-managed-sessions.js";
 import { ManagedMemoryFiles } from "./lib/managed-memory-files.js";
 import { mountManagedSessionResources, managedSessionReminders, promoteManagedSessionOutputs } from "./lib/managed-session-preparation.js";
 /**
@@ -46,7 +48,6 @@ import {
   SqlMemoryRepo,
 } from "@open-managed-agents/memory-store";
 import { createSqliteDreamService } from "@open-managed-agents/dreams-store";
-import { createSqliteDeploymentService } from "@open-managed-agents/deployments-store";
 import { LocalFsBlobStore as MemoryLocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
 import {
   S3BlobStore as FilesS3BlobStore,
@@ -100,7 +101,6 @@ import {
   buildSessionRoutes,
   buildMemoryRoutes as buildLegacyMemoryRoutes,
   buildDreamRoutes,
-  buildDeploymentRoutes,
   buildTenantRoutes,
   buildMeRoutes,
   buildApiKeyRoutes,
@@ -226,6 +226,7 @@ import {
   SqlSessionEnvironmentSource,
   SqlSessionSource,
   SqlSessionRuntimeProjectionPersistence,
+  SqlSessionEventPersistence,
 } from "@open-managed-agents/managed-agents-adapters-sql";
 import {
   createSqlSessionRuntimeReaders,
@@ -353,7 +354,6 @@ let backendDescription: string;
 // Existing SqlClient is still built alongside for the legacy applySchema /
 // integrations adapters until those finish migrating.
 let drizzleDb: OmaDb<Record<string, unknown>>;
-let v0DataMigrated = false;
 if (usePostgres) {
   sql = await createPostgresSqlClient(dbUrl);
   const { drizzle: drizzlePostgresJs } = await import("drizzle-orm/postgres-js");
@@ -369,7 +369,7 @@ if (usePostgres) {
   const { drizzle: drizzleBetterSqlite3 } = await import("drizzle-orm/better-sqlite3");
   const BetterSqlite3 = (await import("better-sqlite3")).default;
   const sqliteRaw = new BetterSqlite3(dbPath);
-  const dataMigration = await migrateV0AtStartup({
+  await migrateV0AtStartup({
     databasePath: dbPath, dataDir: dirname(dbPath), rootSecret: process.env.PLATFORM_ROOT_SECRET ?? "",
     enabled: process.env.OMA_AUTO_MIGRATE !== "0",
     remoteBlobs: Boolean(process.env.FILES_S3_ENDPOINT || process.env.FILES_S3_BUCKET || process.env.MEMORY_S3_ENDPOINT || process.env.MEMORY_S3_BUCKET),
@@ -386,7 +386,6 @@ if (usePostgres) {
     },
     onProgress: ({ phase, report }) => logger.info({ op: "main-node.data_migration", phase, ...(report && { report }) }, `SQLite data migration: ${phase}`),
   });
-  v0DataMigrated = dataMigration !== null;
   // Match D1's runtime default — FK enforcement off. See packages/sql-client
   // for the rationale (publication-first install + a few other paths).
   sqliteRaw.exec("PRAGMA foreign_keys = OFF");
@@ -593,16 +592,6 @@ if (
 const memoryService = createSqliteMemoryStoreService({
   db: drizzleDb,
   blobs: memoryBlobs,
-});
-const deploymentsService = createSqliteDeploymentService({
-  client: sql,
-  verifyAgentExists: async (tenantId, agentId) => {
-    const row = await sql
-      .prepare("SELECT 1 FROM agents WHERE id = ? AND tenant_id = ?")
-      .bind(agentId, tenantId)
-      .first();
-    return !!row;
-  },
 });
 const dreamsService = createSqliteDreamService({
   client: sql,
@@ -1521,7 +1510,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
   },
   buildModel: ({ workspaceId, session }) =>
     buildNodeLanguageModel(workspaceId, session.agent.model),
-  buildTools: async ({ workspaceId, session, sandbox }) => {
+  buildTools: async ({ workspaceId, session, sandbox, runtime }) => {
     const agent = toLegacyHarnessAgentConfig(session);
     const creds = await resolveNodeModelCreds(workspaceId, agent.model);
     return buildTools(agent, sandbox, {
@@ -1532,6 +1521,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       sessionId: session.id,
       toolResultMaxChars: parseInt(process.env.OMA_TOOL_RESULT_MAX_CHARS ?? "", 10) || undefined,
       mcpBinding: { fetch: managedMcpBindingFetch },
+      broadcastEvent: runtime.broadcast,
     });
   },
   buildHarness: () => new ManagedNodeDefaultHarness(),
@@ -1565,6 +1555,10 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
 });
 
 const managedRuntimeReaders = createSqlSessionRuntimeReaders(sql);
+const recoveredEmptySessions = await recoverEmptyManagedSessions(sql);
+if (recoveredEmptySessions > 0) {
+  logger.info({ op: "main-node.sessions.empty_ready", count: recoveredEmptySessions }, "Restored empty sessions to idle");
+}
 const managedRuntimeEngine = new ApplicationBackedNodeManagedSessionRuntimeEngine({
   historyFor: (workspaceId) =>
     new SessionRuntimeHistoryApplicationService({
@@ -1572,6 +1566,14 @@ const managedRuntimeEngine = new ApplicationBackedNodeManagedSessionRuntimeEngin
       source: managedRuntimeReaders.history,
     }),
   runner: managedRuntimeRunner,
+  initializeSession: async (input) => {
+    await new SessionInitialEventsApplicationService({
+      workspaceId: input.workspaceId,
+      store: new SqlSessionEventPersistence(sql),
+      execution: managedRuntimeReaders.executionContext,
+      dispatch: { sessionEventsAccepted: (events) => managedRuntimeEngine.accept(events) },
+    }).initialize({ sessionId: input.sessionId, events: input.initialEvents });
+  },
 });
 const managedRuntimeDriver = new DefaultNodeManagedSessionRuntimeDriver({
   engine: managedRuntimeEngine,
@@ -2099,7 +2101,6 @@ const services: RouteServices = {
   memory: memoryService,
   sessions: sessionsService,
   dreams: dreamsService,
-  deployments: deploymentsService,
   environments: environmentsService,
   modelCards: modelCardsService,
   filesBlob,
@@ -2537,6 +2538,15 @@ v1.route("/sessions", buildManagedSessionsApi({
 }));
 v1.route("/oma/sessions", buildSessionRoutes({
   services,
+  application: (context) => {
+    const workspaceId = (context.var as { tenant_id: string }).tenant_id;
+    const ports = managedSessionsComposition.portsFor(workspaceId);
+    return {
+      sessions: ports.sessions,
+      sessionEvents: ports.sessionEvents,
+      environments: managedAgentsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.environments),
+    };
+  },
   supportsStartupScripts: process.env.SANDBOX_PROVIDER?.toLowerCase() === "belljar",
   router: sessionRouter,
   outputs: nodeOutputsAdapter(outputsRoot),
@@ -2896,79 +2906,6 @@ if (platformRootSecret) {
 // CF mounts a richer files surface with synthesized session-output ids
 // (R2-prefix listing); Node skips those — session outputs are served via
 // the outputsRoot adapter on /v1/sessions/:id/outputs instead.
-v1.post("/oma/files", async (c) => {
-  const t = c.var.tenant_id;
-
-  let filename: string;
-  let mediaType: string;
-  let body: ArrayBuffer;
-  let scopeId: string | undefined;
-  let downloadable = false;
-
-  const contentType = c.req.header("content-type") || "";
-
-  if (contentType.includes("multipart/form-data")) {
-    const formData = await c.req.formData();
-    const file = formData.get("file") as File | null;
-    if (!file) {
-      return c.json({ error: "file field is required in multipart upload" }, 400);
-    }
-    filename = file.name;
-    mediaType = file.type || "application/octet-stream";
-    body = await file.arrayBuffer();
-    const sc = formData.get("scope_id");
-    if (typeof sc === "string") scopeId = sc;
-    const d = formData.get("downloadable");
-    if (typeof d === "string") downloadable = d === "true" || d === "1";
-  } else {
-    // JSON body upload — content is base64-encoded for binary, raw text for text/*
-    const json = await c.req.json<{
-      filename: string;
-      content: string;
-      media_type?: string;
-      scope_id?: string;
-      encoding?: "base64" | "utf8";
-      downloadable?: boolean;
-    }>();
-
-    if (!json.filename || json.content === undefined || json.content === null) {
-      return c.json({ error: "filename and content are required" }, 400);
-    }
-    filename = json.filename;
-    mediaType = json.media_type || "application/octet-stream";
-    scopeId = json.scope_id;
-    downloadable = json.downloadable === true;
-
-    const encoding = json.encoding || (mediaType.startsWith("text/") ? "utf8" : "base64");
-    if (encoding === "base64") {
-      const bin = atob(json.content);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      body = bytes.buffer;
-    } else {
-      body = new TextEncoder().encode(json.content).buffer as ArrayBuffer;
-    }
-  }
-
-  const id = generateFileId();
-  const r2Key = fileR2Key(t, id);
-  // Blob PUT first, then metadata insert — same failure semantics as CF
-  // (orphan blob on metadata failure, never the reverse).
-  await filesBlob.put(r2Key, body, { httpMetadata: { contentType: mediaType } });
-
-  const row = await filesService.create({
-    id,
-    tenantId: t,
-    sessionId: scopeId,
-    filename,
-    mediaType,
-    sizeBytes: body.byteLength,
-    r2Key,
-    downloadable,
-  });
-
-  return c.json(toFileRecord(row), 201);
-});
 v1.get("/oma/files", async (c) => {
   const t = c.var.tenant_id;
   const scopeId = c.req.query("scope_id") ?? undefined;
@@ -3063,13 +3000,6 @@ v1.get("/oma/sessions/:id/memory_stores", async (c) => {
 
 app.route("/v1", v1);
 
-app.route("/v1/oma/deployments", buildDeploymentRoutes({
-  services,
-  router: sessionRouter,
-  localRuntimeEnvId: "env-local-runtime",
-  // Pin environment configuration for manual and scheduled deployments too.
-  loadEnvironment: loadEnvironmentSnapshot,
-}));
 // ─── Integrations gateway (OAuth callbacks, setup pages, Linear MCP,
 // GitHub internal refresh, webhooks) — mounted on `app` (NOT under /v1)
 // because the upstream OAuth/webhook URLs are at /linear/oauth/...,
@@ -3189,16 +3119,6 @@ const scheduler = buildNodeScheduler({
   },
   memory: memoryService,
   integrationsSql: platformRootSecret ? sql : null,
-  deployments: v0DataMigrated ? undefined : {
-    services: {
-      deployments: deploymentsService,
-      sessions: sessionsService,
-      agents: agentsService,
-    },
-    router: sessionRouter,
-    localRuntimeEnvId: "env-local-runtime",
-    loadEnvironment: loadEnvironmentSnapshot,
-  },
 });
 await scheduler.start();
 logger.info({ op: "main-node.scheduler.started" }, "scheduler started");

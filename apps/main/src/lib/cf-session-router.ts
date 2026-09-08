@@ -316,9 +316,11 @@ export class CfSessionRouter implements SessionRouter {
 
   async getPending(
     sessionId: string,
-    opts?: { rawSearch?: string },
+    opts?: { rawSearch?: string; environmentId?: string },
   ): Promise<{ status: number; body: string }> {
-    const binding = await this.bindingForSession(sessionId);
+    const binding = opts?.environmentId !== undefined
+      ? await this.bindingFor(opts.environmentId)
+      : await this.bindingForSession(sessionId);
     if (!binding) {
       return { status: 503, body: JSON.stringify({ error: "binding unavailable" }) };
     }
