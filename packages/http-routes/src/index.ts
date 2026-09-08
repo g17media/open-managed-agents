@@ -63,9 +63,6 @@ export type { SkillRoutesDeps } from "./skills";
 export { buildSkillGitHubRoutes } from "./skills/github";
 export type { GitHubSource } from "./skills/github";
 
-export { buildStatsRoutes } from "./stats";
-export type { StatsRoutesDeps } from "./stats";
-
 export { buildClawhubRoutes } from "./clawhub";
 export type { ClawhubRoutesDeps } from "./clawhub";
 
