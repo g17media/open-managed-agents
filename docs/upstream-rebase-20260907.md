@@ -189,3 +189,48 @@ The OAuth/runner/integration checks pass all 18 tests; the MCP warning and
 API contract checks pass all 54; the SQLite session-view checks pass all 4.
 All 162 interface tests and Node, interface and Cloudflare typechecks pass.
 These checks do not require running a deployment or publishing a site.
+
+## Reducing changes to upstream files — 8 September 2026
+
+Before this cleanup, the Node entry file differed from upstream
+`d2acd825f7dd7e3ebc31fccea241dfad936af89d` by 927 added and 65 removed
+lines. It now differs by 400 added and 64 removed lines. Session preparation,
+memory/output persistence, MCP bindings and sandbox configuration live in
+Node modules with explicit dependencies, leaving their composition in the
+entry file. This moves our implementation out of a frequently edited upstream
+file; it does not eliminate the implementation or promise conflict-free merges.
+
+The Cloudflare environment, model-card and statistics route files are restored
+byte-for-byte to that upstream commit. Their unnecessary factory wrappers are
+removed, along with the unused shared statistics module. The existing shared
+Node environment and model-card implementations remain. OAuth, skill and
+ClawHub handlers still serve both runtimes and need their shared implementations.
+The required native model extensions and confirmed upstream fixes also remain.
+
+The cleanup preserves runtime behavior and keeps dependencies initialized
+later in startup lazy. It adds no compatibility routes or alternative record
+lookups and changes no data migration. A backup branch,
+`backup/integration-before-minimise-20260908-129349a6`, preserves the state
+before this cleanup; the original fork backup and Git bundle remain intact.
+
+Validation:
+
+- All 187 Node tests pass, along with Node and Cloudflare typechecks,
+  architecture boundaries and test discovery.
+- The five selected Cloudflare suites pass all 90 tests. Two persistence
+  fixtures now create native agents, environments, vaults and sessions, then
+  verify saved fields through both session views. Previously they wrote old
+  session records and tried to retrieve them through native-backed views.
+- The extracted native MCP binding completes a live Dendrite handshake and
+  lists all 14 tools, using the saved vault credential without executing tools.
+- Docker builds and runs image
+  `sha256:e8aa2ba85b80b7186e003d049c5a85d38e4203cc521be9954a906f8d75ca1fbe`.
+  After restart, authenticated API checks at `2026-09-08T11:46:35Z` verify
+  all 70 sessions, 3,996 original events, 23 original downloads, both
+  deployments, 8 agents, 11 environments, 3 vaults, 3 credentials, 2 memories
+  and 4 skill archives. The three newest native sessions return HTTP 200
+  through detail, history, trajectory, pending and output views; the retired
+  deployment and file writers still return HTTP 404.
+
+The updated application is running only in local Docker. Production has not
+been changed, and the branch has not been pushed.

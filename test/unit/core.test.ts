@@ -25,6 +25,22 @@ function post(path: string, body: Record<string, unknown>) {
   });
 }
 
+const MANAGED_HEADERS = { ...HEADERS, "anthropic-beta": "managed-agents-2026-04-01" };
+
+async function managedPost(path: string, body: Record<string, unknown>) {
+  const response = await api(`/v1${path}`, {
+    method: "POST", headers: MANAGED_HEADERS, body: JSON.stringify(body),
+  });
+  expect(response.status, await response.clone().text()).toBe(201);
+  return response.json() as Promise<any>;
+}
+
+async function createManagedAgentAndEnv() {
+  const agent = await managedPost("/agents", { name: "Persistence test agent", model: "claude-sonnet-4-6" });
+  const environment = await managedPost("/environments", { name: "Persistence test environment", config: { type: "cloud" } });
+  return { agent, environment };
+}
+
 async function createAgentAndEnv(overrides?: {
   agentBody?: Record<string, unknown>;
   envBody?: Record<string, unknown>;
@@ -378,19 +394,22 @@ describe("Edge cases - concurrent and complex operations", () => {
   });
 
   it("session with vault_ids stores them", async () => {
-    const { agent, environment } = await createAgentAndEnv();
-    const session = await createSession(agent.id, environment.id, {
-      vault_ids: ["vlt_abc", "vlt_def"],
+    const { agent, environment } = await createManagedAgentAndEnv();
+    const vaults = await Promise.all(["first", "second"].map(display_name => managedPost("/vaults", { display_name })));
+    const vaultIds = vaults.map(vault => vault.id);
+    const session = await managedPost("/sessions", {
+      agent: agent.id, environment_id: environment.id, vault_ids: vaultIds,
     });
 
-    expect(session.vault_ids).toEqual(["vlt_abc", "vlt_def"]);
+    expect(session.vault_ids).toEqual(vaultIds);
 
-    // Verify persisted via GET
-    const getRes = await api(`/v1/oma/sessions/${session.id}`, {
-      headers: HEADERS,
-    });
-    const fetched = (await getRes.json()) as any;
-    expect(fetched.vault_ids).toEqual(["vlt_abc", "vlt_def"]);
+    // Both views must read the record accepted by the native session API.
+    for (const prefix of ["/v1/sessions", "/v1/oma/sessions"]) {
+      const getRes = await api(`${prefix}/${session.id}`, { headers: MANAGED_HEADERS });
+      expect(getRes.status, await getRes.clone().text()).toBe(200);
+      const fetched = (await getRes.json()) as any;
+      expect(fetched.vault_ids).toEqual(vaultIds);
+    }
   });
 
   it("agent created with callable_agents is stored via buildTools", async () => {
@@ -556,17 +575,19 @@ describe("Edge cases - concurrent and complex operations", () => {
   });
 
   it("session title is persisted and retrievable", async () => {
-    const { agent, environment } = await createAgentAndEnv();
-    const session = await createSession(agent.id, environment.id, {
+    const { agent, environment } = await createManagedAgentAndEnv();
+    const session = await managedPost("/sessions", {
+      agent: agent.id, environment_id: environment.id,
       title: "My test conversation",
     });
 
     expect(session.title).toBe("My test conversation");
 
-    const getRes = await api(`/v1/oma/sessions/${session.id}`, {
-      headers: HEADERS,
-    });
-    const fetched = (await getRes.json()) as any;
-    expect(fetched.title).toBe("My test conversation");
+    for (const prefix of ["/v1/sessions", "/v1/oma/sessions"]) {
+      const getRes = await api(`${prefix}/${session.id}`, { headers: MANAGED_HEADERS });
+      expect(getRes.status, await getRes.clone().text()).toBe(200);
+      const fetched = (await getRes.json()) as any;
+      expect(fetched.title).toBe("My test conversation");
+    }
   });
 });
