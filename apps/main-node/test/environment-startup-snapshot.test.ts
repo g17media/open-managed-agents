@@ -16,6 +16,7 @@ async function fixture() {
   const environment = await environments.create({ tenantId: "tenant-1", name: "Project",
     config: { type: "cloud", startup: { script: "echo first", triggers: ["wake"], timeout_seconds: 45 } } });
   const deps: SessionRoutesDeps = {
+    application: () => { throw new Error("Session reads are not part of this create test"); },
     supportsStartupScripts: true,
     loadEnvironment: createEnvironmentSnapshotLoader(environments),
     services: { sessions, agents: { get: async () => ({ id: "agent-1", tenant_id: "tenant-1", name: "Agent", model: "test", system: "" }) } } as unknown as SessionRoutesDeps["services"],

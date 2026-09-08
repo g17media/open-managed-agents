@@ -3,6 +3,7 @@ import type {
   SessionBootstrapEvent,
   SessionEventView,
 } from "@open-managed-agents/domain/sessions";
+import { sessionInitialEventId } from "@open-managed-agents/domain/sessions";
 import type {
   LoadSessionRuntimeHistoryRecord,
   SessionRuntimeHistoryRecord,
@@ -51,13 +52,15 @@ export class SqlSessionRuntimeHistorySource
         .bind(input.workspaceId, input.sessionId)
         .all<DocumentRow>(),
     ]);
+    const events = (eventRows.results ?? []).map(
+      (row) => JSON.parse(row.document) as SessionEventView,
+    );
+    const persistedIds = new Set(events.map((event) => event.id));
     return {
       initialEvents: (initialRows.results ?? []).map(
         (row) => JSON.parse(row.document) as SessionBootstrapEvent,
-      ),
-      events: (eventRows.results ?? []).map(
-        (row) => JSON.parse(row.document) as SessionEventView,
-      ),
+      ).filter((_, sequence) => !persistedIds.has(sessionInitialEventId(input.sessionId, sequence))),
+      events,
     };
   }
 }

@@ -31,3 +31,8 @@ export type SessionBootstrapEvent =
       maxIterations?: number | null;
     }
   | { type: "system.message"; content: Array<{ type: "text"; text: string }> };
+
+/** Stable event identity lets runtimes admit a saved initial message once. */
+export function sessionInitialEventId(sessionId: string, sequence: number): string {
+  return `sevt_initial_${sessionId}_${String(sequence).padStart(6, "0")}`;
+}

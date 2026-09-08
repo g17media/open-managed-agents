@@ -25,7 +25,6 @@ export function cfRouteServices(c: Context<AppContextLike>): RouteServices {
     credentials: services.credentials,
     memory: services.memory,
     sessions: services.sessions,
-    deployments: services.deployments,
     environments: services.environments,
     modelCards: services.modelCards,
     filesBlob: services.filesBlob,

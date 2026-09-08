@@ -312,6 +312,10 @@ const spanModelUsageSchema = z
 
 const historySessionEventSchema = z.discriminatedUnion("type", [
   z.object({
+    id: z.string().min(1), type: z.literal("session.warning"), processed_at: z.string(),
+    source: z.string(), message: z.string(), details: z.record(z.string(), z.unknown()).optional(),
+  }).strict(),
+  z.object({
     id: z.string().min(1), type: z.literal("session.sandbox_startup"), processed_at: z.string(),
     boot_id: z.string(), trigger: z.enum(["create", "wake", "revive"]),
     status: z.enum(["running", "succeeded", "failed", "skipped"]),

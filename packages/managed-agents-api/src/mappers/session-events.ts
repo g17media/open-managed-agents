@@ -448,6 +448,12 @@ function fromSpanModelUsage(usage: SpanModelUsageView): object {
 
 export function toSessionEventResponse(event: SessionEventView): object {
   switch (event.type) {
+    case "session.warning":
+      return {
+        id: event.id, type: event.type, processed_at: event.processedAt,
+        source: event.source, message: event.message,
+        ...(event.details !== undefined && { details: event.details }),
+      };
     case "session.sandbox_startup":
       return { id: event.id, type: event.type, processed_at: event.processedAt, boot_id: event.bootId,
         trigger: event.trigger, status: event.status,

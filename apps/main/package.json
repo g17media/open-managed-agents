@@ -19,7 +19,6 @@
     "@open-managed-agents/credential-store-sql": "workspace:*",
     "@open-managed-agents/deployment-store-sql": "workspace:*",
     "@open-managed-agents/dreams-pipeline": "workspace:*",
-    "@open-managed-agents/deployments-store": "workspace:*",
     "@open-managed-agents/dreams-store": "workspace:*",
     "@open-managed-agents/environments-store": "workspace:*",
     "@open-managed-agents/environment-work-store-sql": "workspace:*",

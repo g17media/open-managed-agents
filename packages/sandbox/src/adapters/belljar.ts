@@ -60,6 +60,7 @@
 // lands on /workspace. Both values are non-secret (belljar persists create
 // env in labels).
 
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
@@ -68,6 +69,17 @@ import { sessionVaultProxyUrl } from "../vault-proxy";
 import { getLogger } from "@open-managed-agents/observability";
 
 const moduleLogger = getLogger("belljar-sandbox");
+
+/** Keep existing workspace names; upstream's mixed-case IDs need a separate,
+ * deterministic name because Belljar accepts only lowercase sandbox IDs.
+ * Hash the full ID so case folding or truncation cannot merge two sessions.
+ * The 47-character hashed name cannot collide with an old name (44 max). */
+export function belljarSandboxId(sessionId: string): string {
+  if (sessionId.length <= 40 && /^[a-z0-9_-]*[a-z0-9]$/.test(sessionId)) {
+    return `oma-${sessionId}`;
+  }
+  return `oma-v1-${createHash("sha256").update(sessionId).digest("hex").slice(0, 40)}`;
+}
 
 // Wire shapes mirroring @cloudflare/sandbox (belljar proxies them verbatim).
 interface BelljarExecResult {
@@ -109,8 +121,7 @@ export interface BelljarSandboxOptions {
   registryAuth?: SandboxRegistryAuth;
   /** Default per-command timeout in ms. */
   defaultTimeoutMs?: number;
-  /** Used to name the sandbox — `oma-<sessionId>` is easy to spot in
-   *  `GET /v1/sandboxes` and `docker ps`. */
+  /** Owner of the sandbox. belljarSandboxId maps this to a stable, valid name. */
   sessionId: string;
   /** Memory blob root as THIS process sees it — mountMemoryStore binds
    *  `<memoryRoot>/<storeId>` at /mnt/memory/<storeName>. */
@@ -163,7 +174,7 @@ export class BelljarSandbox implements SandboxExecutor {
 
   constructor(private opts: BelljarSandboxOptions) {
     if (!opts.baseUrl) throw new Error("BelljarSandbox: baseUrl required");
-    this.sandboxId = `oma-${opts.sessionId.slice(0, 40)}`;
+    this.sandboxId = belljarSandboxId(opts.sessionId);
     this.defaultTimeoutMs = opts.defaultTimeoutMs ?? 120_000;
     this.logger = opts.logger ?? {
       warn: (msg, ctx) => moduleLogger.warn({ ...(ctx as Record<string, unknown> ?? {}) }, msg),

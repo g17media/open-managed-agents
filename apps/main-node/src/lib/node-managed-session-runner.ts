@@ -90,7 +90,7 @@ export interface DefaultNodeManagedSessionRunnerDependencies {
   buildSandbox(input: ManagedRunnerContext): Promise<SandboxExecutor>;
   buildModel(input: ManagedRunnerContext): Promise<HarnessContext["model"]>;
   buildTools(
-    input: ManagedRunnerContext & { sandbox: SandboxExecutor },
+    input: ManagedRunnerContext & { sandbox: SandboxExecutor; runtime: ManagedNodeHarnessRuntime },
   ): Promise<HarnessContext["tools"]>;
   buildHarness(): HarnessInterface;
   prepareSession?(input: ManagedRunnerContext & { sandbox: SandboxExecutor }): Promise<void>;
@@ -224,7 +224,7 @@ export class DefaultNodeManagedSessionRunner
       };
       const [model, tools] = await Promise.all([
         this.dependencies.buildModel(context),
-        this.dependencies.buildTools({ ...context, sandbox }),
+        this.dependencies.buildTools({ ...context, sandbox, runtime }),
       ]);
       const runHarness = async (): Promise<void> => {
         const harnessContext = await this.dependencies.buildHarnessContext({

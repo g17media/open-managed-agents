@@ -211,7 +211,7 @@ export interface SessionRouter {
    *  underlying store/SessionDO produces. */
   getPending(
     sessionId: string,
-    opts?: { rawSearch?: string },
+    opts?: { rawSearch?: string; environmentId?: string },
   ): Promise<{ status: number; body: string }>;
 
   // ── LLM call body ─────────────────────────────────────────────────────

@@ -318,7 +318,7 @@ export class SessionsApplicationService
       outcomeEvaluations: [],
       resources: resolvedResources.resources,
       stats: {},
-      status: "running",
+      status: command.initialEvents.some((event) => event.type !== "system.message") ? "running" : "idle",
       title: command.title ?? null,
       updatedAt: timestamp,
       usage: {},

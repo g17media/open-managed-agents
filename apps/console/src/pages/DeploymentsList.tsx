@@ -2,7 +2,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { ArchiveIcon, PencilIcon, PlayIcon, PauseIcon } from "lucide-react";
 import { toast } from "sonner";
@@ -56,6 +56,8 @@ export function DeploymentsList() {
   const [form, setForm] = useState<DeploymentForm>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const pendingRuns = useRef(new Set<string>());
+  const [runningIds, setRunningIds] = useState(new Set<string>());
 
   const params = useMemo(
     () => ({ ...(includeArchived ? { include_archived: "true" } : {}) }),
@@ -162,7 +164,10 @@ export function DeploymentsList() {
     setSaving(false);
   };
 
-  const runNow = async (d: Deployment) => {
+  const runNow = useCallback(async (d: Deployment) => {
+    if (d.archived_at || d.status !== "active" || pendingRuns.current.has(d.id)) return;
+    pendingRuns.current.add(d.id);
+    setRunningIds(new Set(pendingRuns.current));
     try {
       const res = await managedApi.deployments.run(d.id);
       if (res.error || !res.session_id) throw new Error(res.error?.message ?? "Deployment did not start a session");
@@ -178,8 +183,11 @@ export function DeploymentsList() {
       void refetch();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      pendingRuns.current.delete(d.id);
+      setRunningIds(new Set(pendingRuns.current));
     }
-  };
+  }, [managedApi, refetchRuns, refetch]);
 
   const columns = useMemo<ColumnDef<Deployment>[]>(
     () => [
@@ -189,6 +197,30 @@ export function DeploymentsList() {
         header: "Name",
         cell: ({ row }) => <span className="font-medium text-fg">{row.original.name}</span>,
         enableHiding: false,
+      },
+      {
+        id: "run",
+        header: "Run",
+        size: 130,
+        enableHiding: false,
+        cell: ({ row }) => (
+          <Button
+            variant="outline"
+            size="sm"
+            aria-label={`Run ${row.original.name} now`}
+            disabled={!!row.original.archived_at || row.original.status !== "active"}
+            title={row.original.archived_at ? "Deployment is archived" : row.original.status === "paused" ? "Resume the deployment before running it" : undefined}
+            loading={runningIds.has(row.original.id)}
+            loadingLabel="Starting…"
+            onClick={(event) => {
+              event.stopPropagation();
+              void runNow(row.original);
+            }}
+          >
+            <PlayIcon className="size-3.5" />
+            Run now
+          </Button>
+        ),
       },
       {
         id: "agent",
@@ -248,7 +280,7 @@ export function DeploymentsList() {
       },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [managedApi, refetch, agentsRes, runsRes],
+    [agentsRes, runsRes, runNow, runningIds],
   );
 
   const inputCls =
@@ -276,7 +308,7 @@ export function DeploymentsList() {
       }
       data={deployments.filter((deployment) => `${deployment.name} ${deployment.id}`.toLowerCase().includes(search.toLowerCase()))}
       rowActions={(d) => [
-        { label: "Run now", icon: <PlayIcon className="size-4" />, disabled: !!d.archived_at || d.status !== "active", onSelect: () => void runNow(d) },
+        { label: "Run now", icon: <PlayIcon className="size-4" />, disabled: !!d.archived_at || d.status !== "active" || runningIds.has(d.id), onSelect: () => void runNow(d) },
         { label: "Edit", icon: <PencilIcon className="size-4" />, onSelect: () => openEdit(d) },
         { label: d.status === "paused" ? "Resume schedule" : "Pause schedule", icon: <PauseIcon className="size-4" />, disabled: !!d.archived_at,
           onSelect: () => { void (d.status === "paused" ? managedApi.deployments.unpause(d.id) : managedApi.deployments.pause(d.id)).then(() => refetch()); } },
