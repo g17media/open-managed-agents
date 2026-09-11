@@ -78,13 +78,15 @@ function managedTurnSlots(source: CanonicalChatTurn): AgentUITurnSlots {
         ))}
       </ol>
     ) : null,
-    renderAssistant: ({ item, prefixSkip }) => (
+    // Each Managed item already contains its own message/segment. prefixSkip
+    // is an offset into a turn-wide live stream, not into this item's text.
+    renderAssistant: ({ item }) => (
       <div className="min-w-0 text-sm leading-6">
-        <Markdown>{item.text.slice(prefixSkip)}</Markdown>
+        <Markdown>{item.text}</Markdown>
       </div>
     ),
-    renderThought: ({ item, prefixSkip }) => (
-      <Markdown>{item.text.slice(prefixSkip)}</Markdown>
+    renderThought: ({ item }) => (
+      <Markdown>{item.text}</Markdown>
     ),
     renderTool: ({ tool }) => (
       <Tool defaultOpen={tool.status === "in_progress"}>
