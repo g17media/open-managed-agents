@@ -792,7 +792,15 @@ export async function buildTools(
       execute: safe(async ({ url, max_length }) => {
         // Networking restriction enforcement (limited mode)
         if (env?.environmentConfig?.networking?.type === "limited") {
-          const allowedHosts = env.environmentConfig.networking.allowed_hosts || [];
+          // Split each stored entry as well as the list: the console textarea
+          // accepts hosts one per line while the form only split on commas, so
+          // existing configs can hold a single entry like
+          // "a.example.com\nb.example.com" that would match no hostname and
+          // print a rejection listing the very host it rejected.
+          const allowedHosts = (env.environmentConfig.networking.allowed_hosts || [])
+            .flatMap((entry) => String(entry).split(/[\s,]+/))
+            .map((entry) => entry.trim())
+            .filter(Boolean);
           try {
             const parsedUrl = new URL(url);
             const isAllowed = allowedHosts.some(

@@ -304,7 +304,7 @@ export function EnvironmentDetail() {
             {networking.type === "limited" && (
               <Field
                 label="Allowed Hosts"
-                hint="Comma-separated hostnames (e.g. www.example1.com, api.example2.com)"
+                hint="Hostnames separated by commas, spaces or new lines (e.g. www.example1.com, api.example2.com)"
               >
                 <Textarea
                   value={allowedHostsText}
@@ -725,8 +725,11 @@ function buildNetworking(
   net: NetworkingConfig,
   allowedHostsText: string,
 ): BetaUnrestrictedNetwork | BetaLimitedNetworkParams {
+  // Split on commas OR any whitespace: the control is a Textarea, so hosts
+  // get entered one per line as often as comma-separated, and a comma-only
+  // split stored the whole block as a single unmatchable entry.
   const hosts = allowedHostsText
-    .split(",")
+    .split(/[\s,]+/)
     .map((s) => s.trim())
     .filter(Boolean);
   if (net.type === "unrestricted") {
