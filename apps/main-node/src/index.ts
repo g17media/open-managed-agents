@@ -406,6 +406,7 @@ import { SqlSessionResourceSecretSource } from "@open-managed-agents/session-res
 import { NodeWorkspaceBackupService } from "./lib/node-workspace-backup.js";
 
 import { DefaultSandboxOrchestrator } from "@open-managed-agents/sandbox/orchestrator";
+import { supportsSessionOutputMount } from "@open-managed-agents/sandbox";
 
 import {
   createAuthMiddleware as buildAuthMw,
@@ -1451,19 +1452,18 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     }
     const sandbox = await buildSandbox(session.id,
       join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", workspaceId, session.id), { workspaceId, environment });
-    // Memory mounts happen in prepareSession (via prepareSandbox), which
-    // still runs before the container is created. Mounting here too bound
-    // each store twice: the caller-side dedupe is a WeakMap keyed on the
-    // sandbox object, and prepareSession receives the execution-guarded
-    // wrapper while this call has the raw instance, so the two never
-    // matched and belljar create failed with "Duplicate mount point".
+    // Configure every bind BEFORE provision. Binds are fixed at container
+    // creation and provision can create the container as a side effect —
+    // restoreOnWarm writes into the workspace — so anything mounted after it
+    // is silently lost and the agent comes up with an empty /mnt. The later
+    // calls from prepareSandbox/prepareSession are no-ops: both mount methods
+    // return early when the container path is already bound.
+    await managedPreparation.mountMemory(workspaceId, session, sandbox);
+    if (supportsSessionOutputMount(sandbox)) {
+      await sandbox.mountSessionOutputs({ tenantId: workspaceId, sessionId: session.id });
+    }
     await sandboxOrchestrator.provision(sandbox, {
       sessionId: session.id, tenantId: workspaceId, environmentId: environment.id,
-      // No mountOutputs here: upstream's NodeManagedSessionInputPreparer
-      // mounts /mnt/session/outputs from prepareSandbox, which still runs
-      // before the container is created. Mounting in both places bound the
-      // same container path twice and belljar create failed with
-      // "Duplicate mount point: /mnt/session/outputs".
       backup: { restoreOnWarm: !sandbox.initializesWorkspace },
     });
     return sandbox;
