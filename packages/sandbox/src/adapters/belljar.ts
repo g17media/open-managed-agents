@@ -477,6 +477,14 @@ export class BelljarSandbox implements SandboxExecutor {
   }
 
   private async createSandbox(): Promise<void> {
+    // Binds are fixed at creation, so what is in this.volumes right now is
+    // everything the sandbox will ever have. Log it: an empty list means the
+    // mount hooks did not run before something triggered creation, which is
+    // invisible from inside the container beyond an empty /mnt.
+    this.logger.log(
+      `belljar: creating sandbox ${this.sandboxId} with ${this.volumes.length} mount(s): ` +
+      (this.volumes.map((v) => v.containerPath).join(", ") || "<none>"),
+    );
     const body: Record<string, unknown> = { id: this.sandboxId };
     if (this.opts.image) body.image = this.opts.image;
     if (this.opts.registryAuth) body.registryAuth = this.opts.registryAuth;
