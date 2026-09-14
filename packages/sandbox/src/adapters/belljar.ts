@@ -307,9 +307,16 @@ export class BelljarSandbox implements SandboxExecutor {
     }
     const sourceDir = join(resolve(this.opts.memoryRoot), opts.storeId);
     mkdirSync(sourceDir, { recursive: true });
+    // Idempotent, same reason as mountSessionOutputs: callers dedupe with a
+    // WeakMap keyed on the sandbox object, which upstream's
+    // withSandboxExecutionGuard wrapper defeats (raw vs wrapped identity).
+    // A repeated bind of the same container path makes the engine reject
+    // creation with "Duplicate mount point".
+    const containerPath = `/mnt/memory/${opts.storeName}`;
+    if (this.volumes.some((v) => v.containerPath === containerPath)) return;
     this.volumes.push({
       hostPath: this.toEngineHostPath(sourceDir),
-      containerPath: `/mnt/memory/${opts.storeName}`,
+      containerPath,
       readOnly: opts.readOnly,
     });
   }

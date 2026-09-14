@@ -1451,7 +1451,12 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     }
     const sandbox = await buildSandbox(session.id,
       join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", workspaceId, session.id), { workspaceId, environment });
-    await managedPreparation.mountMemory(workspaceId, session, sandbox);
+    // Memory mounts happen in prepareSession (via prepareSandbox), which
+    // still runs before the container is created. Mounting here too bound
+    // each store twice: the caller-side dedupe is a WeakMap keyed on the
+    // sandbox object, and prepareSession receives the execution-guarded
+    // wrapper while this call has the raw instance, so the two never
+    // matched and belljar create failed with "Duplicate mount point".
     await sandboxOrchestrator.provision(sandbox, {
       sessionId: session.id, tenantId: workspaceId, environmentId: environment.id,
       // No mountOutputs here: upstream's NodeManagedSessionInputPreparer

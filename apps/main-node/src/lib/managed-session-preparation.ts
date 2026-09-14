@@ -144,7 +144,11 @@ export function createManagedSessionPreparation(deps: {
   const { memoryRoot, memoriesForSession, filesFor, sessionOutputs, sandboxOrchestrator, logger } = deps;
   const managedMemoryFiles = new ManagedMemoryFiles(memoryRoot);
   const managedMemoryMounts = new WeakMap<SandboxPort, Set<string>>();
-  const managedMemorySync = new WeakMap<SandboxPort, ReturnType<typeof setInterval>>();
+  // Keyed by session id, not by the sandbox object: prepareSession receives
+  // the execution-guarded Proxy and completeSession the raw instance (it has
+  // to, because the fence is already aborted by then), so an identity-keyed
+  // map never matched and the 30s flush timer leaked for every session.
+  const managedMemorySync = new Map<string, ReturnType<typeof setInterval>>();
   async function flushManagedMemoryFiles(workspaceId: string, session: Session) {
     const results = await Promise.allSettled(session.resources.filter((resource) => resource.type === "memory_store" && resource.access !== "read_only")
       .map((resource) => resource.type === "memory_store"
@@ -172,18 +176,18 @@ export function createManagedSessionPreparation(deps: {
       await mountManagedSessionResources({ session, sandbox,
         files: filesFor(workspaceId) });
       if (session.resources.some((resource) => resource.type === "memory_store" && resource.access !== "read_only")) {
-        clearInterval(managedMemorySync.get(sandbox));
+        clearInterval(managedMemorySync.get(session.id));
         const timer = setInterval(() => {
           void flushManagedMemoryFiles(workspaceId, session).catch((error) =>
             logger.warn({ op: "session.memory_sync.failed", session_id: session.id, error }, "Memory sync failed"));
         }, 30_000);
         timer.unref();
-        managedMemorySync.set(sandbox, timer);
+        managedMemorySync.set(session.id, timer);
       }
     },
     completeSession: async ({ workspaceId, session, sandbox }) => {
-      clearInterval(managedMemorySync.get(sandbox));
-      managedMemorySync.delete(sandbox);
+      clearInterval(managedMemorySync.get(session.id));
+      managedMemorySync.delete(session.id);
       const persistOutputs = async () => {
         const outputs = [];
         for (const entry of await sessionOutputs.list(workspaceId, session.id)) {
