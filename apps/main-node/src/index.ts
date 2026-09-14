@@ -1332,8 +1332,19 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     });
     return sandbox;
   },
-  prepareSession: managedPreparation.prepareSession,
-  completeSession: managedPreparation.completeSession,
+  // Both guard on the stub sandbox, exactly as upstream's prepareSandbox and
+  // synchronizeSandbox do below. A session with environment {type:"none"}
+  // (OpenAI agents) gets a sandbox whose exec/readFile/writeFile all throw
+  // "No execution environment is selected for this session", so mounting
+  // resources or promoting outputs through it fails the turn.
+  prepareSession: async (input) => {
+    if (isNoEnvironmentSandbox(input.sandbox)) return;
+    await managedPreparation.prepareSession?.(input);
+  },
+  completeSession: async (input) => {
+    if (isNoEnvironmentSandbox(input.sandbox)) return;
+    await managedPreparation.completeSession?.(input);
+  },
   prepareSandbox: async ({
     workspaceId,
     session,

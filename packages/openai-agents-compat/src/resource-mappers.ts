@@ -226,6 +226,20 @@ export function toCredentialRotation(auth: ResourceObject): CredentialAuthUpdate
 export function credentialResource(credential: CredentialView, name?: string): ResourceObject {
   const auth = credential.auth;
   if (auth.type === "environment_variable") throw new Error("Environment variable credentials are not MCP credentials");
+  // Fork-only credential kinds. Upstream's union is
+  // environment_variable | static_bearer | mcp_oauth, so everything past the
+  // static_bearer branch below is treated as mcp_oauth and read for
+  // expiresAt/refresh. container_registry carries no MCP server at all, and
+  // cap_cli has a URL but no OAuth refresh — mapping either as mcp_oauth
+  // would read properties that do not exist on them.
+  if (auth.type === "container_registry") throw new Error("Container registry credentials are not MCP credentials");
+  if (auth.type === "cap_cli") {
+    return {
+      id: credential.id, object: "vault.credential", vault_id: credential.vaultId, name: name ?? credential.displayName ?? credential.id,
+      created_at: seconds(credential.createdAt), updated_at: seconds(credential.updatedAt),
+      auth: { type: "static_bearer", mcp_server_url: auth.mcpServerUrl ?? "" },
+    };
+  }
   return {
     id: credential.id, object: "vault.credential", vault_id: credential.vaultId, name: name ?? credential.displayName ?? credential.id,
     created_at: seconds(credential.createdAt), updated_at: seconds(credential.updatedAt),

@@ -33,6 +33,11 @@ function stubSandbox(mounts: MountCall[]): SandboxExecutor {
     mountMemoryStore: async (m: MountCall) => {
       mounts.push(m);
     },
+    // The orchestrator now hard-fails when mountOutputs is requested and the
+    // sandbox does not satisfy supportsSessionOutputMount(), which needs both
+    // of these. It used to soft-skip on a missing mountSessionOutputs.
+    sessionOutputMountCapabilities: () => ({ durability: "durable" as const }),
+    mountSessionOutputs: async () => {},
   } as unknown as SandboxExecutor;
 }
 
