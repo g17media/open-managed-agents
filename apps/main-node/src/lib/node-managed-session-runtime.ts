@@ -164,7 +164,18 @@ export class ApplicationBackedNodeManagedSessionRuntimeEngine
       ...input,
       ...(executionFence !== undefined ? { executionFence } : {}),
       initialEvents: history.initialEvents,
-      historyEvents: history.events,
+      // orderedEvents, not events: `events` comes back ordered by
+      // (processed_at, id), and an agent.tool_use and its agent.tool_result
+      // are written in the same onStepFinish, so they share processed_at and
+      // the tiebreak falls to a random event id. That inverted 8 of 12 pairs
+      // on a real session — the result landed before its call, the projection
+      // could not pair them, and Anthropic rejected the request with "Tool
+      // results are missing for tool calls …", surfacing as the AI SDK's
+      // opaque "No output generated". orderedEvents carries the trusted
+      // per-event source position and is present whenever every row has one.
+      historyEvents: (history.orderedEvents ?? []).length > 0
+        ? history.orderedEvents!.map((entry) => entry.event)
+        : history.events,
       output,
     });
   }
