@@ -314,6 +314,18 @@ export class BelljarSandbox implements SandboxExecutor {
     });
   }
 
+  /** Part of SandboxSessionOutputMountPort. Upstream turned session-output
+   *  mounting into an optional capability: the orchestrator now calls
+   *  supportsSessionOutputMount(), which needs BOTH this and
+   *  mountSessionOutputs() to be present, and throws
+   *  "Session output mount was requested but the sandbox does not provide it"
+   *  otherwise. The mount is a host bind mount, so it is durable — but only
+   *  once outputsRoot is wired (mountSessionOutputs throws without it), which
+   *  is exactly the condition reported here. */
+  sessionOutputMountCapabilities(): { durability: "durable" } | null {
+    return this.opts.outputsRoot ? { durability: "durable" } : null;
+  }
+
   async mountSessionOutputs(opts: {
     tenantId: string;
     sessionId: string;
