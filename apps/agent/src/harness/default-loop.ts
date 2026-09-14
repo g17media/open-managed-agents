@@ -680,18 +680,22 @@ export class DefaultHarness implements HarnessInterface {
         // we emitted in the start-step chunk hangs unpaired. Mirror the
         // shape of the success-path end so consumers can treat is_error as
         // the success/fail discriminator.
-        if (!stepStartId) return;
         let message = error instanceof Error ? error.message : String(error);
-        // AI SDK's APICallError exposes the upstream HTTP status + raw response
-        // body, but `error.message` is only the HTTP statusText (e.g. "Bad
-        // Request"). Surface the body too so consumers (oma sessions logs /
-        // console) can see the provider's actual diagnostic without having to
-        // tail wrangler — most 4xx debugging starts and ends here.
         if (error && typeof error === "object" && "responseBody" in error) {
           const e = error as { statusCode?: number; responseBody?: string };
           if (e.statusCode || e.responseBody) {
             message = `${message} [${e.statusCode ?? "?"}] ${e.responseBody ?? ""}`;
           }
+        }
+        if (!stepStartId) {
+          // The request failed before any step opened — a 4xx on the request
+          // itself (bad tool schema, malformed history, auth). There is no
+          // span to close, and returning silently is how this arrives at the
+          // user as the AI SDK's opaque "No output generated. Check the
+          // stream for errors." Log the provider's actual diagnostic.
+          console.error(`[stream] model request failed before first step: ${message}`);
+          lastStreamErrorMessage = message;
+          return;
         }
         lastStreamErrorMessage = message;
         runtime.broadcast({
