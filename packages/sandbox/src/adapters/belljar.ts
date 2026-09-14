@@ -300,11 +300,21 @@ export class BelljarSandbox implements SandboxExecutor {
     // though the bind it wants is already in place.
     if (this.volumes.some((v) => v.containerPath === `/mnt/memory/${opts.storeName}`)) return;
     if (this.createPromise) {
-      throw new Error(
-        "BelljarSandbox.mountMemoryStore: sandbox already created — Docker binds " +
-        "are fixed at creation, so mounts must be configured before the first " +
-        "exec/readFile/writeFile call",
+      // Warn, don't throw. The container can already exist for reasons the
+      // caller does not control: a warm session attaches this adapter to a
+      // container a previous process created, and the orchestrator's
+      // restoreOnWarm writes into the workspace (creating it) before
+      // prepareSandbox gets to mount. In those cases the bind this call
+      // wants was applied when the container was first created, so failing
+      // the turn is wrong. A store genuinely attached mid-session cannot be
+      // bound — Docker binds really are fixed at creation — and this warning
+      // is how that surfaces instead of a silent gap.
+      this.logger.warn(
+        `belljar: mountMemoryStore(${opts.storeName}) after container creation — ` +
+        "binds are fixed at creation; skipping. If this store was attached " +
+        "mid-session it will not be visible until the sandbox is recycled.",
       );
+      return;
     }
     if (!this.opts.memoryRoot) {
       throw new Error(
@@ -341,10 +351,13 @@ export class BelljarSandbox implements SandboxExecutor {
     // mountMemoryStore above.
     if (this.volumes.some((v) => v.containerPath === "/mnt/session/outputs")) return;
     if (this.createPromise) {
-      throw new Error(
-        "BelljarSandbox.mountSessionOutputs: sandbox already created — mounts " +
-        "must be configured before the first exec/readFile/writeFile call",
+      // Same reasoning as mountMemoryStore above: a warm container already
+      // carries this bind from its original creation.
+      this.logger.warn(
+        "belljar: mountSessionOutputs after container creation — binds are " +
+        "fixed at creation; skipping (a warm container already has it).",
       );
+      return;
     }
     if (!this.opts.outputsRoot) {
       throw new Error(
