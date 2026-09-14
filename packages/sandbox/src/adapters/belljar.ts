@@ -292,6 +292,13 @@ export class BelljarSandbox implements SandboxExecutor {
     storeId: string;
     readOnly: boolean;
   }): Promise<void> {
+    // Already bound? No-op, before any other check. Callers dedupe with a
+    // WeakMap keyed on the sandbox object, but upstream's
+    // withSandboxExecutionGuard mints a fresh Proxy per turn, so on every
+    // reply the dedupe misses and the mount is requested again. By then the
+    // container exists and the guard below would throw, failing the turn even
+    // though the bind it wants is already in place.
+    if (this.volumes.some((v) => v.containerPath === `/mnt/memory/${opts.storeName}`)) return;
     if (this.createPromise) {
       throw new Error(
         "BelljarSandbox.mountMemoryStore: sandbox already created — Docker binds " +
@@ -307,16 +314,9 @@ export class BelljarSandbox implements SandboxExecutor {
     }
     const sourceDir = join(resolve(this.opts.memoryRoot), opts.storeId);
     mkdirSync(sourceDir, { recursive: true });
-    // Idempotent, same reason as mountSessionOutputs: callers dedupe with a
-    // WeakMap keyed on the sandbox object, which upstream's
-    // withSandboxExecutionGuard wrapper defeats (raw vs wrapped identity).
-    // A repeated bind of the same container path makes the engine reject
-    // creation with "Duplicate mount point".
-    const containerPath = `/mnt/memory/${opts.storeName}`;
-    if (this.volumes.some((v) => v.containerPath === containerPath)) return;
     this.volumes.push({
       hostPath: this.toEngineHostPath(sourceDir),
-      containerPath,
+      containerPath: `/mnt/memory/${opts.storeName}`,
       readOnly: opts.readOnly,
     });
   }
@@ -337,6 +337,9 @@ export class BelljarSandbox implements SandboxExecutor {
     tenantId: string;
     sessionId: string;
   }): Promise<void> {
+    // Already bound? No-op first, for the same per-turn Proxy reason as
+    // mountMemoryStore above.
+    if (this.volumes.some((v) => v.containerPath === "/mnt/session/outputs")) return;
     if (this.createPromise) {
       throw new Error(
         "BelljarSandbox.mountSessionOutputs: sandbox already created — mounts " +
@@ -351,11 +354,6 @@ export class BelljarSandbox implements SandboxExecutor {
     }
     const sourceDir = join(resolve(this.opts.outputsRoot), opts.tenantId, opts.sessionId);
     mkdirSync(sourceDir, { recursive: true });
-    // Idempotent: two independent subsystems gate on
-    // supportsSessionOutputMount() and may both ask for the mount. Binding
-    // the same container path twice makes the engine reject creation
-    // outright ("Duplicate mount point"), so a repeat call is a no-op.
-    if (this.volumes.some((v) => v.containerPath === "/mnt/session/outputs")) return;
     this.volumes.push({
       hostPath: this.toEngineHostPath(sourceDir),
       containerPath: "/mnt/session/outputs",
