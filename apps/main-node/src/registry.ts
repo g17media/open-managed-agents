@@ -172,6 +172,9 @@ export interface SessionRegistryDeps {
     sandbox: SandboxPort;
     tools: unknown;
     model: LanguageModel;
+    /** Per-turn cancellation signal minted by SessionStateMachine;
+     *  forwarded verbatim to NodeHarnessRuntime.abortSignal. */
+    abortSignal: AbortSignal;
     sessionId: string;
     tenantId: string;
     eventLog: SqlEventLog;

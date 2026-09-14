@@ -116,13 +116,27 @@ export function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number }
         : customResults.get(String(e.id));
       const endMs = result ? result.t - t0 : startMs;
       if (result) sourceEvents.push(result.e);
+      // Prefer the harness-provided tool_timing metadata (Task 1) when
+      // present: processed_at on both tool_use and tool_result is written
+      // at commit time, after execute() has already settled, so it always
+      // yields ~0ms bars. started_at/ended_at capture the actual execute()
+      // wall-clock window. Falls back to the processed_at-derived
+      // startMs/endMs above for custom/always_ask tools, which have no
+      // execute() and thus no timing metadata.
+      const timing = (result?.e as { metadata?: Record<string, unknown> } | undefined)?.metadata;
+      const timedStart = timing?.kind === "tool_timing" && typeof timing.started_at === "string"
+        ? Date.parse(timing.started_at) : NaN;
+      const timedEnd = timing?.kind === "tool_timing" && typeof timing.ended_at === "string"
+        ? Date.parse(timing.ended_at) : NaN;
+      const spanStartMs = Number.isFinite(timedStart) ? timedStart - t0 : startMs;
+      const spanEndMs = Number.isFinite(timedEnd) ? timedEnd - t0 : endMs;
       pushSpan({
         key: `tool-${e.id ?? i}`,
         family: e.type === "agent.tool_use" ? "tool" : "custom_tool",
         label: String(e.name ?? "tool"),
         detail: result ? "completed" : "no result",
-        startMs,
-        durationMs: Math.max(0, endMs - startMs),
+        startMs: spanStartMs,
+        durationMs: Math.max(0, spanEndMs - spanStartMs),
       });
     } else if (e.type === "agent.mcp_tool_use") {
       const result = mcpResults.get(String(e.id));

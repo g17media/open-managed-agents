@@ -322,6 +322,24 @@ export interface EventBase {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * `EventBase.metadata` payload the default harness attaches to
+ * `agent.tool_result` (full record) and `agent.tool_use` (`started_at`
+ * only) for tools it executed in-process. Optional everywhere: custom
+ * and always_ask tools run client-side and carry no timing.
+ * See apps/agent/src/harness/tool-timing.ts.
+ */
+export interface ToolTimingMetadata {
+  harness: string;
+  kind: "tool_timing";
+  started_at: string;
+  ended_at?: string;
+  duration_ms?: number;
+  output_chars?: number;
+  output_chars_total?: number;
+  is_error?: true;
+}
+
 // --- Session Events ---
 
 export interface UserMessageEvent extends EventBase {

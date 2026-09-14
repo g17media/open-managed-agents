@@ -245,3 +245,14 @@ No event format changes. No runtime emit changes (other than optional `parent_ev
 - Inspect AI `TaskState`: https://github.com/UKGovernmentBEIS/inspect_ai/blob/main/src/inspect_ai/solver/_task_state.py
 - OTel GenAI semantic conventions: https://opentelemetry.io/docs/specs/semconv/gen-ai/
 - verl / SkyRL / OpenRLHF — RL trajectory shape references
+
+## Tool timing metadata (v1-additive)
+
+`agent.tool_use` and `agent.tool_result` are both emitted after the AI SDK has executed the step's tools, so the gap between their `processed_at` values is not the tool's duration. The default harness therefore attaches, via `EventBase.metadata`:
+
+| event | metadata |
+|---|---|
+| `agent.tool_use` | `{ harness, kind: "tool_timing", started_at }` |
+| `agent.tool_result` | `{ harness, kind: "tool_timing", started_at, ended_at, duration_ms, output_chars, output_chars_total?, is_error? }` |
+
+`output_chars` is the size handed to the model (after `truncateResult`); `output_chars_total` is the pre-truncation size when the tool clipped its output. Tools without an in-process `execute` (custom tools, `always_ask`) carry no timing — consumers must treat the field as optional. Type: `ToolTimingMetadata` in `@open-managed-agents/api-types`.

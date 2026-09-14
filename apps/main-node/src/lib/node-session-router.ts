@@ -62,7 +62,39 @@ export class NodeSessionRouter implements SessionRouter {
   ): Promise<SessionAppendResult> {
     const log = this.deps.newEventLog(sessionId);
     if (event.type === "user.interrupt") {
-      this.deps.registry.interrupt(sessionId);
+      // Persist + publish BEFORE aborting, mirroring the CF SessionDO:
+      // the interrupt itself belongs in the timeline (it's what explains
+      // the session.status_idle the aborted turn emits), and a consumer
+      // replaying the log must see it even if the abort races the turn's
+      // own terminal event. eventsToMessages has no case for
+      // `user.interrupt`, so it never reaches the model context.
+      //
+      // The persist/publish is best-effort: a DB failure here must not
+      // stop the abort from reaching the harness, or the turn keeps
+      // running with no way to stop it.
+      try {
+        await log.appendAsync(event);
+        // Read back exactly the row we wrote — its own seq, then the single
+        // row at it — instead of the whole history. Two reasons: the aborted
+        // turn's terminal event races this append, so "the last row in the
+        // log" published session.status_idle under the interrupt's name; and
+        // a long-lived session's log is unbounded, so the abort below waited
+        // behind a read that grows with the session.
+        const seq = await log.getLastEventSeqAsync("user.interrupt");
+        const stored = seq > 0 ? (await log.getEventsAsync(seq - 1))[0] : undefined;
+        if (stored) this.deps.hub.publish(sessionId, stored);
+      } catch (err) {
+        moduleLog.warn(
+          { err, op: "node_session_router.interrupt_persist_failed", session_id: sessionId },
+          "failed to persist/publish user.interrupt; aborting turn anyway",
+        );
+      } finally {
+        // In a finally, unconditionally: whatever the persist/publish above
+        // did — including throwing out of the catch block's own logging — the
+        // harness has to be told to stop, or the turn runs on with no way to
+        // reach it.
+        this.deps.registry.interrupt(sessionId);
+      }
       return { status: 202, body: '{"accepted":true,"interrupted":true}' };
     }
     await log.appendAsync(event);

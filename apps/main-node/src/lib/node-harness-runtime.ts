@@ -62,12 +62,21 @@ export interface NodeHarnessRuntimeOptions {
    *  LocalSubprocessSandbox for local dev, E2BSandbox / CloudflareSandbox
    *  in production. */
   sandbox: SandboxExecutor;
+  /** Per-turn cancellation signal minted by SessionStateMachine and
+   *  aborted by its interrupt() (POST /v1/sessions/:id/events with a
+   *  `user.interrupt`). Exposed as HarnessRuntime.abortSignal so the
+   *  default loop hands it to streamText — without it an interrupt can't
+   *  stop an in-flight model call. */
+  abortSignal?: AbortSignal;
 }
 
 export class NodeHarnessRuntime implements HarnessRuntime {
   history: SqlHistoryStore;
   sandbox: SandboxExecutor;
   pendingConfirmations?: string[];
+  /** See NodeHarnessRuntimeOptions.abortSignal. Read by the default loop
+   *  (`streamText({ abortSignal: runtime.abortSignal })`). */
+  abortSignal?: AbortSignal;
   /**
    * Per-runtime serial chain for SqlEventLog writes. The harness fires
    * many `broadcast()` calls in close succession (span_start, span_first_
@@ -86,6 +95,7 @@ export class NodeHarnessRuntime implements HarnessRuntime {
   constructor(private opts: NodeHarnessRuntimeOptions) {
     this.history = new SqlHistoryStore(opts.log);
     this.sandbox = opts.sandbox;
+    this.abortSignal = opts.abortSignal;
   }
 
   /** Call before each harness.run() so getEvents reflects DB state. */

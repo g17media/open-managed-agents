@@ -282,7 +282,7 @@ describe("RuntimeAdapter — unified shape (Node + CF)", () => {
     // a recovery and a real user.message). UPDATE has no WHERE-by-
     // turn_id so the second beginTurn replaces the first. Documents
     // current contract: caller is expected to serialize beginTurn at
-    // the application layer (state machine holds the activeTurnId lock).
+    // the application layer (the state machine owns the live-turn map).
     await f.adapter.beginTurn("sess_test", "turn_a");
     await f.adapter.beginTurn("sess_test", "turn_b");
     const row = await readSession(f.sql, "sess_test");

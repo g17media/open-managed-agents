@@ -1019,6 +1019,11 @@ const sessionRegistry = new SessionRegistry({
       log: input.eventLog,
       hub,
       sandbox: input.sandbox,
+      // Per-turn cancellation from SessionStateMachine. Reaches
+      // streamText via HarnessRuntime.abortSignal in the default loop;
+      // this is what makes POST .../events {user.interrupt} actually
+      // stop the running turn on the Node host.
+      abortSignal: input.abortSignal,
     });
     await runtime.refreshHistory();
     const rawSystemPrompt = input.agent.system ?? "";
