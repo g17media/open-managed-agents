@@ -344,6 +344,11 @@ export class BelljarSandbox implements SandboxExecutor {
     }
     const sourceDir = join(resolve(this.opts.outputsRoot), opts.tenantId, opts.sessionId);
     mkdirSync(sourceDir, { recursive: true });
+    // Idempotent: two independent subsystems gate on
+    // supportsSessionOutputMount() and may both ask for the mount. Binding
+    // the same container path twice makes the engine reject creation
+    // outright ("Duplicate mount point"), so a repeat call is a no-op.
+    if (this.volumes.some((v) => v.containerPath === "/mnt/session/outputs")) return;
     this.volumes.push({
       hostPath: this.toEngineHostPath(sourceDir),
       containerPath: "/mnt/session/outputs",

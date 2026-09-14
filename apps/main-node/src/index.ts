@@ -1323,7 +1323,12 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     await managedPreparation.mountMemory(workspaceId, session, sandbox);
     await sandboxOrchestrator.provision(sandbox, {
       sessionId: session.id, tenantId: workspaceId, environmentId: environment.id,
-      mountOutputs: true, backup: { restoreOnWarm: !sandbox.initializesWorkspace },
+      // No mountOutputs here: upstream's NodeManagedSessionInputPreparer
+      // mounts /mnt/session/outputs from prepareSandbox, which still runs
+      // before the container is created. Mounting in both places bound the
+      // same container path twice and belljar create failed with
+      // "Duplicate mount point: /mnt/session/outputs".
+      backup: { restoreOnWarm: !sandbox.initializesWorkspace },
     });
     return sandbox;
   },
