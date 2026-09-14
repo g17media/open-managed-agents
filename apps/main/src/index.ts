@@ -1,7 +1,10 @@
-import { listManagedVaultCredentials, matchManagedCredential, credentialBearer, refreshManagedCredential, forwardManagedMcpRequest, forwardManagedOutboundRequest, matchManagedRepositoryResource } from "@open-managed-agents/vault-forward/managed";
+import { forwardManagedMcpRequest, forwardManagedOutboundRequest } from "@open-managed-agents/vault-forward/managed";
 import { Hono } from "hono";
+
 import { WorkerEntrypoint } from "cloudflare:workers";
+
 import type { Env } from "@open-managed-agents/shared";
+
 import {
   buildCfTenantDbProvider,
   servicesMiddleware,
@@ -9,6 +12,7 @@ import {
   getCfServicesForTenant,
   forEachShardServices,
 } from "@open-managed-agents/services";
+
 import {
   buildAgentRoutes as buildLegacyAgentRoutes,
   buildVaultRoutes as buildLegacyVaultRoutes,
@@ -25,6 +29,7 @@ import {
   buildCapCliOauthRoutes,
   mintApiKeyOnStorage,
 } from "@open-managed-agents/http-routes";
+
 import {
   buildAgentRoutes as buildManagedAgentRoutes,
   buildCredentialRoutes as buildManagedCredentialRoutes,
@@ -46,12 +51,16 @@ import {
   buildUserProfileRoutes as buildManagedUserProfileRoutes,
   buildManagedSessionsApi,
 } from "@open-managed-agents/managed-agents-api";
+
 import {
   SessionRuntimeProjectionApplicationService,
   type SessionEnvironmentSourcePort,
 } from "@open-managed-agents/managed-agents-application";
+
 import { bindPort, defineAppModule, providePort } from "@open-managed-agents/app";
+
 import { managedAgentsPortTokens } from "@open-managed-agents/app/managed-agents";
+
 import {
   deploymentAgentSourcePort,
   deploymentEnvironmentSourcePort,
@@ -61,6 +70,7 @@ import {
   deploymentSessionLauncherPort,
   deploymentVaultSourcePort,
 } from "@open-managed-agents/app/modules/deployments";
+
 import {
   dreamCuratorPort,
   dreamExecutionModule,
@@ -68,6 +78,7 @@ import {
   dreamMemoryWorkspacePort,
   dreamSessionSourcePort,
 } from "@open-managed-agents/app/modules/dreams";
+
 import {
   environmentSessionWorkEnqueuerPort,
   environmentWorkAvailabilityWaiterPort,
@@ -76,37 +87,50 @@ import {
   environmentWorkSessionCredentialIssuerPort,
   environmentWorkWakeupPort,
 } from "@open-managed-agents/app/modules/environment-work";
+
 import {
   memoryContentDescriptorPort,
   memoryStoreForMemorySourcePort,
   memoryVersionActorPort,
 } from "@open-managed-agents/app/modules/memories";
+
 import { modelCatalogSourcePort } from "@open-managed-agents/app/modules/models";
+
 import {
   skillPackageCompilerPort,
 } from "@open-managed-agents/app/modules/skills";
+
 import {
   tunnelCertificateAuthorityPort,
   tunnelProvisionerPort,
   tunnelTokenManagerPort,
 } from "@open-managed-agents/app/modules/tunnels";
+
 import {
   userProfileEnrollmentIssuerPort,
 } from "@open-managed-agents/app/modules/user-profiles";
+
 import { resolveManagedSkillArchive } from "./lib/managed-skill-source";
+
 import {
   downloadManagedSessionInputFile,
   materializeManagedSessionMemorySnapshot,
   resolveManagedSessionInputs,
   withMissingManagedSessionSchemaFallback,
 } from "./lib/managed-session-runtime-source";
+
 import {
   createCloudflareManagedAgentsApp,
 } from "@open-managed-agents/platform-cloudflare";
+
 import { buildOmaModelsHttpRoutes } from "@open-managed-agents/managed-agents-adapters-http";
+
 import { SqlCredentialStore, type CredentialDocumentCipher } from "@open-managed-agents/credential-store-sql";
+
 import type { DeploymentResourceSecretCipher } from "@open-managed-agents/deployment-store-sql";
+
 import type { EnvironmentWorkSecretCipher } from "@open-managed-agents/environment-work-store-sql";
+
 import {
   SqlDeploymentAgentSource,
   SqlDeploymentVaultSource,
@@ -119,28 +143,44 @@ import {
   SqlSessionSource,
   SqlSessionRuntimeProjectionPersistence,
 } from "@open-managed-agents/managed-agents-adapters-sql";
+
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
+
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+
 import { SqlRuntimeResourceFencePort } from "@open-managed-agents/runtime-resource-fence-sql";
+
 import {
   createCfShardPoolService,
   createCfTenantShardDirectoryService,
 } from "@open-managed-agents/tenant-dbs-store";
+
 import {
   fileR2Key,
   LOCAL_RUNTIME_ENV_ID,
   listAuthProviders,
 } from "@open-managed-agents/shared";
+
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
+
 import { authMiddleware } from "./auth";
+
 import { rateLimitMiddleware, authRateLimitMiddleware } from "./rate-limit";
+
 import { cfRouteServices } from "./lib/cf-route-services";
+
 import { cfApiKeyStorage } from "./lib/cf-api-key-storage";
+
 import { CfSessionRouter } from "./lib/cf-session-router";
+
 import { CfManagedRuntimeFetcher } from "./lib/cf-managed-runtime-fetcher";
+
 import { CfManagedSessionRuntimeAdapter } from "./lib/cf-managed-session-runtime";
+
 import { CfManagedSessionSecretSealer } from "./lib/cf-managed-session-secret-sealer";
+
 import { synchronizeManagedSessionMemoryWorkspaces } from "./lib/managed-memory-workspace-sync";
+
 import {
   AnthropicMessagesDreamCurator,
   ApplicationDreamMemoryWorkspace,
@@ -164,16 +204,23 @@ import {
   WebCryptoMemoryContentDescriptor,
   ZipSkillPackageCompiler,
 } from "@open-managed-agents/managed-agents-adapters-runtime";
+
 import type { ApiKeyResolution } from "@open-managed-agents/auth";
+
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-cf";
+
 import {
   cfSessionLifecycle,
   cfOutputsAdapter,
   fetchVaultCredentials,
 } from "./lib/cf-session-lifecycle";
+
 import { validateAgentLimits } from "./lib/limits";
+
 import { checkUploadFreq, checkUploadSize } from "./quotas";
+
 import { listMemberships, hasMembership } from "./auth-config";
+
 import legacyEnvironmentsRoutes from "./routes/environments";
 import legacyMemoryRoutes from "./routes/memory";
 import dreamsRoutes from "./routes/dreams";
@@ -184,6 +231,7 @@ import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
+
 import statsRoutes from "./routes/stats";
 import mcpProxyRoutes, {
   createManagedMcpProxyCredentialSource,
@@ -195,12 +243,19 @@ import {
   resolveGithubCredentials,
   resolveManagedGithubCredentials,
 } from "./lib/github-creds";
+
 import { buildCfScheduler } from "./lib/cf-scheduler-jobs";
+
 import { buildCfMemoryQueue, dispatchCfMemoryQueueBatch } from "./lib/cf-queue-handlers";
+
 import { logError, recordEvent, errFields } from "@open-managed-agents/shared";
+
 import { globalErrorHandler, requestMetricsMiddleware } from "./lib/observability";
+
 import { errorEnvelopeMiddleware } from "./lib/error-envelope";
+
 import type { R2EventMessage } from "@open-managed-agents/shared";
+
 
 // Main worker: CRUD + routing layer.
 // SessionDO and Sandbox are in per-environment sandbox workers.

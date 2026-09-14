@@ -3,10 +3,13 @@
 // references. Shared by the CF worker (HTTP endpoint + McpProxyRpc) and
 // main-node's in-process mcpBinding.
 
-import type { AgentConfig, CredentialConfig } from "@open-managed-agents/shared";
+import type { AgentConfig } from "@open-managed-agents/shared";
 import { log, logWarn } from "@open-managed-agents/shared";
+
 import type { SessionService } from "@open-managed-agents/sessions-store";
+
 import type { CredentialService } from "@open-managed-agents/credentials-store";
+
 
 /** Narrow slice of the Services container these functions touch. Both the
  *  CF per-tenant container and main-node's individual store services

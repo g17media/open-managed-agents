@@ -1,8 +1,13 @@
 import { migrateV0AtStartup } from "./migrations/v0-data.js";
+
 import { nativeOAuthCredentials } from "@open-managed-agents/http-routes";
+
 import { SessionInitialEventsApplicationService } from "@open-managed-agents/managed-agents-application";
+
 import { recoverEmptyManagedSessions } from "./lib/recover-empty-managed-sessions.js";
+
 import { mountManagedSessionResources, managedSessionReminders, createManagedSessionPreparation } from "./lib/managed-session-preparation.js";
+
 /**
  * apps/main-node — self-host Node entry for the Open Managed Agents API.
  *
@@ -13,9 +18,13 @@ import { mountManagedSessionResources, managedSessionReminders, createManagedSes
  */
 
 import { serve } from "@hono/node-server";
+
 import { serveStatic } from "@hono/node-server/serve-static";
+
 import { Hono } from "hono";
+
 import { OpenAIAgentsProtocolError } from "@open-managed-agents/openai-agents-api";
+
 import {
   createArtifactsHandler,
   createManagedSessionMapping,
@@ -24,89 +33,139 @@ import {
   isManagedNoEnvironmentSession,
   readManagedSessionMappingMetadata,
 } from "@open-managed-agents/openai-agents-compat";
+
 import { SqlSessionThreadStore } from "@open-managed-agents/session-thread-store-sql";
+
 import { buildOpenAISubagentTools, nodeOpenAISubagentPolicy, openAISubagentSession } from "./openai-subagents.js";
+
 import { buildNodeOpenAIAgentsRoutes } from "./openai-agents.js";
+
 import { createNodeOpenAIAgentsRuntime } from "./openai-managed-runtime.js";
+
 import { createNodeOpenAIArtifactPublisher, withReportedArtifactPublication } from "./openai-artifact-publication.js";
+
 import { createNoEnvironmentSandbox, isNoEnvironmentSandbox } from "./openai-no-environment.js";
+
 import { buildBelljarLifecycleRoutes } from "./lib/belljar-lifecycle.js";
+
 import { createEnvironmentSnapshotLoader } from "./lib/environment-snapshot.js";
+
 import { BelljarSandbox } from "@open-managed-agents/sandbox/adapters/belljar";
+
 import { createSandboxConfiguration } from "./lib/sandbox-configuration.js";
+
 import { startupEnabled } from "@open-managed-agents/sandbox/startup";
+
 import {
   createNodeLogger,
 } from "@open-managed-agents/observability/logger/node";
+
 import {
   createNodeMetricsRecorder,
   type NodeMetricsHandle,
 } from "@open-managed-agents/observability/metrics/node";
+
 import {
   createNodeTracer,
   type NodeTracerHandle,
 } from "@open-managed-agents/observability/tracer/node";
+
 import {
   requestMetrics,
   tracerMiddleware,
   setRootLogger,
   type Logger,
 } from "@open-managed-agents/observability";
+
 import {
   createBetterSqlite3SqlClient,
   createMysql2SqlClient,
   createPostgresSqlClient,
   type SqlClient,
 } from "@open-managed-agents/sql-client";
+
 import { createSqliteAgentService } from "@open-managed-agents/agents-store";
+
 import {
   createSqliteMemoryStoreService,
   SqlMemoryRepo,
 } from "@open-managed-agents/memory-store";
+
 import { createSqliteDreamService } from "@open-managed-agents/dreams-store";
+
 import { LocalFsBlobStore as MemoryLocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
+
 import {
   S3BlobStore as FilesS3BlobStore,
   type BlobStore,
 } from "@open-managed-agents/blob-store";
+
 import { LocalFsBlobStore as FilesLocalFsBlobStore } from "@open-managed-agents/blob-store/adapters/local-fs";
+
 import { createSqliteVaultService } from "@open-managed-agents/vaults-store";
+
 import { createSqliteCredentialService } from "@open-managed-agents/credentials-store";
+
 import { createSqliteSessionService } from "@open-managed-agents/sessions-store";
+
 import { createSqliteFileService } from "@open-managed-agents/files-store";
+
 import { createSqliteEvalRunService } from "@open-managed-agents/evals-store";
+
 import { createSqliteEnvironmentService } from "@open-managed-agents/environments-store";
+
 import { createSqliteModelCardService } from "@open-managed-agents/model-cards-store";
+
 import { buildMemoryGates } from "@open-managed-agents/rate-limit/adapters/memory";
+
 import { createNodeMcpBindings } from "./lib/node-mcp-bindings.js";
+
 import { toFileRecord } from "@open-managed-agents/files-store";
+
 import { SqlEventLog } from "@open-managed-agents/event-log/sql";
+
 import type { SessionEvent } from "@open-managed-agents/shared";
+
 import {
   generateEventId,
   listAuthProviders,
 } from "@open-managed-agents/shared";
+
 import { registerCoreHarnesses } from "@open-managed-agents/agent/harness/builtins";
+
 import { resolveHarness } from "@open-managed-agents/agent/harness/registry";
+
 import {
   buildTools,
   disposeTools,
 } from "@open-managed-agents/agent/harness/tools";
+
 import {
   createPiModelRuntime,
   modelThinkingLevel,
   toAiSdkLanguageModel,
 } from "@open-managed-agents/agent/harness/pi-provider";
+
 import type { PiModelConfig } from "@open-managed-agents/agent/harness/pi-provider";
+
 import { generateText } from "ai";
+
 import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
+
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
+
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
+
 import { applyBetterAuthSchema } from "@open-managed-agents/schema";
+
 import type { OmaDb } from "@open-managed-agents/db-schema";
+
 import { migrateNodeMysqlSchema } from "@open-managed-agents/db-schema/node-mysql";
+
 import { reconcilePiModelConfigMigration } from "./lib/reconcile-pi-model-config-migration.js";
+
 import { ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
+
 import {
   buildAgentRoutes as buildLegacyAgentRoutes,
   buildVaultRoutes as buildLegacyVaultRoutes,
@@ -136,6 +195,7 @@ import {
   mintApiKeyOnStorage,
   sha256Hex,
 } from "@open-managed-agents/http-routes";
+
 import {
   buildAgentRoutes as buildManagedAgentRoutes,
   buildCredentialRoutes as buildManagedCredentialRoutes,
@@ -157,13 +217,17 @@ import {
   buildUserProfileRoutes as buildManagedUserProfileRoutes,
   buildManagedSessionsApi,
 } from "@open-managed-agents/managed-agents-api";
+
 import {
   SessionRuntimeHistoryApplicationService,
   SessionRuntimeProjectionApplicationService,
   type SessionEnvironmentSourcePort,
 } from "@open-managed-agents/managed-agents-application";
+
 import { bindPort, defineAppModule, providePort } from "@open-managed-agents/app";
+
 import { managedAgentsPortTokens } from "@open-managed-agents/app/managed-agents";
+
 import {
   deploymentAgentSourcePort,
   deploymentEnvironmentSourcePort,
@@ -173,6 +237,7 @@ import {
   deploymentSessionLauncherPort,
   deploymentVaultSourcePort,
 } from "@open-managed-agents/app/modules/deployments";
+
 import {
   dreamCuratorPort,
   dreamExecutionModule,
@@ -180,6 +245,7 @@ import {
   dreamMemoryWorkspacePort,
   dreamSessionSourcePort,
 } from "@open-managed-agents/app/modules/dreams";
+
 import {
   environmentSessionWorkEnqueuerPort,
   environmentWorkAvailabilityWaiterPort,
@@ -188,48 +254,67 @@ import {
   environmentWorkSessionCredentialIssuerPort,
   environmentWorkWakeupPort,
 } from "@open-managed-agents/app/modules/environment-work";
+
 import {
   memoryContentDescriptorPort,
   memoryStoreForMemorySourcePort,
   memoryVersionActorPort,
 } from "@open-managed-agents/app/modules/memories";
+
 import { modelCatalogSourcePort } from "@open-managed-agents/app/modules/models";
+
 import {
   skillPackageCompilerPort,
 } from "@open-managed-agents/app/modules/skills";
+
 import {
   tunnelCertificateAuthorityPort,
   tunnelProvisionerPort,
   tunnelTokenManagerPort,
 } from "@open-managed-agents/app/modules/tunnels";
+
 import {
   userProfileEnrollmentIssuerPort,
 } from "@open-managed-agents/app/modules/user-profiles";
+
 import {
   createNodeManagedAgentsApp,
   createNodePlatform,
 } from "@open-managed-agents/platform-node";
+
 import { SqlFileStore } from "@open-managed-agents/file-store-sql";
+
 import {
   SqlCredentialStore,
   type CredentialDocumentCipher,
 } from "@open-managed-agents/credential-store-sql";
+
 import { SqlVaultStore } from "@open-managed-agents/vault-store-sql";
+
 import {
   SqlDeploymentStore,
   type DeploymentResourceSecretCipher,
 } from "@open-managed-agents/deployment-store-sql";
+
 import { SqlDeploymentRunStore } from "@open-managed-agents/deployment-run-store-sql";
+
 import { SqlDreamStore } from "@open-managed-agents/dream-store-sql";
+
 import { SqlMemoryStoreStore } from "@open-managed-agents/memory-store-store-sql";
+
 import { SqlMemoryDocumentStore } from "@open-managed-agents/memory-document-store-sql";
+
 import { SqlSkillStore } from "@open-managed-agents/skill-store-sql";
+
 import { SqlTunnelStore } from "@open-managed-agents/tunnel-store-sql";
+
 import { SqlUserProfileStore } from "@open-managed-agents/user-profile-store-sql";
+
 import {
   SqlEnvironmentWorkStore,
   type EnvironmentWorkSecretCipher,
 } from "@open-managed-agents/environment-work-store-sql";
+
 import {
   SqlAgentPersistence,
   SqlDeploymentAgentSource,
@@ -244,11 +329,14 @@ import {
   SqlSessionRuntimeProjectionPersistence,
   SqlSessionEventPersistence,
 } from "@open-managed-agents/managed-agents-adapters-sql";
+
 import {
   createSqlSessionRuntimeReaders,
   SqlSessionExecutionCoordinator,
 } from "@open-managed-agents/session-runtime-sql";
+
 import { MemorySessionRealtimeHub } from "@open-managed-agents/session-realtime-memory";
+
 import {
   AnthropicMessagesDreamCurator,
   ApplicationDreamMemoryWorkspace,
@@ -272,9 +360,13 @@ import {
   ZipSkillPackageCompiler,
   synchronizeManagedSessionMemoryWorkspaces,
 } from "@open-managed-agents/managed-agents-adapters-runtime";
+
 import { isCurrentEnvironmentWorkClaim } from "@open-managed-agents/environment-work-store";
+
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
+
 import { buildOmaModelsHttpRoutes } from "@open-managed-agents/managed-agents-adapters-http";
+
 import {
   buildNodeRepos,
   SqlFeishuInstallationRepo,
@@ -287,86 +379,122 @@ import {
   WorkerHttpClient,
   type NodeReposEnv,
 } from "@open-managed-agents/integrations-adapters-node";
+
 import {
   NodeInstallBridge,
   buildNodeProvidersForRequest,
 } from "./lib/node-install-bridge.js";
+
 import { OmaVaultResolver } from "@open-managed-agents/oma-cap-adapter";
+
 import { NodeSessionRouter } from "./lib/node-session-router.js";
+
 import {
   configureFeishuAgentTools,
   resolveFeishuAgentTools,
   sqlSessionMetadataReader,
 } from "./lib/feishu-agent-tools.js";
+
 import { nodeOutputsAdapter } from "./lib/node-outputs-adapter.js";
+
 import { NodeManagedSessionOutputCollector } from "./lib/node-managed-session-outputs.js";
+
 import { nodeSessionLifecycle } from "./lib/node-session-lifecycle.js";
+
 import { SqlSessionResourceSecretSource } from "@open-managed-agents/session-resource-store-sql";
+
 import { NodeWorkspaceBackupService } from "./lib/node-workspace-backup.js";
+
 import { DefaultSandboxOrchestrator } from "@open-managed-agents/sandbox/orchestrator";
+
 import {
   createAuthMiddleware as buildAuthMw,
   type ApiKeyResolution,
 } from "@open-managed-agents/auth";
+
 import {
   buildBetterAuth,
   ensureTenantSqlite,
   oidcFromEnv,
 } from "@open-managed-agents/auth-config";
+
 import { senderFromEnv } from "@open-managed-agents/email/adapters/nodemailer";
+
 import { SqlKvStore } from "@open-managed-agents/kv-store/adapters/sql";
+
 import {
   selectBrowserHarness,
   buildSelectedBrowserHarness,
 } from "@open-managed-agents/browser-harness/select";
+
 import type { BrowserHarness } from "@open-managed-agents/browser-harness";
+
 import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
+
 import { buildNodeScheduler } from "./lib/node-scheduler-jobs.js";
+
 import { startNodeMemoryQueue } from "./lib/node-memory-queue.js";
+
 import { mkdirSync } from "node:fs";
+
 import { rm } from "node:fs/promises";
+
 import { dirname, join, relative } from "node:path";
+
 import { nanoid } from "nanoid";
+
 import {
   InProcessEventStreamHub,
   type EventStreamHub,
 } from "./lib/event-stream-hub";
+
 import { PgEventStreamHub } from "./lib/pg-event-stream-hub";
+
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
+
 import { SessionRegistry } from "./registry.js";
+
 import { createNodeSessionPreparation } from "./lib/node-session-preparation.js";
+
 import { ManagedNodeDefaultHarness } from "./lib/node-managed-default-harness.js";
+
 import {
   allowAllLegacyHarnessTools,
   toLegacyHarnessAgentConfig,
   toLegacyHarnessEnvironmentConfig,
   resolveNodeManagedAuxiliaryToolModel,
 } from "./lib/node-managed-agent-codec.js";
+
 import { NodeManagedConfirmedToolExecutor } from "./lib/node-managed-confirmed-tool-executor.js";
+
 import { NodeManagedOutcomeEvaluator } from "./lib/node-managed-outcome-evaluator.js";
+
 import {
   ApplicationBackedNodeManagedSessionRuntimeEngine,
   DefaultNodeManagedSessionRuntimeDriver,
   NodeManagedSessionRuntimeAdapter,
 } from "./lib/node-managed-session-runtime.js";
+
 import { DefaultNodeManagedSessionRunner } from "./lib/node-managed-session-runner.js";
-import {
-  buildNodeManagedSkillReminders,
-  buildNodeManagedAppendablePromptReminders,
-  NodeManagedSessionInputPreparer,
-} from "./lib/node-managed-session-inputs.js";
+
+import { buildNodeManagedAppendablePromptReminders, NodeManagedSessionInputPreparer } from "./lib/node-managed-session-inputs.js";
 import { NodeManagedMemorySnapshotMaterializer } from "./lib/node-managed-memory-snapshots.js";
+
 import { NodeSessionExecutionWorker } from "./lib/node-session-execution-worker.js";
+
 import {
   buildNodeHttpMcpProxyRoutes,
   createNodeMcpProxyBinding,
   type NodeMcpProxyTarget,
 } from "./lib/http-mcp-proxy.js";
+
 import {
   resolveNodeProcessMode,
   validateNodeProcessEnvironment,
 } from "./process-mode.js";
+
 import { resolveSandboxProviderForEnvironment } from "./sandbox-provider.js";
+
 
 registerCoreHarnesses();
 
@@ -941,7 +1069,10 @@ async function buildNodeLanguageModel(
   }));
 }
 
-const { mcpBindingFetch, managedMcpBindingFetch } = createNodeMcpBindings({
+// Only the legacy binding is destructured: managed sessions now go through
+// upstream's createNodeMcpProxyBinding/resolveNodeMcpProxyTarget below, so
+// the fork's managedMcpBindingFetch is superseded and no longer wired in.
+const { mcpBindingFetch } = createNodeMcpBindings({
   sql,
   legacy: { sessions: sessionsService, credentials: credentialService },
   execution: () => managedRuntimeReaders.executionContext,

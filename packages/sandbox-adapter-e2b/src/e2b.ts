@@ -421,6 +421,9 @@ export class E2BSandboxExecutor
         `unreachable from inside the E2B sandbox. Use a public URL or tunnel.`,
       );
     }
+    // Session-scoped proxy URL so oma-vault can attribute egress to this
+    // session; the other adapters do the same in their setOutboundContext.
+    const proxyUrl = sessionVaultProxyUrl(baseProxyUrl, opts);
     const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
     await this.setEnvVars({
       HTTP_PROXY: proxyUrl,
