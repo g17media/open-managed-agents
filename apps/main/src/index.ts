@@ -839,6 +839,10 @@ type ManagedRuntimeAppContext = {
   env: Env;
   var: { tenant_id: string; tenantDb: D1Database };
   req?: { url: string };
+  /** Present on the HTTP path only (absent on cron); the fork narrowed this
+   *  context type, so the field upstream's wake-up port relies on has to be
+   *  declared here. Optional so a Hono Context stays assignable. */
+  executionCtx?: { waitUntil(promise: Promise<unknown>): void };
 };
 
 function managedSessionsCompositionFor(ctx: ManagedRuntimeAppContext): SqlManagedSessionsComposition {
@@ -1071,25 +1075,34 @@ function managedEnvironmentWorkApplicationFor(ctx: ManagedRuntimeAppContext) {
       ),
       providePort(
         environmentWorkSessionCredentialIssuerPort,
-        { issue: async (input) => {
-          // Cron only enqueues work; credentials are issued later by the
-          // authenticated poll request. Without this guard `ctx.req` is
-          // undefined on the cron path and reading `.url` throws.
-          if (!ctx.req) throw new Error("Session credentials must be issued from an HTTP request");
-          return new SealedEnvironmentWorkSessionCredentialIssuer({
-            crypto: new WebCryptoAesGcm(
-              platformRootSecret,
-              "managed.environment-work.session-token",
-            ),
-            now: () => new Date(),
-            apiBaseUrl: new URL(ctx.req.url).origin,
-          }).issue(input);
-        } },
+        // The issuer needs the request origin, so it is built per call. Cron
+        // only enqueues work — credentials are issued later by the
+        // authenticated poll request — and without this guard `ctx.req` is
+        // undefined on the cron path and reading `.url` throws.
+        (() => {
+          const issuer = () => {
+            if (!ctx.req) {
+              throw new Error("Session credentials must be issued from an HTTP request");
+            }
+            return new SealedEnvironmentWorkSessionCredentialIssuer({
+              crypto: new WebCryptoAesGcm(
+                platformRootSecret,
+                "managed.environment-work.session-token",
+              ),
+              now: () => new Date(),
+              apiBaseUrl: new URL(ctx.req.url).origin,
+            });
+          };
+          return {
+            issue: (input) => issuer().issue(input),
+            bindToClaim: (input) => issuer().bindToClaim(input),
+          };
+        })(),
       ),
       providePort(environmentWorkWakeupPort, {
         notifyRunStarted: async (input) => {
           if (webhookWakeup === null) return;
-          ctx.executionCtx.waitUntil(
+          ctx.executionCtx?.waitUntil(
             webhookWakeup.notifyRunStarted(input).catch((err) => {
               logError(
                 { op: "environment_work.webhook_failed", err },
@@ -1240,7 +1253,7 @@ function managedDreamsApplicationFor(ctx: AppCtx) {
       }),
       dreamExecutionModule(),
       inProcessDreamExecutionSchedulerModule({
-        defer: (task) => ctx.executionCtx.waitUntil(task),
+        defer: (task) => ctx.executionCtx?.waitUntil(task),
       }),
     ],
   });

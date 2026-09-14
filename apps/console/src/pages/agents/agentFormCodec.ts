@@ -738,9 +738,9 @@ export function mergeFormIntoConfig(
       ? mergeMcpServers(existingMcp, form.mcpServers)
       : null;
     payload.skills = form.skills.length ? form.skills : null;
-    payload.multiagent = form.callableAgents.length
-      ? { type: "coordinator", agents: form.callableAgents }
-      : null;
+    // mergeMultiagent (not a bare rebuild) so roster members the Form does
+    // not edit — advisors and other non-agent entries — survive an update.
+    payload.multiagent = mergeMultiagent(base?.multiagent, form.callableAgents);
     if (form.enableGeneralSubagent || base?.enable_general_subagent !== undefined) payload.enable_general_subagent = form.enableGeneralSubagent;
     else delete payload.enable_general_subagent;
   } else {

@@ -77,7 +77,13 @@ describe("agentFormCodec lossless update", () => {
     const form = agentToForm(agent);
     expect(form.model).toBe("claude-sonnet-4-6");
     expect(form.modelSpeed).toBe("fast");
-    expect(buildModelValue(form)).toEqual({ id: "claude-sonnet-4-6", speed: "fast" });
+    // `effort` rides along now that Reasoning is an editable form control;
+    // the lossless-preservation assertion below is what this test is about.
+    expect(buildModelValue(form)).toEqual({
+      id: "claude-sonnet-4-6",
+      speed: "fast",
+      effort: { type: "high" },
+    });
 
     form.name = "Renamed";
     const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
@@ -402,6 +408,7 @@ describe("agentFormCodec lossless update", () => {
     const form = agentToForm(agent);
     form.model = "deepseek-chat";
     form.modelSpeed = "";
+    form.modelReasoning = "";
 
     const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
       forUpdate: true,

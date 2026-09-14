@@ -61,7 +61,7 @@ describe("main-node sandbox provider selection", () => {
 
   it("lists the isolated providers when selection is invalid", () => {
     expect(() => resolveSandboxProviderModule("unknown")).toThrow(
-      /sprites, litebox, boxlite, boxrun, daytona, e2b/,
+      /sprites, litebox, boxlite, boxrun, belljar, daytona, e2b/,
     );
   });
 });
