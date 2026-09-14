@@ -543,15 +543,26 @@ export function toSessionEventResponse(event: SessionEventView): object {
         ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
       };
     case "span.model_request_start":
+      return {
+        id: event.id,
+        type: event.type,
+        processed_at: event.processedAt,
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
+      };
     case "span.model_first_token":
+      return {
+        id: event.id,
+        type: event.type,
+        ...(event.model !== undefined && { model: event.model }),
+        ...(event.modelRequestStartId !== undefined && { model_request_start_id: event.modelRequestStartId }),
+        processed_at: event.processedAt,
+      };
     case "span.compaction_summarize_start":
       return {
         id: event.id,
         type: event.type,
-        ...("model" in event && event.model !== undefined && { model: event.model }),
-        ...(event.type === "span.model_first_token" && event.modelRequestStartId !== undefined && { model_request_start_id: event.modelRequestStartId }),
+        ...(event.model !== undefined && { model: event.model }),
         processed_at: event.processedAt,
-        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
       };
     case "agent.thread_context_compacted":
     case "session.status_rescheduled":

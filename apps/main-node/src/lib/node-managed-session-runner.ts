@@ -537,7 +537,14 @@ export class DefaultNodeManagedSessionRunner
           workspaceId: input.workspaceId,
           session: input.session,
           environment: input.environment,
-          sandbox,
+          // rawSandbox, not the execution-guarded handle: this runs during
+          // finalization, after a user.interrupt has already aborted the
+          // fence, and the guard rejects every call once aborted
+          // (SandboxExecutionFencedError). Output promotion, the memory
+          // flush and the workspace snapshot must still complete for an
+          // interrupted turn. Upstream's synchronizeSandbox below passes
+          // rawSandbox for the same reason.
+          sandbox: rawSandbox,
         });
       } catch (error) {
         runtime.broadcastProducedEvent({
