@@ -110,7 +110,7 @@ export interface RuntimeAdapter {
    *      out its own in-progress turn"). Without this signal the CF
    *      shell has no handle on the turnId minted inside runAgentTurn.
    *
-   * Node impl is a no-op — SessionStateMachine tracks `activeTurnId`
+   * Node impl is a no-op — SessionStateMachine tracks its own live turns
    * directly via runTurn / onWake (fly/k8s don't evict in-flight HTTP).
    *
    * MUST NOT block the turn — fire-and-forget only.
@@ -125,8 +125,8 @@ export interface RuntimeAdapter {
    * out-of-band crash (e.g. DO evicted between endTurn write and
    * this callback) as a real orphan.
    *
-   * Node impl is a no-op — SessionStateMachine clears activeTurnId
-   * in its own runTurn finally.
+   * Node impl is a no-op — SessionStateMachine drops the turn from its own
+   * live-turn map in its runTurn finally.
    *
    * MUST NOT block — fire-and-forget.
    */

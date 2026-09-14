@@ -122,6 +122,12 @@ export interface SessionMachineDeps {
     sandbox: SandboxPort;
     tools: unknown;
     model: LanguageModel;
+    /** Per-turn cancellation signal. The shell must hand this to the
+     *  HarnessRuntime it builds (`HarnessRuntime.abortSignal`) so the
+     *  default loop passes it to streamText; that's what makes
+     *  `interrupt()` below actually stop an in-flight model call.
+     *  Aborted by `SessionStateMachine.interrupt()`. */
+    abortSignal: AbortSignal;
   }): Promise<unknown>;
 
   /** Flush provider/filesystem state after harness children stop but before
@@ -138,8 +144,33 @@ export interface SessionMachineDeps {
 }
 
 export class SessionStateMachine {
-  private activeTurnId: TurnId | null = null;
   private activeHarness: { key: string; harness: SessionHarness } | null = null;
+  /** Every turn currently in flight, by id, with its AbortController; empty
+   *  when the session is idle.
+   *
+   *  One map rather than a single `activeTurnId` slot plus a Set of
+   *  controllers: Node dispatch sites fire `runHarnessTurn` per `user.message`
+   *  with no in-flight check, so several turns can run concurrently. With the
+   *  old pair, turn 2 overwrote the slot and turn 1 finishing cleared it — the
+   *  session was marked idle (and `hasInflightTurn()` said so) while turn 2 was
+   *  still running, and the orphan scan then treated turn 2 as somebody else's
+   *  to recover. Keyed by turn id, every question about liveness — is anything
+   *  running, is THIS turn ours, is anyone left after mine — is answered off
+   *  the one structure.
+   *
+   *  `interrupt()` aborts all of them, which propagates to each harness through
+   *  `HarnessRuntime.abortSignal` → streamText's `abortSignal`. */
+  private activeTurns = new Map<TurnId, AbortController>();
+  /** True once the terminal `session.status_idle` for the current stretch of
+   *  work has been claimed; reset when a new turn registers.
+   *
+   *  The liveness check alone is not enough to emit exactly one. It is read
+   *  after this turn's `await`s (so a turn that started meanwhile is seen),
+   *  and by then a sibling finishing in the same window has already removed
+   *  itself — both would see an empty map and both would emit. Claiming the
+   *  event and flipping this flag in one synchronous step is what makes "the
+   *  last turn out" a single turn. */
+  private terminalEventClaimed = false;
   private logger: NonNullable<SessionMachineDeps["logger"]>;
 
   constructor(private deps: SessionMachineDeps) {
@@ -149,11 +180,11 @@ export class SessionStateMachine {
     };
   }
 
-  /** Currently-running turn id, or null if idle. Used by per-platform
-   *  shells to decide whether to keep the alarm armed (CF) or skip a
-   *  recovery scan that would race the active turn. */
+  /** True while at least one turn is running. Used by per-platform shells to
+   *  decide whether to keep the alarm armed (CF) or skip a recovery scan that
+   *  would race an active turn. */
   hasInflightTurn(): boolean {
-    return this.activeTurnId !== null;
+    return this.activeTurns.size > 0;
   }
 
   /**
@@ -171,16 +202,37 @@ export class SessionStateMachine {
     if (!agent) throw new Error(`agent ${agentId} not found`);
 
     const turnId = nanoid();
-    this.activeTurnId = turnId;
-    await this.deps.adapter.beginTurn(this.deps.sessionId, turnId);
-    this.deps.adapter.hintTurnInFlight?.(this.deps.sessionId, turnId);
+    // Per-turn cancellation. Handed to the shell via buildHarnessContext so
+    // it lands on HarnessRuntime.abortSignal → streamText({ abortSignal }).
+    // `interrupt()` fires it; the catch/finally below translate an abort
+    // into the same "turn ended, session idle" shape the CF SessionDO
+    // produces for user.interrupt.
+    const abort = new AbortController();
 
-    // Set once the harness returns normally so the finally block can emit
-    // the terminal session.status_idle only on success (the catch path
-    // emits session.error instead, which is already terminal for clients).
+    // Set once the harness returns normally. Gates output promotion only —
+    // the terminal session.status_idle no longer depends on the outcome (see
+    // the finally block). An interrupt sets neither this nor session.error: a
+    // user-initiated abort is not a failure, mirroring the CF SessionDO, which
+    // appends user.interrupt + session.status_idle and skips session.error.
     let harnessCompleted = false;
+    // Set once beginTurn succeeded, i.e. the sessions row really is marked
+    // running. Only then may the finally block close the turn: endTurn on a
+    // turn that never opened would flip a row this call never owned.
+    let turnOpened = false;
 
     try {
+      // Registration and beginTurn belong INSIDE the try: everything the
+      // finally block undoes has to be set up where the finally block can see
+      // it. With beginTurn awaited outside, a rejection (DB down, row gone)
+      // left the turn registered forever — the session read as busy for the
+      // life of the process and its controller was never released.
+      this.activeTurns.set(turnId, abort);
+      // New work: the session owes a terminal event again.
+      this.terminalEventClaimed = false;
+      await this.deps.adapter.beginTurn(this.deps.sessionId, turnId);
+      turnOpened = true;
+      this.deps.adapter.hintTurnInFlight?.(this.deps.sessionId, turnId);
+
       // Memory store mounts: optional adapter step, runs once per turn
       // so a session newly bound to a store picks it up on the next
       // user.message without restarting.
@@ -212,12 +264,24 @@ export class SessionStateMachine {
         sandbox: this.deps.sandbox,
         tools,
         model,
+        abortSignal: abort.signal,
       });
 
       const harness = await this.resolveHarness(agent);
       await harness.run(ctx);
-      harnessCompleted = true;
+      // An aborted turn can also *resolve* rather than reject: the AI SDK
+      // routes a mid-stream abort through onAbort and the loop returns
+      // normally. Check the signal on both exits so the two shapes are
+      // treated identically.
+      harnessCompleted = !abort.signal.aborted;
     } catch (err) {
+      // User-initiated interrupt — streamText rejects with an AbortError.
+      // Not an error condition: swallow it, skip session.error, and let
+      // the finally block close the turn with session.status_idle.
+      if (abort.signal.aborted) {
+        this.logger.log(`turn ${turnId} interrupted by user`);
+        return;
+      }
       // Surface the failure to the user: persist + publish session.error
       // so the console shows the actual diagnostic (model 4xx, tool
       // crash, …) instead of a turn that silently produces nothing.
@@ -237,36 +301,69 @@ export class SessionStateMachine {
       }
       throw err;
     } finally {
-      this.activeTurnId = null;
-      await this.deps.adapter.endTurn(this.deps.sessionId, turnId, "idle");
+      // Delete by identity: only ever removes this turn's own entry, never a
+      // concurrent turn's.
+      this.activeTurns.delete(turnId);
+      if (turnOpened) {
+        await this.deps.adapter.endTurn(this.deps.sessionId, turnId, "idle");
+      }
+
+      // Promote files the agent wrote to /mnt/session/outputs into the Files
+      // API, so a consumer that reacts to session.status_idle by polling
+      // files.list({scope_id}) (the ff-agents bot's file mirroring) sees them
+      // already present. Runs for THIS turn's own completion, whether or not
+      // this turn is the one that will emit the terminal event — a turn that
+      // stays silent because a sibling is still live has still produced its
+      // artefacts.
+      // Best-effort: a promote failure must never block the terminal event
+      // below — that would re-introduce the turn-never-ends hang. Success path
+      // only: an interrupted or failed turn may have half-written files under
+      // /mnt/session/outputs, and promoting those would publish partial
+      // artefacts to the Files API as if they were the turn's deliverable.
+      if (harnessCompleted && this.deps.promoteSessionOutputs) {
+        try {
+          await this.deps.promoteSessionOutputs({ sandbox: this.deps.sandbox });
+        } catch (promoteErr) {
+          this.logger.warn(
+            `promoteSessionOutputs failed: ${(promoteErr as Error).message}`,
+          );
+        }
+      }
 
       // Emit the terminal session.status_idle the Anthropic Managed Agents
-      // wire contract requires at the end of every turn. endTurn() above only
-      // flips the sessions-row status in SQL; without this event, SSE
+      // wire contract requires at the end of a session's work. endTurn() above
+      // only flips the sessions-row status in SQL; without this event, SSE
       // consumers that discriminate on session.status_idle (every Anthropic
-      // SDK — the /messages one-shot handler already waits on it) never see
-      // the turn end and block until their own inactivity timeout. Persist +
-      // publish, mirroring the session.error path above. Only on the success
-      // path: a thrown harness already emitted session.error, itself terminal.
+      // SDK — the /messages one-shot handler closes its body on it, and the
+      // hub has no inactivity timer behind that) never see the turn end and
+      // block forever. Persist + publish, mirroring the session.error path.
       // stop_reason=end_turn because the default harness runs to completion
-      // rather than pausing for requires_action tool results.
-      if (harnessCompleted) {
-        // Promote files the agent wrote to /mnt/session/outputs into the
-        // Files API before signalling idle, so a consumer that reacts to
-        // session.status_idle by polling files.list({scope_id}) (the
-        // ff-agents bot's file mirroring) sees them already present.
-        // Best-effort: a promote failure must never block the terminal
-        // event below — that would re-introduce the turn-never-ends hang.
-        if (this.deps.promoteSessionOutputs) {
-          try {
-            await this.deps.promoteSessionOutputs({ sandbox: this.deps.sandbox });
-          } catch (promoteErr) {
-            this.logger.warn(
-              `promoteSessionOutputs failed: ${(promoteErr as Error).message}`,
-            );
-          }
-        }
-
+      // rather than pausing for requires_action tool results (and because
+      // Anthropic's StopReason union has no `interrupted` variant — the
+      // user.interrupt event in the log carries the actual cause).
+      //
+      // Two rules, and they are the same rule: the LAST turn out terminates
+      // the session, whatever its own outcome.
+      //  - Not before then. session.status_idle means "this session is done"
+      //    to every consumer, so a turn finishing while a sibling still
+      //    streams would cut that sibling off mid-flight.
+      //  - Not conditional on success. A thrown harness already appended
+      //    session.error, which is terminal for a client that reads it — but
+      //    a client waiting on /messages is waiting for status_idle
+      //    specifically. When a completed turn has already suppressed its own
+      //    idle for a sibling that then throws, gating on success left the
+      //    session with NO terminal event at all and that first turn's stream
+      //    open for the life of the process.
+      //
+      // The size is re-read HERE, after every await above (endTurn, promote):
+      // a turn that registered while those ran is live now, and publishing an
+      // idle under it is exactly the mid-flight cut this guard exists to stop.
+      // Read together with the claim flag, and both in ONE synchronous step —
+      // see terminalEventClaimed for why the size alone would let two turns
+      // finishing in the same window each publish a terminal event.
+      const claimed = this.activeTurns.size === 0 && !this.terminalEventClaimed;
+      if (claimed) {
+        this.terminalEventClaimed = true;
         const idleEvent = {
           type: "session.status_idle",
           stop_reason: { type: "end_turn" },
@@ -284,6 +381,25 @@ export class SessionStateMachine {
   }
 
   /**
+   * Abort every in-flight turn, if any. Called by the per-platform shell
+   * when a `user.interrupt` event arrives (Node: SessionRegistry.interrupt;
+   * the CF DO aborts its own per-thread controller). No-op when idle.
+   *
+   * Aborts every controller in `activeTurns`, not just the most
+   * recently started one — Node's dispatch sites fire `runHarnessTurn`
+   * per `user.message` with no in-flight check, so several turns can be
+   * running concurrently and an interrupt must stop all of them.
+   *
+   * The turn(s) do not end synchronously: aborting each signal unblocks
+   * its streamText call, and `runHarnessTurn`'s finally block appends the
+   * terminal session.status_idle. No session.error is written — a
+   * user-initiated abort is not a failure.
+   */
+  interrupt(): void {
+    for (const c of this.activeTurns.values()) c.abort();
+  }
+
+  /**
    * Reconcile orphan turns. Reads sessions WHERE status='running',
    * filters out our own active turn, and runs recoverInterruptedState
    * for each. Recovery injects placeholder events into the event log so
@@ -294,7 +410,7 @@ export class SessionStateMachine {
   async onWake(): Promise<void> {
     const orphans = await this.deps.adapter.listOrphanTurns(this.deps.sessionId);
     for (const o of orphans) {
-      if (o.turn_id === this.activeTurnId) continue; // we own it
+      if (this.activeTurns.has(o.turn_id)) continue; // we own it
       await this.recoverOrphan(o);
     }
   }
@@ -305,11 +421,20 @@ export class SessionStateMachine {
    * in-flight sandbox + flips status to 'destroyed'.
    */
   async destroy(): Promise<void> {
-    const turnId = this.activeTurnId;
-    this.activeTurnId = null;
+    // Snapshot and clear: every live turn is being torn down, and a turn's own
+    // finally block must not find itself still registered afterwards.
+    const turnIds = [...this.activeTurns.keys()];
+    this.activeTurns.clear();
+    // Stateful harness children and the checkpoint need the live sandbox,
+    // so preserve their cleanup order before closing every tracked turn.
     await this.releaseSandbox("destroy");
-    if (turnId) {
-      await this.deps.adapter.endTurn(this.deps.sessionId, turnId, "destroyed");
+    if (turnIds.length > 0) {
+      // Every turn that was in flight, not just one: with concurrent turns the
+      // rows the others opened would otherwise stay 'running' forever and be
+      // rediscovered as orphans on the next wake.
+      for (const turnId of turnIds) {
+        await this.deps.adapter.endTurn(this.deps.sessionId, turnId, "destroyed");
+      }
     } else {
       // No active turn — directly mark the row destroyed.
       await this.deps.adapter.endTurn(this.deps.sessionId, "", "destroyed");

@@ -328,7 +328,7 @@ export class SessionDO extends DurableObject<Env> {
    *
    * Sole consumer: `_checkOrphanTurns` filters out `o.turn_id ∈
    * _activeTurnIds` — exact match like Node SessionStateMachine's
-   * `if (o.turn_id === this.activeTurnId) continue` (machine.ts:183).
+   * `if (this.activeTurns.has(o.turn_id)) continue` (machine.ts, onWake).
    * Replaces a defensive `_inflightTurnHints + 90s grace period`
    * filter in the orphan check that was needed because earlier the
    * shell had no handle on the turnId minted inside runAgentTurn —
@@ -5747,7 +5747,7 @@ export class SessionDO extends DurableObject<Env> {
     // before treating each row as an orphan. We track these in
     // _activeTurnIds (populated from RuntimeAdapter's hintTurnInFlight
     // callback the moment beginTurn lands the D1 write). Mirrors Node
-    // SessionStateMachine.onWake's `if (o.turn_id === this.activeTurnId)
+    // SessionStateMachine.onWake's `if (this.activeTurns.has(o.turn_id))
     // continue` (machine.ts:183), just generalized to a Set because
     // sub-agents can have concurrent turns.
     //

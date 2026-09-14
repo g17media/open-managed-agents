@@ -181,7 +181,7 @@ export async function runAgentTurn<T>(
     }
     // Symmetric to hintTurnInFlight above. CF shell uses this to drop
     // turnId from its local active set; Node shell no-ops (machine.ts
-    // tracks via activeTurnId). Fired before the elapsed-time log so
+    // tracks its own live-turn map). Fired before the elapsed-time log so
     // any orphan-detection that runs concurrently sees the up-to-date
     // membership.
     agent.adapter.hintTurnEnded?.(agent.sessionId, turnId);

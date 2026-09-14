@@ -339,7 +339,7 @@ The same demo works on the Postgres compose unchanged.
 | `GET /v1/sessions/:id/events/stream` SSE w/ Last-Event-ID resume | ✓ via SessionRouter.streamEvents |
 | `GET /v1/sessions/:id/trajectory` | ✓ via SessionRouter.getTrajectory |
 | `POST /v1/sessions/:id/__debug_recovery__` (token-gated) | ✓ via SessionRouter.triggerDebugRecovery |
-| `user.interrupt` aborts in-flight harness | ✓ via SessionRouter.interrupt → SessionRegistry abort |
+| `user.interrupt` aborts in-flight harness | ✓ persisted, then `SessionRegistry.interrupt` → `SessionStateMachine.interrupt()` aborts the turn's `AbortSignal` |
 | Real LLM token streaming (any Anthropic-compatible endpoint) | ✓ |
 | Crash recovery on process restart | ✓ |
 | `bash` tool via host subprocess | ✓ |
@@ -363,6 +363,48 @@ The same demo works on the Postgres compose unchanged.
 | `/billing-api/*`, `/v1/internal/usage_events` | ✗  CF-only by design. Talks to a `USAGE_METER` worker not in this repo. Self-host operators bring their own metering or skip. |
 | `/v1/runtimes` (RuntimeRoom DO) | ✗  CF-only (DO + WebSocket-backed) |
 | Cron / queue handlers | ✗  CF-only (P3 will land scheduler abstraction) |
+
+`user.interrupt` (POST `/v1/sessions/:id/events` with
+`{"events":[{"type":"user.interrupt"}]}`) aborts the running turn on Node,
+matching the Cloudflare `SessionDO`. The route persists and publishes the
+`user.interrupt` event first — so it shows up in the trajectory and on the SSE
+stream — then aborts the per-turn `AbortController` the `SessionStateMachine`
+minted; it reaches the model call as `HarnessRuntime.abortSignal`, which the
+default harness hands to `streamText`. The cancelled turn closes with a terminal
+`session.status_idle` (`stop_reason: end_turn`) and **no** `session.error`: a
+user-initiated stop is not a failure. Files under `/mnt/session/outputs` are not
+promoted to the Files API for an interrupted turn — only completed turns publish
+their artefacts. Before this, the endpoint answered `202 {"interrupted":true}`
+while the turn kept calling tools and burning tokens.
+
+**Concurrent turns share one terminal event.** Node's dispatch fires
+`runHarnessTurn` per `user.message` with no in-flight check, so a session can
+have several turns running at once. `SessionStateMachine` keeps them in one
+`Map<turnId, AbortController>`: `interrupt()` aborts every one of them, each
+turn still closes its own row with `endTurn`, but `session.status_idle` is
+emitted once, by the LAST turn to finish. That event means "this session is
+done" to every consumer — the one-shot `/messages` handler closes its SSE body
+on the first one, and the hub has no inactivity timer behind that — so a turn
+that lands while a sibling is still streaming stays silent rather than cutting
+the sibling off.
+
+The last turn out emits it **whatever its own outcome**: completed,
+interrupted, thrown, or failed before `beginTurn`. A thrown turn still appends
+`session.error` first, and that error is terminal for a client that reads it —
+but a client blocked on `/messages` is waiting for `session.status_idle`
+specifically, so gating the terminal event on success would strand it whenever
+the failing turn is the last one out. Emitting exactly one is a synchronous
+claim (empty live-turn map + an unclaimed flag, reset when the next turn
+registers), so two turns finishing in the same tick cannot both publish.
+
+**Single-instance only today.** `SessionRegistry.interrupt` is a process-local
+map lookup, not a cross-instance signal. In multi-instance Postgres mode (see
+[Postgres backend](#postgres-backend)), an interrupt landing on an instance
+that isn't running the turn just persists the `user.interrupt` event and
+returns 202 — the instance actually running the turn never hears about it and
+the turn keeps going. Cross-instance abort would need a PG `NOTIFY`/`LISTEN`
+hop from the interrupting instance to the one holding the `AbortController`;
+that hop isn't wired yet.
 
 ## Sandbox isolation modes
 

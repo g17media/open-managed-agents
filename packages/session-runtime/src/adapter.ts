@@ -24,7 +24,7 @@ export interface RuntimeAdapterOptions {
   /** Per-platform shell hook. CF: setAlarm(now+30s) AND register turnId
    *  into the local active-turn set so _checkOrphanTurns can filter
    *  out the caller's own active turns (port contract; see ports.ts).
-   *  Node: leave unset (SessionStateMachine tracks activeTurnId
+   *  Node: leave unset (SessionStateMachine tracks its own live turns
    *  directly in runTurn). */
   onTurnInFlight?: (sessionId: string, turnId: TurnId) => void;
   /** Symmetric hook fired after endTurn's UPDATE lands. CF uses it to

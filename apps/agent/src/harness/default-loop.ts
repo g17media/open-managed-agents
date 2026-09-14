@@ -9,6 +9,12 @@ import type { CompactionStrategy } from "./compaction";
 import { ALL_TOOLS } from "./tools";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
 import { modelCallOptions } from "./provider";
+import {
+  instrumentToolTimings,
+  toolTimingMetadata,
+  toolUseTimingMetadata,
+  type ToolTimingRecord,
+} from "./tool-timing";
 
 // Single source of truth lives in ./tools.ts (ALL_TOOLS). Importing here so
 // adding a new toolset entry can't drift the event-classification list — the
@@ -61,6 +67,8 @@ function emitToolCallEvent(
   runtime: HarnessContext["runtime"],
   tools: Record<string, any>,
   part: ContentPart<any> & { type: "tool-call" },
+  timings?: Map<string, ToolTimingRecord>,
+  harnessName = "default",
 ): void {
   const callInput = (part.input ?? {}) as Record<string, unknown>;
   const toolName = part.toolName;
@@ -101,6 +109,8 @@ function emitToolCallEvent(
       input: callInput,
     };
     if (!tools[toolName]?.execute) event.evaluated_permission = "ask";
+    const timing = timings?.get(toolCallId);
+    if (timing) event.metadata = toolUseTimingMetadata(timing, harnessName);
     runtime.broadcast(event);
   } else {
     runtime.broadcast({
@@ -144,6 +154,8 @@ function threadSentEventId(toolCallId: string): string {
 function emitToolResultEvent(
   runtime: HarnessContext["runtime"],
   part: ContentPart<any> & { type: "tool-result" | "tool-error" },
+  timings?: Map<string, ToolTimingRecord>,
+  harnessName = "default",
 ): void {
   const toolCallId = part.toolCallId;
   const toolName = part.toolName;
@@ -165,7 +177,11 @@ function emitToolResultEvent(
       // emitToolCallEvent above. Same identity, no extra plumbing.
       parent_event_id: toolCallId,
     });
+    // MCP results carry no timing metadata, but the call may still have a
+    // record (an instrumented execute); the result is its last consumer here too.
+    timings?.delete(toolCallId);
   } else {
+    const timing = timings?.get(toolCallId);
     runtime.broadcast({
       type: "agent.tool_result",
       tool_use_id: toolCallId,
@@ -175,7 +191,10 @@ function emitToolResultEvent(
       // emitToolCallEvent above. (AgentToolUseEvent.id overrides
       // EventBase.id, so tool_use_id IS the parent's EventBase.id.)
       parent_event_id: toolCallId,
+      ...(timing ? { metadata: toolTimingMetadata(timing, harnessName) } : {}),
     });
+    // The result is the last consumer of this call's record.
+    timings?.delete(toolCallId);
   }
 
   if (toolName.startsWith("call_agent_")) {
@@ -263,6 +282,12 @@ export class DefaultHarness implements HarnessInterface {
   async run(ctx: HarnessContext): Promise<void> {
     const { agent, userMessage, runtime, tools, model, systemPrompt } = ctx;
 
+    // Wrap every executable tool so the tool_use/tool_result events below
+    // can carry true per-call timings (see tool-timing.ts). Custom and
+    // always_ask tools have no execute and pass through by reference.
+    const { tools: timedTools, timings: toolTimings } = instrumentToolTimings(tools);
+    const harnessName = agent.harness ?? "default";
+
     // Resolve compaction params from agent config. Strategy class is
     // selectable via `agent.metadata.compaction_strategy` (defaults to
     // "summarize" for backward compat); shared knobs (tail, trigger
@@ -301,7 +326,7 @@ export class DefaultHarness implements HarnessInterface {
     const ctxWindow = resolveContextWindowTokens(model);
     if (this.shouldCompact && this.compact && this.shouldCompact(allEvents, { contextWindowTokens: ctxWindow })) {
       try {
-        await this.compact(allEvents, runtime, { model, systemPrompt, tools });
+        await this.compact(allEvents, runtime, { model, systemPrompt, tools: timedTools });
       } catch (err) {
         // Compaction is best-effort. Log and continue — the next turn will
         // try again. Don't fail the whole turn over a summarize error.
@@ -327,7 +352,7 @@ export class DefaultHarness implements HarnessInterface {
     // provider exposes its own knobs via providerOptions. We branch on
     // model.provider here. To add OpenAI/Gemini cache support later, extend
     // the strategy table below; the harness loop above doesn't change.
-    const cached = applyProviderCacheStrategy(model, systemPrompt, tools, messages);
+    const cached = applyProviderCacheStrategy(model, systemPrompt, timedTools, messages);
     const finalMessages = cached.messages;
 
     // 4. Resolve model id (used by per-step span events emitted via the
@@ -565,12 +590,12 @@ export class DefaultHarness implements HarnessInterface {
                 await runtime.broadcastToolInputEnd(partTC.toolCallId, "completed");
                 liveToolInput.delete(partTC.toolCallId);
               }
-              emitToolCallEvent(runtime, tools, part);
+              emitToolCallEvent(runtime, timedTools, part, toolTimings, harnessName);
               break;
             }
             case "tool-result":
             case "tool-error":
-              emitToolResultEvent(runtime, part);
+              emitToolResultEvent(runtime, part, toolTimings, harnessName);
               break;
             // source / file / tool-approval-request: not produced by current
             // tool surface; intentionally skipped. Add cases here if those
