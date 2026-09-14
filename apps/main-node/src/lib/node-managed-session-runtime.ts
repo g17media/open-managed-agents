@@ -367,6 +367,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
         subscription.close();
       },
     };
+    console.log(`[realtime] subscriber attached session=${input.sessionId}`);
     detach = this.realtime.attach({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
@@ -414,6 +415,11 @@ export class DefaultNodeManagedSessionRuntimeDriver
       ? frame.seq
       : undefined;
     for (const event of decoded) {
+      // Temporary: live console updates are not arriving. Log what is being
+      // published so a missing update is attributable to publish vs delivery.
+      console.log(
+        `[realtime] publish session=${sessionId} type=${(event as { type?: string }).type ?? "?"}`,
+      );
       this.realtime.publish({
         workspaceId,
         sessionId,
