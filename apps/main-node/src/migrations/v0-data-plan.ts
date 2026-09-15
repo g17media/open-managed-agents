@@ -56,6 +56,9 @@ export async function planMigration(db: Database.Database, options: MigrationOpt
   const rows: MigrationRow[] = [];
   const files: MigrationFile[] = [];
   const warnings: string[] = [];
+  // An agent is converted once per row, once per version and once per session
+  // snapshot; report what that conversion dropped a single time.
+  const warnOnce = (message: string) => { if (!warnings.includes(message)) warnings.push(message); };
   const keys = new Set<string>();
   const root = await fs.realpath(options.dataDir);
   const emit = (table: string, key: Record<string, SqlValue>, values: Record<string, SqlValue>, seals?: MigrationRow["seals"]) => {
@@ -168,12 +171,12 @@ export async function planMigration(db: Database.Database, options: MigrationOpt
   const versionsByWorkspace = (workspace: string) => new Map(source.agents.filter((row) => row.tenant_id === workspace).map((row) => [row.id, Number(row.version)]));
   const agents = new Map<string, Agent>();
   for (const row of source.agents) {
-    const value = agent(row, object(row.config, `Agent ${row.id}`), resolveSkill(row.tenant_id), versionsByWorkspace(row.tenant_id));
+    const value = agent(row, object(row.config, `Agent ${row.id}`), resolveSkill(row.tenant_id), versionsByWorkspace(row.tenant_id), warnOnce);
     agents.set(ownerKey(row.tenant_id, row.id), value);
     emit("managed_agents", { workspace_id: row.tenant_id, id: row.id }, { ...document(value), version: value.version });
   }
   for (const row of source.agent_versions) {
-    const value = agent({ ...row, id: row.agent_id }, object(row.snapshot, "agent version"), resolveSkill(row.tenant_id), versionsByWorkspace(row.tenant_id));
+    const value = agent({ ...row, id: row.agent_id }, object(row.snapshot, "agent version"), resolveSkill(row.tenant_id), versionsByWorkspace(row.tenant_id), warnOnce);
     emit("managed_agent_versions", { workspace_id: row.tenant_id, agent_id: row.agent_id, version: row.version }, { document: JSON.stringify(value), created_at: row.created_at });
   }
   const fileIds = new Set<string>();
@@ -242,7 +245,7 @@ export async function planMigration(db: Database.Database, options: MigrationOpt
     if (!current || !env) throw new Error(`Session ${row.id}: agent/environment is missing from its workspace`);
     const rawAgent = row.agent_snapshot ? object(row.agent_snapshot, "session agent snapshot") : null;
     if (!rawAgent) throw new Error(`Session ${row.id}: missing agent snapshot`);
-    const snapshot = agent({ ...row, id: row.agent_id, version: rawAgent.version, created_at: rawAgent.created_at ?? row.created_at, updated_at: rawAgent.updated_at ?? row.created_at }, rawAgent, resolveSkill(workspace), versionsByWorkspace(workspace));
+    const snapshot = agent({ ...row, id: row.agent_id, version: rawAgent.version, created_at: rawAgent.created_at ?? row.created_at, updated_at: rawAgent.updated_at ?? row.created_at }, rawAgent, resolveSkill(workspace), versionsByWorkspace(workspace), warnOnce);
     const snapshotEnv = row.environment_snapshot ? object(row.environment_snapshot, "session environment snapshot") : {};
     if (!snapshotEnv.config) unpinnedEnvironments++;
     const pinnedEnvironment = snapshotEnv.config ? environment({ ...env, ...snapshotEnv, created_at: snapshotEnv.created_at ?? row.created_at, updated_at: snapshotEnv.updated_at ?? row.created_at }) : env;

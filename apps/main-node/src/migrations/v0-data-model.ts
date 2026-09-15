@@ -71,7 +71,10 @@ export function environment(row: Legacy): Environment {
   };
 }
 
-export function agent(row: Legacy, config: Legacy, resolveSkill: (binding: Legacy) => Agent["skills"][number], versions: Map<string, number>): Agent {
+/** Built-in tools a v1 agent toolset can carry. The config name is the discriminator. */
+export const TOOLSET_TOOL_NAMES = ["bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"];
+
+export function agent(row: Legacy, config: Legacy, resolveSkill: (binding: Legacy) => Agent["skills"][number], versions: Map<string, number>, warn?: (message: string) => void): Agent {
   for (const key of ["aux_model", "aux_model_card_id", "runtime_binding", "appendable_prompts", "_oma"]) {
     if (config[key] != null) throw new Error(`Agent ${row.id}: ${key} requires an explicit migration mapping`);
   }
@@ -88,10 +91,18 @@ export function agent(row: Legacy, config: Legacy, resolveSkill: (binding: Legac
     if (!["agent_toolset_20260401", "mcp_toolset"].includes(raw.type)) throw new Error(`Agent ${row.id}: unsupported tool type ${raw.type}`);
     const defaults = { enabled: raw.default_config?.enabled ?? true, permissionPolicy: raw.default_config?.permission_policy ?? { type: "always_allow" } };
     if (!["always_allow", "always_ask"].includes(defaults.permissionPolicy.type)) throw new Error(`Agent ${row.id}: unsupported tool permission`);
-    return { ...tool, defaultConfig: defaults, configs: array(raw.configs, "tool configs").map((item) => ({
-      ...camel(item), ...(raw.type === "agent_toolset_20260401" && { type: item.name }),
-      enabled: item.enabled ?? defaults.enabled, permissionPolicy: item.permission_policy ?? defaults.permissionPolicy,
-    })) };
+    return { ...tool, defaultConfig: defaults, configs: array(raw.configs, "tool configs").flatMap((item) => {
+      // The toolset discriminator is the config name, so a v0 built-in that v1
+      // dropped would otherwise be written as a tool type no reader accepts.
+      if (raw.type === "agent_toolset_20260401" && !TOOLSET_TOOL_NAMES.includes(item.name)) {
+        warn?.(`Agent ${row.id}: dropped ${item.enabled ?? defaults.enabled ? "enabled" : "disabled"} tool ${item.name}, which has no v1 equivalent.`);
+        return [];
+      }
+      return [{
+        ...camel(item), ...(raw.type === "agent_toolset_20260401" && { type: item.name }),
+        enabled: item.enabled ?? defaults.enabled, permissionPolicy: item.permission_policy ?? defaults.permissionPolicy,
+      }];
+    }) };
   });
   const roster = config.multiagent?.agents ?? config.callable_agents ?? [];
   const multiagent = roster.length ? { type: "coordinator" as const, agents: array(roster, "agent roster").map((entry) => {

@@ -12,6 +12,7 @@ import { unzipSync } from "fflate";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-node";
 import { encodeRuntimeHistoryEvent } from "@open-managed-agents/managed-agents-adapters-runtime";
 import { planMigration, canonical, sha, sourceTables, tableExists } from "../src/migrations/v0-data-plan";
+import { agent } from "../src/migrations/v0-data-model";
 import { applyMigration, assertV0DataMigrated, completedMigration, migrateV0AtStartup } from "../src/migrations/v0-data";
 
 const time = Date.parse("2026-08-01T10:00:00Z");
@@ -207,5 +208,29 @@ describe("SQLite v0 to v1 migration", () => {
       expect((await response.json()).data).toMatchObject([{ id: "sess-1", title: "Original conversation" }]);
       expect(logs.join("")).toContain("SQLite data migration: completed");
     } finally { await killProcessTree(child); }
+  });
+
+  it("drops toolset configs that v1 has no tool for, instead of writing an unreadable tool type", () => {
+    // The toolset discriminator is the config name, so a v0 built-in that v1
+    // dropped (here: browser) would otherwise reach the response schema as
+    // `type: "browser"` and 500 every list that includes the agent.
+    const warnings: string[] = [];
+    const converted = agent(
+      { id: "agent-1", version: 2, created_at: time, updated_at: time },
+      {
+        name: "Browser agent", model: "claude-opus-5",
+        tools: [{
+          type: "agent_toolset_20260401",
+          default_config: { enabled: true, permission_policy: { type: "always_allow" } },
+          configs: [{ name: "web_search", enabled: false }, { name: "browser", enabled: false }, { name: "bash", enabled: true }],
+        }],
+      },
+      () => { throw new Error("no skills in this fixture"); },
+      new Map([["agent-1", 2]]),
+      (message) => warnings.push(message),
+    );
+
+    expect(converted.tools[0]!.configs.map((config) => config.name)).toEqual(["web_search", "bash"]);
+    expect(warnings).toEqual(["Agent agent-1: dropped disabled tool browser, which has no v1 equivalent."]);
   });
 });
