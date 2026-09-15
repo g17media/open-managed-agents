@@ -241,7 +241,6 @@ export class DefaultNodeManagedSessionRuntimeDriver
   private readonly starts = new ScopedSessionMap<Promise<void>>();
   private readonly executionFences = new ScopedSessionMap<SessionExecutionFence>();
   private readonly realtime: SessionRealtimeHub;
-  private readonly pendingSeq = new Map<string, number>();
 
   constructor(
     private readonly dependencies: DefaultNodeManagedSessionRuntimeDriverDependencies,
@@ -283,38 +282,26 @@ export class DefaultNodeManagedSessionRuntimeDriver
 
   /** Echo accepted user input to live subscribers.
    *
-   * The Cloudflare SessionDO broadcasts `system.user_message_pending` the
-   * moment a user.message is enqueued (`_broadcastPendingFrame`), which is
-   * what the Console renders as the outbox bubble — it never streams the raw
-   * `user.message`. Node had no equivalent, so a sent message stayed
-   * invisible until the next history fetch, i.e. until the page was
-   * reloaded. The frame carries the whole event so consumers can render the
-   * content immediately.
+   * Without this a message sent from the Console stayed invisible until the
+   * next history fetch — i.e. until the page was reloaded. The realtime hub
+   * only ever carried harness *output*; accepted input was stored and
+   * dispatched to the worker, which publishes nothing.
    *
-   * pending_seq only has to order the outbox, and Node's managed path has no
-   * queue table to autoincrement, so a per-session counter stands in. */
+   * Cloudflare solves the same problem with a `system.user_message_pending`
+   * frame from its SessionDO, but that type is an OMA extension: it is
+   * absent from the managed stream contract and from
+   * OFFICIAL_RUNTIME_EVENT_TYPES, so it is dropped before reaching a
+   * subscriber on this path. The canonical `user.message` is admitted by
+   * both, and the Console already renders it as an ordinary turn, so the
+   * event itself is what goes out.
+   */
   publishAcceptedUserEvents(input: AcceptedSessionEvents): void {
-    const scope = `${input.workspaceId}/${input.sessionId}`;
     for (const accepted of input.events) {
-      const event = accepted as unknown as {
-        id?: string; type?: string; sessionThreadId?: string | null;
-      };
-      if (event.type !== "user.message") continue;
-      const seq = (this.pendingSeq.get(scope) ?? 0) + 1;
-      this.pendingSeq.set(scope, seq);
+      if ((accepted as unknown as { type?: string }).type !== "user.message") continue;
       this.realtime.publish({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        frame: {
-          event: {
-            type: "system.user_message_pending",
-            event_id: event.id,
-            pending_seq: seq,
-            enqueued_at: Date.now(),
-            session_thread_id: event.sessionThreadId ?? "sthr_primary",
-            event: accepted,
-          } as unknown as StreamSessionEvent,
-        },
+        frame: { event: accepted as unknown as StreamSessionEvent },
       });
     }
   }
