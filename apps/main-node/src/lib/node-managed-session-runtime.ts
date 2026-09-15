@@ -159,6 +159,26 @@ export class ApplicationBackedNodeManagedSessionRuntimeEngine
     if (history.type === "not_found") {
       throw new Error(`Session ${input.sessionId} history was not found`);
     }
+    // Admit the saved bootstrap events into the ordinary event log.
+    //
+    // This is the only place the runtime has them: start() is reached solely
+    // from the accept path below, which passes `initialEvents: []`, so
+    // initializeSession could never do anything and a deployment's first
+    // message existed only in managed_session_initial_events. The harness
+    // still saw it (history.initialEvents feeds the projection, which is why
+    // the turn runs) but the Console renders the event list, so the message
+    // was invisible.
+    //
+    // The service is idempotent — it skips ids already present — and its
+    // dispatch is a no-op here, because the turn for these events is the one
+    // being started right now and re-dispatching would run it twice.
+    await this.dependencies.initializeSession?.({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      session: input.session,
+      environment: input.environment,
+      initialEvents: history.initialEvents,
+    });
     const executionFence = "executionFence" in input && input.executionFence !== null &&
       typeof input.executionFence === "object"
       ? input.executionFence as SessionExecutionFence

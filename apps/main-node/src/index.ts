@@ -1669,7 +1669,10 @@ const managedRuntimeEngine = new ApplicationBackedNodeManagedSessionRuntimeEngin
       workspaceId: input.workspaceId,
       store: new SqlSessionEventPersistence(sql),
       execution: managedRuntimeReaders.executionContext,
-      dispatch: { sessionEventsAccepted: (events) => managedRuntimeEngine.accept(events) },
+      // No-op: promotion now happens from engine.accept, while the turn for
+      // these very events is already starting. Dispatching here would accept
+      // them a second time and run the turn twice.
+      dispatch: { sessionEventsAccepted: async () => {} },
     }).initialize({ sessionId: input.sessionId, events: input.initialEvents });
   },
 });

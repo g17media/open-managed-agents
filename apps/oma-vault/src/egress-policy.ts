@@ -72,7 +72,15 @@ export function evaluateEgress(
 ): string | null {
   if (!networking || networking.type !== "limited") return null;
   const host = hostname.toLowerCase().replace(/\.$/, "");
-  const allowedHosts = networking.allowed_hosts ?? [];
+  // Split each entry as well as the list. The Console's Allowed Hosts control
+  // is a textarea and the form only ever split on commas, so a saved policy
+  // can hold one entry like "a.example.com\nb.example.com" — matching no
+  // hostname, while the denial below prints it verbatim and appears to list
+  // the very host it just refused.
+  const allowedHosts = (networking.allowed_hosts ?? [])
+    .flatMap((entry) => String(entry).split(/[\s,]+/))
+    .map((entry) => entry.trim())
+    .filter(Boolean);
   if (allowedHosts.some((h) => hostMatches(host, h.toLowerCase()))) return null;
   if (
     networking.allow_package_managers === true &&
