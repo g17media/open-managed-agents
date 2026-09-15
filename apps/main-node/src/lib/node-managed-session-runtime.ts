@@ -60,6 +60,9 @@ export interface NodeManagedSessionRuntimeDriver {
   accept(input: ExecuteNodeManagedSessionEvents): Promise<void>;
   archiveThread(input: ArchiveNodeManagedSessionThread): Promise<void>;
   subscribe(input: SubscribeNodeManagedSessionRuntime): AsyncIterable<unknown>;
+  /** Mirror accepted user input onto the live stream. Optional: drivers
+   *  without a realtime hub simply do not echo. */
+  publishAcceptedUserEvents?(input: AcceptedSessionEvents): void;
 }
 
 export interface NodeManagedSessionRuntimeCoordination
@@ -238,6 +241,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
   private readonly starts = new ScopedSessionMap<Promise<void>>();
   private readonly executionFences = new ScopedSessionMap<SessionExecutionFence>();
   private readonly realtime: SessionRealtimeHub;
+  private readonly pendingSeq = new Map<string, number>();
 
   constructor(
     private readonly dependencies: DefaultNodeManagedSessionRuntimeDriverDependencies,
@@ -274,6 +278,44 @@ export class DefaultNodeManagedSessionRuntimeDriver
     } finally {
       this.starts.delete(input);
       this.closeSession(input);
+    }
+  }
+
+  /** Echo accepted user input to live subscribers.
+   *
+   * The Cloudflare SessionDO broadcasts `system.user_message_pending` the
+   * moment a user.message is enqueued (`_broadcastPendingFrame`), which is
+   * what the Console renders as the outbox bubble — it never streams the raw
+   * `user.message`. Node had no equivalent, so a sent message stayed
+   * invisible until the next history fetch, i.e. until the page was
+   * reloaded. The frame carries the whole event so consumers can render the
+   * content immediately.
+   *
+   * pending_seq only has to order the outbox, and Node's managed path has no
+   * queue table to autoincrement, so a per-session counter stands in. */
+  publishAcceptedUserEvents(input: AcceptedSessionEvents): void {
+    const scope = `${input.workspaceId}/${input.sessionId}`;
+    for (const accepted of input.events) {
+      const event = accepted as unknown as {
+        id?: string; type?: string; sessionThreadId?: string | null;
+      };
+      if (event.type !== "user.message") continue;
+      const seq = (this.pendingSeq.get(scope) ?? 0) + 1;
+      this.pendingSeq.set(scope, seq);
+      this.realtime.publish({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        frame: {
+          event: {
+            type: "system.user_message_pending",
+            event_id: event.id,
+            pending_seq: seq,
+            enqueued_at: Date.now(),
+            session_thread_id: event.sessionThreadId ?? "sthr_primary",
+            event: accepted,
+          } as unknown as StreamSessionEvent,
+        },
+      });
     }
   }
 
@@ -367,7 +409,6 @@ export class DefaultNodeManagedSessionRuntimeDriver
         subscription.close();
       },
     };
-    console.log(`[realtime] subscriber attached session=${input.sessionId}`);
     detach = this.realtime.attach({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
@@ -415,11 +456,6 @@ export class DefaultNodeManagedSessionRuntimeDriver
       ? frame.seq
       : undefined;
     for (const event of decoded) {
-      // Temporary: live console updates are not arriving. Log what is being
-      // published so a missing update is attributable to publish vs delivery.
-      console.log(
-        `[realtime] publish session=${sessionId} type=${(event as { type?: string }).type ?? "?"}`,
-      );
       this.realtime.publish({
         workspaceId,
         sessionId,
@@ -496,6 +532,9 @@ export class NodeManagedSessionRuntimeAdapter
   }
 
   async sessionEventsAccepted(input: AcceptedSessionEvents): Promise<void> {
+    // Echo before dispatching: the turn can finish before the caller's own
+    // message would otherwise reach the stream.
+    this.driver.publishAcceptedUserEvents?.(input);
     await (this.coordination ?? {
       sessionEventsAccepted: (accepted: AcceptedSessionEvents) =>
         this.driver.accept(accepted),
