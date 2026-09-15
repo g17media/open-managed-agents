@@ -1,3 +1,4 @@
+import { buildMemberChatSessionRoutes } from "./member-chat-session-routes";
 import { migrateV0AtStartup } from "./migrations/v0-data.js";
 
 import { nativeOAuthCredentials } from "@open-managed-agents/http-routes";
@@ -2851,6 +2852,16 @@ v1.route("/sessions", buildManagedSessionsApi({
       (context.var as { tenant_id: string }).tenant_id,
     store: nodeOutputsAdapter(outputsRoot),
   },
+}));
+// Advertise the complete extension before a caller creates private remote resources.
+v1.get("/member-chat/capabilities", (c) => c.json({ version: 1 }));
+v1.route("/sessions", buildMemberChatSessionRoutes({
+  ports: (workspaceId) => ({
+    sessions: managedSessionsComposition.portsFor(workspaceId).sessions,
+    files: managedAgentsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.files),
+  }),
+  connectedSandbox: (input) => managedRuntimeRunner.connectedSandbox(input),
+  outputs: sessionOutputs,
 }));
 v1.route("/oma/sessions", buildSessionRoutes({
   services,

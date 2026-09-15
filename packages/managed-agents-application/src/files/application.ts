@@ -145,12 +145,17 @@ export class FilesApplicationService
   }
 
   async deleteFile(command: DeleteFileCommand): Promise<DeleteFileResult> {
-    const result = await this.dependencies.store.delete({
+    const file = await this.dependencies.store.find({
       workspaceId: this.dependencies.workspaceId,
       fileId: command.fileId,
     });
-    if (result.type === "not_found") return result;
+    if (!file) return { type: "not_found" };
+    // Keep metadata discoverable when blob deletion fails, so scoped cleanup can retry.
     await this.dependencies.content.delete({
+      workspaceId: this.dependencies.workspaceId,
+      fileId: command.fileId,
+    });
+    await this.dependencies.store.delete({
       workspaceId: this.dependencies.workspaceId,
       fileId: command.fileId,
     });
