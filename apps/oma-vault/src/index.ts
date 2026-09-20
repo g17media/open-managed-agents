@@ -207,6 +207,12 @@ interface MatchedCred {
   credentialId: string;
   injectHeader: { name: string; value: string };
   /**
+   * True only for a plain `static_bearer` credential: the one kind whose token may be placed in a
+   * provider's API-key header (see API_KEY_HEADER_BY_HOST). cap_cli, OAuth and repository
+   * credentials always stay in `Authorization`, whatever the request carries.
+   */
+  apiKeyCapable?: boolean;
+  /**
    * HTTP Basic form of a static_bearer / cap_cli token, used instead of injectHeader
    * for git smart-HTTP requests: GitHub's git endpoints answer 401 to
    * `Bearer <PAT>` and require Basic with the token as the password.
@@ -290,6 +296,7 @@ async function findCredentialForUrl(
       const token = credentialBearer(credential.auth)!;
       return { credentialId: credential.id, vaultId: credential.vaultId,
         injectHeader: { name: "authorization", value: `Bearer ${token}` },
+        apiKeyCapable: credential.auth.type === "static_bearer",
         ...((credential.auth.type === "static_bearer" || credential.auth.type === "cap_cli") && {
           gitBasicHeader: `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
         }),
@@ -389,6 +396,7 @@ function matchRowsByHost(
         vaultId: row.vault_id,
         credentialId: row.id,
         injectHeader: headerSpec,
+        apiKeyCapable: auth.type === "static_bearer",
         gitBasicHeader:
           (auth.type === "static_bearer" || auth.type === "cap_cli") &&
           typeof auth.token === "string" && auth.token.length > 0
@@ -413,6 +421,42 @@ function basicAuthUsername(headerValue: string | string[] | undefined): string |
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Providers whose static API key must travel in a header of their own instead of
+ * `Authorization: Bearer`. The mapping is fixed here, per host, so a request can never choose
+ * where a token lands: it can only send the provider's own header (with any placeholder value) to
+ * ask for that provider's documented shape. A host absent from this map always gets Bearer.
+ */
+const API_KEY_HEADER_BY_HOST = new Map<string, "x-goog-api-key" | "x-api-key">([
+  ["generativelanguage.googleapis.com", "x-goog-api-key"],
+  ["api.anthropic.com", "x-api-key"],
+]);
+
+/** The token of an `Authorization: Bearer <token>` injection, or undefined for any other shape. */
+function bearerToken(header: { name: string; value: string }): string | undefined {
+  if (header.name !== "authorization") return undefined;
+  const match = /^Bearer (.+)$/.exec(header.value);
+  return match?.[1];
+}
+
+/**
+ * The API-key header to inject into instead of `Authorization`, or undefined to keep Bearer.
+ * Requires all three: the host is one whose key header is known, the client sent that header, and
+ * the matched credential is a plain static_bearer. Everything else — other hosts, cap_cli/OAuth
+ * credentials, git Basic — is untouched by this adaptation.
+ */
+function apiKeyHeaderFor(
+  url: string,
+  requestHeaders: Record<string, string | string[] | undefined>,
+  matched: MatchedCred,
+): "x-goog-api-key" | "x-api-key" | undefined {
+  if (matched.apiKeyCapable !== true) return undefined;
+  let host: string;
+  try { host = new URL(url).hostname; } catch { return undefined; }
+  const name = API_KEY_HEADER_BY_HOST.get(host);
+  return name !== undefined && requestHeaders[name] !== undefined ? name : undefined;
 }
 
 function authToHeader(auth: CredentialAuth): { name: string; value: string } | null {
@@ -602,10 +646,17 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
 
   if (matched) {
     const useGitBasic = matched.gitBasicHeader !== undefined && GIT_SMART_HTTP_RE.test(url);
-    headers[matched.injectHeader.name] = useGitBasic ? matched.gitBasicHeader! : matched.injectHeader.value;
+    // Gemini reads a static key only from `x-goog-api-key` (Anthropic from `x-api-key`); for those
+    // hosts a static_bearer token goes into that header when the client asked for it by sending
+    // it. The inbound header itself was stripped above like every other credential header, so the
+    // request supplies the shape only, never the value.
+    const keyHeader = useGitBasic ? undefined : apiKeyHeaderFor(url, req.headers, matched);
+    const bareToken = keyHeader !== undefined ? bearerToken(matched.injectHeader) : undefined;
+    const injectName = bareToken !== undefined ? keyHeader! : matched.injectHeader.name;
+    headers[injectName] = useGitBasic ? matched.gitBasicHeader! : bareToken ?? matched.injectHeader.value;
     logger.info(
-      { op: "oma_vault.inject", header: matched.injectHeader.name, url, credential_id: matched.credentialId, session_id: attr.sessionId },
-      `inject ${matched.injectHeader.name} for ${url}`,
+      { op: "oma_vault.inject", header: injectName, url, credential_id: matched.credentialId, session_id: attr.sessionId },
+      `inject ${injectName} for ${url}`,
     );
   } else {
     logger.debug({ op: "oma_vault.passthrough", method: req.method, url }, `passthrough ${req.method} ${url}`);
