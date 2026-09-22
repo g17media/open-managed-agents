@@ -31,10 +31,11 @@ export interface CapSpec {
 
   /**
    * For apps behind an SSO ingress: the lowercase request header in which a
-   * static_bearer credential for the same host rides alongside this spec's
-   * OAuth token, which keeps `Authorization` for the ingress. The vault uses
-   * it only when the client sends that header, so callers that send only
-   * Authorization keep the single-credential behaviour.
+   * static_bearer credential for the same host rides (as the raw token, no
+   * scheme) alongside this spec's OAuth token, which keeps `Authorization` for
+   * the ingress. The vault uses it only when the client sends that header, so
+   * callers that send only Authorization keep the single-credential behaviour.
+   * Never a credential slot the vault already owns nor a transport header.
    */
   readonly companion_token_header?: string;
 

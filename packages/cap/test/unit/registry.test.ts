@@ -219,3 +219,25 @@ describe("SpecRegistry — construction validation", () => {
     expect(() => createSpecRegistry([broken])).toThrow(/scopes/);
   });
 });
+
+describe("companion_token_header validation", () => {
+  const withCompanion = (companion_token_header: string): CapSpec => ({
+    ...ghSpec, cli_id: `gh-${companion_token_header}`, companion_token_header,
+  });
+
+  it("accepts a plain lowercase app header", () => {
+    expect(createSpecRegistry([withCompanion("x-agent-token")]).byCliId("gh-x-agent-token")?.companion_token_header).toBe("x-agent-token");
+  });
+
+  it.each([
+    "authorization", "proxy-authorization", "x-api-key", "x-goog-api-key", "cookie",
+    "host", "content-length", "content-type", "connection", "expect", "keep-alive", "proxy-connection",
+    "te", "trailer", "transfer-encoding", "upgrade",
+  ])("rejects the vault's own credential slots and transport headers (%s)", (name) => {
+    expect(() => createSpecRegistry([withCompanion(name)])).toThrow(/companion_token_header/);
+  });
+
+  it.each(["X-Agent-Token", "x agent token", "", "x_agent_token"])("rejects a name that is not a lowercase header token (%j)", (name) => {
+    expect(() => createSpecRegistry([withCompanion(name)])).toThrow(/companion_token_header/);
+  });
+});

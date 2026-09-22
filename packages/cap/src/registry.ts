@@ -118,12 +118,24 @@ function validateModeSubObject(spec: CapSpec): void {
 function validateCompanionHeader(spec: CapSpec): void {
   const name = spec.companion_token_header;
   if (name === undefined) return;
-  if (!/^[a-z0-9-]+$/.test(name) || name === "authorization") {
+  if (!/^[a-z0-9-]+$/.test(name) || PROTECTED_COMPANION_HEADERS.has(name)) {
     throw new Error(
-      `SpecRegistry: spec "${spec.cli_id}" companion_token_header "${name}" must be a lowercase header name other than authorization`,
+      `SpecRegistry: spec "${spec.cli_id}" companion_token_header "${name}" must be a lowercase header name that is not a credential slot or transport header`,
     );
   }
 }
+
+/**
+ * Names a companion header may not take: the credential slots the vault already owns (it
+ * would fight its own injection) and the framing / hop-by-hop headers the vault strips and
+ * re-derives, some of which every request carries and would therefore switch companion mode
+ * on without the caller asking for it.
+ */
+const PROTECTED_COMPANION_HEADERS: ReadonlySet<string> = new Set([
+  "authorization", "proxy-authorization", "x-api-key", "x-goog-api-key", "cookie",
+  "host", "content-length", "content-type", "connection", "expect", "keep-alive", "proxy-connection",
+  "te", "trailer", "transfer-encoding", "upgrade",
+]);
 
 function validateOAuth(spec: CapSpec): void {
   if (!spec.oauth) return;
