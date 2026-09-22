@@ -50,6 +50,7 @@ export function createSpecRegistry(specs: readonly CapSpec[]): SpecRegistry {
 
     validateModeSubObject(spec);
     validateOAuth(spec);
+    validateCompanionHeader(spec);
   }
 
   const list = specs.slice();
@@ -107,6 +108,20 @@ function validateModeSubObject(spec: CapSpec): void {
         );
       }
       return;
+  }
+}
+
+/**
+ * A companion header must be a plain lowercase header name and never `authorization`
+ * itself: it exists to hold a second credential beside the OAuth one, not to replace it.
+ */
+function validateCompanionHeader(spec: CapSpec): void {
+  const name = spec.companion_token_header;
+  if (name === undefined) return;
+  if (!/^[a-z0-9-]+$/.test(name) || name === "authorization") {
+    throw new Error(
+      `SpecRegistry: spec "${spec.cli_id}" companion_token_header "${name}" must be a lowercase header name other than authorization`,
+    );
   }
 }
 

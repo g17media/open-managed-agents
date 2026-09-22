@@ -27,6 +27,10 @@ describe("feedforward — header injection", () => {
     expect(buildDeps().registry.byHostname(host)).toBeNull();
   });
 
+  it("declares x-agent-token as the companion header for the app's own token", () => {
+    expect(feedforwardSpec.companion_token_header).toBe("x-agent-token");
+  });
+
   it("byCliId round-trips", () => {
     expect(buildDeps().registry.byCliId("feedforward")).toBe(feedforwardSpec);
   });
