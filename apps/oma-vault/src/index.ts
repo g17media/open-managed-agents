@@ -762,6 +762,8 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   }
 
   let refresh: MatchedCred["refresh"];
+  // Which credential a 401 refresh rotates: the door credential in companion mode, else the match.
+  let refreshCredentialId = matched?.credentialId;
   if (matched) {
     const useGitBasic = matched.gitBasicHeader !== undefined && GIT_SMART_HTTP_RE.test(url);
     // Gemini reads a static key only from `x-goog-api-key` (Anthropic from `x-api-key`); for those
@@ -778,9 +780,11 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     const companion = !useGitBasic && bareToken === undefined && matched.companion && req.headers[matched.companion.header] !== undefined
       ? matched.companion : undefined;
     if (companion) {
-      headers[companion.header] = matched.injectHeader.value;
+      // Raw token, like the API-key headers: the app reads its own header and expects no scheme.
+      headers[companion.header] = bearerToken(matched.injectHeader) ?? matched.injectHeader.value;
       headers.authorization = companion.door.injectHeader.value;
       refresh = companion.door.refresh;
+      refreshCredentialId = companion.door.credentialId;
       logger.info(
         { op: "oma_vault.inject", header: companion.header, url, credential_id: matched.credentialId, session_id: attr.sessionId },
         `inject ${companion.header} for ${url}`,
@@ -815,7 +819,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     upstream = await forward();
     if (upstream.status === 401 && refresh) {
       const fresh = await refresh().catch((err: unknown) => {
-        logger.warn({ err, op: "oma_vault.refresh_failed", url, credential_id: matched?.credentialId }, `refresh failed for ${url}`);
+        logger.warn({ err, op: "oma_vault.refresh_failed", url, credential_id: refreshCredentialId }, `refresh failed for ${url}`);
         return null;
       });
       if (fresh) {
@@ -823,7 +827,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
         headers.authorization = `Bearer ${fresh}`;
         upstream = await forward();
         logger.info(
-          { op: "oma_vault.refreshed", url, credential_id: matched?.credentialId, session_id: attr.sessionId, status: upstream.status },
+          { op: "oma_vault.refreshed", url, credential_id: refreshCredentialId, session_id: attr.sessionId, status: upstream.status },
           `retried ${url} with a refreshed token`,
         );
       }
