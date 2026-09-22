@@ -53,7 +53,13 @@ import type { Env, AgentConfig, CredentialConfig } from "@open-managed-agents/sh
 import { log, logWarn } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import type { KvStore } from "@open-managed-agents/kv-store";
-import { builtinSpecs, createSpecRegistry } from "@open-managed-agents/cap";
+import {
+  builtinSpecs,
+  createSpecRegistry,
+  applyCapOverrides,
+  parseCapOverridesFromEnv,
+  type SpecRegistry,
+} from "@open-managed-agents/cap";
 // MCP forwarding moved to @open-managed-agents/vault-forward/proxy so
 // main-node's in-process mcpBinding can share it with the CF worker. The
 // platform-specific half (D1 + WebCryptoAesGcm) stays here.
@@ -83,9 +89,17 @@ import { SqlCredentialStore } from "@open-managed-agents/credential-store-sql";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-cf";
 
-// Module-level: the cap spec registry is pure data + immutable. Building
-// once amortises validation across every outbound request.
-const capRegistry = createSpecRegistry(builtinSpecs);
+// Built once per isolate on first use: the registry is pure data, but the
+// CAP_OVERRIDE_* bindings it merges in are only reachable through a
+// request's `env`, not at module scope.
+let capRegistry: SpecRegistry | undefined;
+function getCapRegistry(env: Env): SpecRegistry {
+  capRegistry ??= createSpecRegistry(applyCapOverrides(
+    builtinSpecs,
+    parseCapOverridesFromEnv(builtinSpecs.map((s) => s.cli_id), env as unknown as Partial<Record<string, string>>),
+  ));
+  return capRegistry;
+}
 
 const app = new Hono<{
   Bindings: Env;
@@ -242,7 +256,7 @@ export async function resolveOutboundCredentialByHost(
   // the OLDEST (= staler) token for sessions whose user re-ran
   // `cap login` to refresh — observed in prod 2026-05-13: gh `repo list`
   // returned 401 even immediately after a successful re-auth.
-  const capSpec = capRegistry.byHostname(hostname);
+  const capSpec = getCapRegistry(env).byHostname(hostname);
   if (capSpec) {
     let best: { c: typeof grouped[number]["credentials"][number]; vaultId: string; ts: number } | null = null;
     for (const g of grouped) {

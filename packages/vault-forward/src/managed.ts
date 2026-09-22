@@ -96,6 +96,41 @@ export async function refreshManagedCredential(
   return result.type === "replaced" ? result.record : await store.find(location) ?? current;
 }
 
+/**
+ * cap_cli counterpart of refreshManagedCredential. The device flow stores the
+ * refresh token in `extras.refresh_token`; the CLI's spec supplies the token
+ * endpoint and public client id. Same revision guard, same "someone else
+ * already rotated it" short-circuit.
+ */
+export async function refreshManagedCliCredential(
+  store: CredentialStore, workspaceId: string, record: StoredCredential,
+  tokenEndpoint: string, clientId: string,
+  request: typeof fetch = fetch,
+): Promise<StoredCredential> {
+  const location = { workspaceId, vaultId: record.credential.vaultId, credentialId: record.credential.id };
+  const current = await store.find(location);
+  if (!current || current.credential.archivedAt) throw new Error("Credential is no longer available");
+  if (credentialBearer(current.credential.auth) !== credentialBearer(record.credential.auth)) return current;
+  const auth = current.credential.auth;
+  if (auth.type !== "cap_cli" || !auth.extras?.refresh_token) return current;
+  const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: auth.extras.refresh_token, client_id: clientId });
+  const headers = new Headers({ "content-type": "application/x-www-form-urlencoded" });
+  const response = await request(tokenEndpoint, { method: "POST", headers, body });
+  if (!response.ok) return await store.find(location) ?? current;
+  const tokens = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number };
+  if (!tokens.access_token) return current;
+  const result = await store.replace({ ...location, expectedRevision: current.revision, next: {
+    ...current.credential,
+    updatedAt: new Date().toISOString(),
+    auth: { ...auth, token: tokens.access_token, extras: {
+      ...auth.extras,
+      refresh_token: tokens.refresh_token ?? auth.extras.refresh_token,
+      ...(tokens.expires_in !== undefined && { expires_at: new Date(Date.now() + tokens.expires_in * 1000).toISOString() }),
+    } },
+  } });
+  return result.type === "replaced" ? result.record : await store.find(location) ?? current;
+}
+
 export async function forwardManagedMcpRequest(input: {
   request: Request;
   workspaceId: string;

@@ -13,6 +13,7 @@ import { azSpec } from "./az";
 import { cfSpec } from "./cf";
 import { doctlSpec } from "./doctl";
 import { dockerSpec } from "./docker";
+import { feedforwardSpec } from "./feedforward";
 import { flySpec } from "./fly";
 import { gcloudSpec } from "./gcloud";
 import { ghSpec } from "./gh";
@@ -30,6 +31,7 @@ export const builtinSpecs: readonly CapSpec[] = [
   cfSpec,
   doctlSpec,
   dockerSpec,
+  feedforwardSpec,
   flySpec,
   gcloudSpec,
   ghSpec,
@@ -47,6 +49,7 @@ export {
   cfSpec,
   doctlSpec,
   dockerSpec,
+  feedforwardSpec,
   flySpec,
   gcloudSpec,
   ghSpec,

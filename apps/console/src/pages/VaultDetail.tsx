@@ -82,6 +82,7 @@ const CAP_CLIS: Array<{ cli_id: string; label: string; helper: string; oauth?: b
   { cli_id: "glab", label: "GitLab CLI (glab)", helper: "Personal access token (glpat-...)", oauth: true },
   { cli_id: "az", label: "Azure CLI (az)", helper: "ARM access token", oauth: true },
   { cli_id: "gcloud", label: "Google Cloud SDK", helper: "OAuth access token", oauth: true },
+  { cli_id: "feedforward", label: "FeedForward Collective", helper: "Personal access token (Zitadel PAT)", oauth: true },
   { cli_id: "fly", label: "Fly.io (fly / flyctl)", helper: "Fly API token (fo1_...)" },
   { cli_id: "vercel", label: "Vercel CLI", helper: "Account access token" },
   { cli_id: "doctl", label: "DigitalOcean (doctl)", helper: "API token (dop_v1_...)" },

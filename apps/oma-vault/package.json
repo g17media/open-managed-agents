@@ -13,6 +13,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@open-managed-agents/cap": "workspace:*",
+    "@open-managed-agents/domain": "workspace:*",
     "@open-managed-agents/observability": "workspace:*",
     "@open-managed-agents/sandbox": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",

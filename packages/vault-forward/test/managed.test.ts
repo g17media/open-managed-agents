@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MemoryCredentialStore } from "../../credential-store-memory/src/index";
 import type { Session } from "@open-managed-agents/domain/sessions";
-import { forwardManagedMcpRequest, matchManagedRepositoryResource } from "../src/managed";
+import { forwardManagedMcpRequest, matchManagedRepositoryResource, refreshManagedCliCredential } from "../src/managed";
 
 const session: Session = {
   id: "session_test", archivedAt: null, environmentId: "env_test", vaultIds: ["vault_test"],
@@ -37,6 +37,44 @@ describe("native vault forwarding", () => {
     expect(calls[2]?.has("authorization")).toBe(false);
     expect((await forwardManagedMcpRequest({ workspaceId: "workspace_test", credentials, session, serverName: "undeclared", request: request(), fetch: upstream })).status).toBe(403);
     expect(upstream).toHaveBeenCalledTimes(3);
+  });
+
+  it("rotates a cap_cli token through the CLI's token endpoint and guards the write with the revision", async () => {
+    const credentials = new MemoryCredentialStore();
+    const record = await credentials.insert({ workspaceId: "workspace_test", credential: {
+      id: "credential_cli", vaultId: "vault_test", auth: { type: "cap_cli", cliId: "feedforward", token: "stale", extras: { refresh_token: "refresh_1", keep: "me" } },
+      metadata: {}, createdAt: session.createdAt, updatedAt: session.updatedAt, archivedAt: null,
+    } });
+    const bodies: string[] = [];
+    const idp = vi.fn<typeof fetch>(async (url, init) => {
+      expect(url).toBe("https://idp.test/oauth/v2/token");
+      bodies.push(String(init?.body));
+      return Response.json({ access_token: "fresh", refresh_token: "refresh_2", expires_in: 3600 });
+    });
+    const refreshed = await refreshManagedCliCredential(credentials, "workspace_test", record, "https://idp.test/oauth/v2/token", "client_public", idp);
+    expect(new URLSearchParams(bodies[0])).toEqual(new URLSearchParams({ grant_type: "refresh_token", refresh_token: "refresh_1", client_id: "client_public" }));
+    expect(refreshed.revision).toBe(2);
+    expect(refreshed.credential.auth).toMatchObject({ type: "cap_cli", token: "fresh", extras: { refresh_token: "refresh_2", keep: "me" } });
+    expect(Date.parse((refreshed.credential.auth as { extras: { expires_at: string } }).extras.expires_at)).toBeGreaterThan(Date.now());
+    expect((await credentials.find({ workspaceId: "workspace_test", vaultId: "vault_test", credentialId: "credential_cli" }))?.credential.auth).toMatchObject({ token: "fresh" });
+
+    // A caller holding the pre-rotation record gets the live token without another endpoint call.
+    expect((await refreshManagedCliCredential(credentials, "workspace_test", record, "https://idp.test/oauth/v2/token", "client_public", idp)).credential.auth).toMatchObject({ token: "fresh" });
+    expect(idp).toHaveBeenCalledTimes(1);
+
+    // A rejected refresh leaves the stored credential untouched.
+    const rejecting = vi.fn<typeof fetch>(async () => new Response("invalid_grant", { status: 400 }));
+    const unchanged = await refreshManagedCliCredential(credentials, "workspace_test", refreshed, "https://idp.test/oauth/v2/token", "client_public", rejecting);
+    expect(unchanged.revision).toBe(2);
+    expect(unchanged.credential.auth).toMatchObject({ token: "fresh", extras: { refresh_token: "refresh_2" } });
+
+    // Without a refresh token there is nothing to exchange.
+    const pat = await credentials.insert({ workspaceId: "workspace_test", credential: {
+      id: "credential_pat", vaultId: "vault_test", auth: { type: "cap_cli", cliId: "feedforward", token: "pat" },
+      metadata: {}, createdAt: session.createdAt, updatedAt: session.updatedAt, archivedAt: null,
+    } });
+    expect((await refreshManagedCliCredential(credentials, "workspace_test", pat, "https://idp.test/oauth/v2/token", "client_public", idp)).credential.auth).toMatchObject({ token: "pat" });
+    expect(idp).toHaveBeenCalledTimes(1);
   });
 
   it("limits repository resource tokens to the declared repository", () => {

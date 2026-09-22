@@ -32,6 +32,8 @@ import { resolveServices } from "../types";
 import {
   builtinSpecs,
   createSpecRegistry,
+  applyCapOverrides,
+  parseCapOverridesFromEnv,
   buildDeviceInitiateRequest,
   parseDeviceInitiateResponse,
   buildDevicePollRequest,
@@ -46,12 +48,17 @@ import {
 export interface CapCliOauthRoutesDeps {
   credentialsFor?: OAuthRoutesDeps["credentialsFor"];
   services: RouteServicesArg;
+  /** Source of CAP_OVERRIDE_<CLI_ID>_* — CF passes worker env, Node passes process.env. */
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export function buildCapCliOauthRoutes(deps: CapCliOauthRoutesDeps) {
   const app = new Hono<{ Variables: { tenant_id: string } }>();
 
-  const capRegistry = createSpecRegistry(builtinSpecs);
+  const capRegistry = createSpecRegistry(applyCapOverrides(
+    builtinSpecs,
+    parseCapOverridesFromEnv(builtinSpecs.map((s) => s.cli_id), deps.env ?? {}),
+  ));
   const clock: Clock = { nowMs: () => Date.now() };
 
   // KV TTL for an in-flight device flow session — typical device codes

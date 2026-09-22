@@ -52,6 +52,10 @@ export {
 export type { SpecRegistry } from "./registry";
 export { createSpecRegistry } from "./registry";
 
+// Per-deployment spec overrides (applied before createSpecRegistry)
+export type { CapSpecOverride } from "./overrides";
+export { applyCapOverrides, parseCapOverridesFromEnv } from "./overrides";
+
 // Hostname matching (exposed for L4s that want to reuse the validator)
 export { matchesHostname, validateHostnamePattern } from "./hostname-match";
 
@@ -61,6 +65,7 @@ export {
   awsSpec,
   doctlSpec,
   dockerSpec,
+  feedforwardSpec,
   flySpec,
   gcloudSpec,
   ghSpec,

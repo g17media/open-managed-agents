@@ -746,7 +746,11 @@ const oauthRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }
 
 const capCliOauthRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
   const ctx = c as unknown as AppCtx;
-  const app = buildCapCliOauthRoutes({ services: () => cfRouteServicesFromCtx(ctx), credentialsFor: (workspaceId) => managedOAuthCredentialsFor(ctx.env, workspaceId) });
+  const app = buildCapCliOauthRoutes({
+    services: () => cfRouteServicesFromCtx(ctx),
+    env: ctx.env as unknown as Partial<Record<string, string>>,
+    credentialsFor: (workspaceId) => managedOAuthCredentialsFor(ctx.env, workspaceId),
+  });
   return invokePackage(c, app);
 });
 

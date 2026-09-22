@@ -2990,7 +2990,7 @@ const oauthCredentialsFor = (workspaceId: string) => nativeOAuthCredentials({
   nextId: () => `vcrd_${nanoid()}`,
 });
 v1.route("/oma/oauth", buildOAuthRoutes({ services, env: process.env, credentialsFor: oauthCredentialsFor }));
-v1.route("/oma/cap-cli/oauth", buildCapCliOauthRoutes({ services, credentialsFor: oauthCredentialsFor }));
+v1.route("/oma/cap-cli/oauth", buildCapCliOauthRoutes({ services, env: process.env, credentialsFor: oauthCredentialsFor }));
 v1.route("/oma/evals", buildEvalRoutes({
   evals: evalsService,
   agents: agentsService,

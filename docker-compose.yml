@@ -147,6 +147,12 @@ services:
       dockerfile: apps/oma-vault/Dockerfile
     image: openma/oma-vault:dev
     container_name: oma-vault
+    # Same .env as oma-server so CAP_OVERRIDE_<CLI_ID>_* (cap spec endpoint
+    # / OAuth overrides) reach both sides — the vault must agree with the
+    # control plane on which hosts a CLI credential covers.
+    env_file:
+      - path: ./.env
+        required: false
     environment:
       DATABASE_PATH: /app/data/oma.db
       OMA_VAULT_CA_DIR: /app/data/oma-vault-ca

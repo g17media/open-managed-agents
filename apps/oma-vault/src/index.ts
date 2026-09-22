@@ -44,6 +44,13 @@ import {
   type VaultProxyAttribution,
 } from "@open-managed-agents/sandbox/vault-proxy";
 import type { CredentialAuth } from "@open-managed-agents/shared";
+import type { Credential } from "@open-managed-agents/domain/credentials";
+import {
+  applyCapOverrides,
+  builtinSpecs,
+  createSpecRegistry,
+  parseCapOverridesFromEnv,
+} from "@open-managed-agents/cap";
 import { createNodeLogger } from "@open-managed-agents/observability/logger/node";
 import { setRootLogger, type Logger } from "@open-managed-agents/observability";
 import { evaluateEgress, type NetworkingPolicy } from "./egress-policy";
@@ -51,7 +58,12 @@ import { evaluateEgress, type NetworkingPolicy } from "./egress-policy";
 import { SqlCredentialStore } from "@open-managed-agents/credential-store-sql";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-node";
 import { SqlSessionExecutionContextSource } from "@open-managed-agents/session-runtime-sql";
-import { credentialBearer, listManagedVaultCredentials, matchManagedCredential } from "@open-managed-agents/vault-forward/managed";
+import {
+  credentialBearer,
+  listManagedVaultCredentials,
+  matchManagedCredential,
+  refreshManagedCliCredential,
+} from "@open-managed-agents/vault-forward/managed";
 
 const logger: Logger = await createNodeLogger({ bindings: { service: "oma-vault" } });
 setRootLogger(logger);
@@ -83,6 +95,13 @@ const proxyKey = process.env.OMA_VAULT_PROXY_KEY ?? "";
 // networking limits — pair it with OMA_VAULT_PROXY_KEY for a real lockdown.
 const unattributedEgress =
   process.env.OMA_VAULT_UNATTRIBUTED_EGRESS === "deny" ? "deny" : "allow";
+// cap_cli credentials issued by the device flow carry no mcp_server_url; the
+// cap registry maps a request hostname back to their cli_id instead. Same
+// CAP_OVERRIDE_<CLI_ID>_* env as main-node so both sides agree on endpoints.
+const capRegistry = createSpecRegistry(applyCapOverrides(
+  builtinSpecs,
+  parseCapOverridesFromEnv(builtinSpecs.map((s) => s.cli_id), process.env),
+));
 
 mkdirSync(resolve(caDir), { recursive: true });
 
@@ -218,6 +237,12 @@ interface MatchedCred {
    * `Bearer <PAT>` and require Basic with the token as the password.
    */
   gitBasicHeader?: string;
+  /**
+   * Rotates the credential after the upstream answers 401. Resolves to the new
+   * bearer token, or null when nothing changed. Set only for managed cap_cli
+   * credentials that carry a refresh token and whose spec has a token endpoint.
+   */
+  refresh?: () => Promise<string | null>;
 }
 
 // git smart-HTTP: ref advertisement (GET .../info/refs?service=git-upload-pack)
@@ -229,8 +254,10 @@ const GIT_SMART_HTTP_RE = /\/info\/refs\?service=git-(upload|receive)-pack(&|$)|
  * host. Returns the header to inject, or null when no credential applies.
  *
  * Today's matcher: exact hostname match against
- * URL(credential.mcp_server_url).host. Wildcards / suffix match TBD when
- * we hit a use case (e.g. `*.googleapis.com` for google credentials).
+ * URL(credential.mcp_server_url).host, then — for cap_cli credentials that
+ * have no mcp_server_url — the cap registry's hostname → cli_id mapping.
+ * Wildcards / suffix match TBD when we hit a use case (e.g.
+ * `*.googleapis.com` for google credentials).
  *
  * Session attribution: sandbox adapters embed `oma-tenant:` / `oma-session:`
  * tags in the proxy URL's userinfo (packages/sandbox/src/vault-proxy.ts);
@@ -254,12 +281,12 @@ async function findCredentialForUrl(
   selector?: string,
 ): Promise<MatchedCred | null> {
   let host: string;
+  let hostname: string;
   try {
-    host = new URL(url).host;
+    ({ host, hostname } = new URL(url));
   } catch {
     return null;
   }
-  type Row = { id: string; tenant_id: string; vault_id: string; auth: string };
 
   if (attr.sessionId && attr.tenantId) {
     if (scopeTenantId !== "*" && attr.tenantId !== scopeTenantId) return null;
@@ -291,14 +318,28 @@ async function findCredentialForUrl(
         if (await sql.prepare("SELECT id FROM managed_vaults WHERE workspace_id = ? AND id = ? AND archived_at IS NULL").bind(attr.tenantId, vaultId).first()) activeVaults.push(vaultId);
       }
       const records = await listManagedVaultCredentials(managedCredentials, attr.tenantId, activeVaults);
-      const credential = matchManagedCredential(records.map((record) => record.credential), url, selector);
+      const credentials = records.map((record) => record.credential);
+      const credential = matchManagedCredential(credentials, url, selector)
+        ?? matchManagedCapCredential(credentials, hostname);
       if (!credential) return null;
       const token = credentialBearer(credential.auth)!;
+      const workspaceId = attr.tenantId;
+      const record = records.find((r) => r.credential.id === credential.id);
+      const deviceFlow = credential.auth.type === "cap_cli" && credential.auth.extras?.refresh_token
+        ? capRegistry.byCliId(credential.auth.cliId)?.oauth?.device_flow : undefined;
       return { credentialId: credential.id, vaultId: credential.vaultId,
         injectHeader: { name: "authorization", value: `Bearer ${token}` },
         apiKeyCapable: credential.auth.type === "static_bearer",
         ...((credential.auth.type === "static_bearer" || credential.auth.type === "cap_cli") && {
           gitBasicHeader: `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+        }),
+        ...(record && deviceFlow && {
+          refresh: async () => {
+            const next = await refreshManagedCliCredential(
+              managedCredentials, workspaceId, record, deviceFlow.token_url, deviceFlow.client_id);
+            const fresh = credentialBearer(next.credential.auth);
+            return fresh && fresh !== token ? fresh : null;
+          },
         }),
       };
     }
@@ -330,16 +371,16 @@ async function findCredentialForUrl(
     const placeholders = vaultIds.map(() => "?").join(",");
     const result = await sql
       .prepare(
-        `SELECT id, tenant_id, vault_id, auth
+        `SELECT id, tenant_id, vault_id, auth, created_at, updated_at
            FROM credentials
           WHERE archived_at IS NULL
-            AND mcp_server_url IS NOT NULL
             AND tenant_id = ?
             AND vault_id IN (${placeholders})`,
       )
       .bind(row.tenant_id, ...vaultIds)
       .all<Row>();
-    return matchRowsByHost(result.results ?? [], host, selector);
+    const rows = result.results ?? [];
+    return matchRowsByHost(rows, host, selector) ?? matchRowsByCapSpec(rows, hostname);
   }
 
   // Legacy host-wide lookup. When OMA_TENANT="*" we accept any tenant;
@@ -349,15 +390,58 @@ async function findCredentialForUrl(
   // credentials.
   const result = await sql
     .prepare(
-      `SELECT id, tenant_id, vault_id, auth
+      `SELECT id, tenant_id, vault_id, auth, created_at, updated_at
          FROM credentials
         WHERE archived_at IS NULL
-          AND mcp_server_url IS NOT NULL
           AND ( ? = '*' OR tenant_id = ? )`,
     )
     .bind(scopeTenantId, scopeTenantId)
     .all<Row>();
-  return matchRowsByHost(result.results ?? [], host, selector);
+  const rows = result.results ?? [];
+  return matchRowsByHost(rows, host, selector) ?? matchRowsByCapSpec(rows, hostname);
+}
+
+type Row = {
+  id: string;
+  tenant_id: string;
+  vault_id: string;
+  auth: string;
+  created_at: number;
+  updated_at: number | null;
+};
+
+/**
+ * Newest managed cap_cli credential for the CLI that cap maps `hostname` to.
+ * Fallback for credentials the device flow wrote without an mcp_server_url.
+ */
+function matchManagedCapCredential(credentials: Credential[], hostname: string): Credential | null {
+  const spec = capRegistry.byHostname(hostname);
+  if (!spec) return null;
+  let best: Credential | null = null;
+  for (const credential of credentials) {
+    const auth = credential.auth;
+    if (credential.archivedAt || auth.type !== "cap_cli" || auth.cliId !== spec.cli_id || !auth.token) continue;
+    if (best === null || Date.parse(credential.updatedAt) > Date.parse(best.updatedAt)) best = credential;
+  }
+  return best;
+}
+
+/** Legacy-row counterpart of matchManagedCapCredential. */
+function matchRowsByCapSpec(rows: Row[], hostname: string): MatchedCred | null {
+  const spec = capRegistry.byHostname(hostname);
+  if (!spec) return null;
+  let best: { ts: number; match: MatchedCred } | null = null;
+  for (const row of rows) {
+    let auth: CredentialAuth;
+    try { auth = JSON.parse(row.auth) as CredentialAuth; } catch { continue; }
+    if (auth.type !== "cap_cli" || auth.cli_id !== spec.cli_id) continue;
+    const headerSpec = authToHeader(auth);
+    if (!headerSpec) continue;
+    const ts = row.updated_at ?? row.created_at;
+    if (best !== null && ts <= best.ts) continue;
+    best = { ts, match: toMatchedCred(row, auth, headerSpec) };
+  }
+  return best?.match ?? null;
 }
 
 /**
@@ -372,11 +456,7 @@ async function findCredentialForUrl(
  * credential for the host (so tools that send other usernames, e.g. `gh`,
  * still work in a session whose only GitHub credential has a handle).
  */
-function matchRowsByHost(
-  rows: Array<{ id: string; tenant_id: string; vault_id: string; auth: string }>,
-  host: string,
-  selector?: string,
-): MatchedCred | null {
+function matchRowsByHost(rows: Row[], host: string, selector?: string): MatchedCred | null {
   let best: { rank: number; match: MatchedCred } | null = null;
   for (const row of rows) {
     let auth: CredentialAuth;
@@ -390,23 +470,24 @@ function matchRowsByHost(
     const handle = typeof auth.handle === "string" && auth.handle.length > 0 ? auth.handle : undefined;
     const rank = handle !== undefined && selector !== undefined && handle === selector ? 0 : handle === undefined ? 1 : 2;
     if (best !== null && rank >= best.rank) continue;
-    best = {
-      rank,
-      match: {
-        vaultId: row.vault_id,
-        credentialId: row.id,
-        injectHeader: headerSpec,
-        apiKeyCapable: auth.type === "static_bearer",
-        gitBasicHeader:
-          (auth.type === "static_bearer" || auth.type === "cap_cli") &&
-          typeof auth.token === "string" && auth.token.length > 0
-            ? `Basic ${Buffer.from(`x-access-token:${auth.token}`).toString("base64")}`
-            : undefined,
-      },
-    };
+    best = { rank, match: toMatchedCred(row, auth, headerSpec) };
     if (rank === 0) break;
   }
   return best?.match ?? null;
+}
+
+function toMatchedCred(row: Row, auth: CredentialAuth, injectHeader: { name: string; value: string }): MatchedCred {
+  return {
+    vaultId: row.vault_id,
+    credentialId: row.id,
+    injectHeader,
+    apiKeyCapable: auth.type === "static_bearer",
+    gitBasicHeader:
+      (auth.type === "static_bearer" || auth.type === "cap_cli") &&
+      typeof auth.token === "string" && auth.token.length > 0
+        ? `Basic ${Buffer.from(`x-access-token:${auth.token}`).toString("base64")}`
+        : undefined,
+  };
 }
 
 /** Username of an inbound `Authorization: Basic …` header, else undefined. */
@@ -644,6 +725,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     else if (Array.isArray(v)) headers[k] = v.join(", ");
   }
 
+  let refresh: MatchedCred["refresh"];
   if (matched) {
     const useGitBasic = matched.gitBasicHeader !== undefined && GIT_SMART_HTTP_RE.test(url);
     // Gemini reads a static key only from `x-goog-api-key` (Anthropic from `x-api-key`); for those
@@ -654,6 +736,8 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     const bareToken = keyHeader !== undefined ? bearerToken(matched.injectHeader) : undefined;
     const injectName = bareToken !== undefined ? keyHeader! : matched.injectHeader.name;
     headers[injectName] = useGitBasic ? matched.gitBasicHeader! : bareToken ?? matched.injectHeader.value;
+    // Only the plain Bearer shape is retried after a refresh; git Basic and API-key headers are not.
+    if (!useGitBasic && bareToken === undefined) refresh = matched.refresh;
     logger.info(
       { op: "oma_vault.inject", header: injectName, url, credential_id: matched.credentialId, session_id: attr.sessionId },
       `inject ${injectName} for ${url}`,
@@ -664,14 +748,30 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
 
   // Forward to upstream. Read body as buffer to handle binary uploads.
   const bodyBuf = req.body.buffer;
+  const forward = () => fetch(url, {
+    method: req.method,
+    headers,
+    body: bodyBuf.byteLength > 0 ? bodyBuf : undefined,
+    redirect: "manual",
+  });
   let upstream: Response;
   try {
-    upstream = await fetch(url, {
-      method: req.method,
-      headers,
-      body: bodyBuf.byteLength > 0 ? bodyBuf : undefined,
-      redirect: "manual",
-    });
+    upstream = await forward();
+    if (upstream.status === 401 && refresh) {
+      const fresh = await refresh().catch((err: unknown) => {
+        logger.warn({ err, op: "oma_vault.refresh_failed", url, credential_id: matched?.credentialId }, `refresh failed for ${url}`);
+        return null;
+      });
+      if (fresh) {
+        await upstream.body?.cancel().catch(() => {});
+        headers.authorization = `Bearer ${fresh}`;
+        upstream = await forward();
+        logger.info(
+          { op: "oma_vault.refreshed", url, credential_id: matched?.credentialId, session_id: attr.sessionId, status: upstream.status },
+          `retried ${url} with a refreshed token`,
+        );
+      }
+    }
   } catch (err) {
     const msg = (err as Error).message ?? String(err);
     logger.error({ err, op: "oma_vault.forward_failed", url }, `forward failed for ${url}: ${msg}`);

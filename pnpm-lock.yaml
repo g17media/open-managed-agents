@@ -1043,9 +1043,15 @@ importers:
 
   apps/oma-vault:
     dependencies:
+      '@open-managed-agents/cap':
+        specifier: workspace:*
+        version: link:../../packages/cap
       '@open-managed-agents/credential-store-sql':
         specifier: workspace:*
         version: link:../../packages/credential-store-sql
+      '@open-managed-agents/domain':
+        specifier: workspace:*
+        version: link:../../packages/managed-agents-domain
       '@open-managed-agents/integrations-adapters-node':
         specifier: workspace:*
         version: link:../../packages/integrations-adapters-node
