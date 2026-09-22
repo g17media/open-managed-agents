@@ -9,8 +9,8 @@
 // that do not live in code — supply them with CAP_OVERRIDE_FEEDFORWARD_CLIENT_ID
 // and CAP_OVERRIDE_FEEDFORWARD_SCOPES (see ../overrides.ts).
 //
-// Endpoints are listed explicitly rather than as `*.feedforward-collective.com`
-// so the IdP host (`auth.`) is never matched.
+// Each app lives on its own subdomain under members./internal.; the apex
+// hosts and the IdP (`auth.`) are deliberately not matched.
 
 import type { CapSpec } from "../types";
 
@@ -18,8 +18,8 @@ export const feedforwardSpec: CapSpec = {
   cli_id: "feedforward",
   description: "FeedForward Collective internal apps (members/internal) — Zitadel-backed",
   endpoints: [
-    "members.feedforward-collective.com",
-    "internal.feedforward-collective.com",
+    "*.members.feedforward-collective.com",
+    "*.internal.feedforward-collective.com",
   ],
   inject_mode: "header",
   header: {

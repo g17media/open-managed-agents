@@ -6,8 +6,9 @@ import { buildDeps, get, setTok, NOW_MS } from "./_helpers";
 
 describe("feedforward — header injection", () => {
   it.each([
-    "members.feedforward-collective.com",
-    "internal.feedforward-collective.com",
+    "app.members.feedforward-collective.com",
+    "app.internal.feedforward-collective.com",
+    "deep.app.internal.feedforward-collective.com",
   ])("%s → Authorization: Bearer <token>", async (host) => {
     const deps = buildDeps();
     setTok(deps.resolver, "feedforward", host, "tok_ffc");
@@ -17,9 +18,13 @@ describe("feedforward — header injection", () => {
     expect(out.req.headers["Authorization"]).toBe("Bearer tok_ffc");
   });
 
-  it("does not match the IdP host", () => {
-    const deps = buildDeps();
-    expect(deps.registry.byHostname("auth.feedforward-collective.com")).toBeNull();
+  it.each([
+    "auth.feedforward-collective.com",
+    "members.feedforward-collective.com",
+    "internal.feedforward-collective.com",
+    "feedforward-collective.com",
+  ])("does not match %s (IdP or apex)", (host) => {
+    expect(buildDeps().registry.byHostname(host)).toBeNull();
   });
 
   it("byCliId round-trips", () => {
@@ -28,9 +33,9 @@ describe("feedforward — header injection", () => {
 
   it("strips an attempted Authorization smuggle from the inbound request", async () => {
     const deps = buildDeps();
-    setTok(deps.resolver, "feedforward", "members.feedforward-collective.com", "tok_real");
+    setTok(deps.resolver, "feedforward", "app.members.feedforward-collective.com", "tok_real");
     const out = await handleHttp(
-      get("https://members.feedforward-collective.com/", { Authorization: "Bearer tok_smuggled" }),
+      get("https://app.members.feedforward-collective.com/", { Authorization: "Bearer tok_smuggled" }),
       { principal: "p1" },
       deps,
     );
