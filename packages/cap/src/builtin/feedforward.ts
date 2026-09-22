@@ -22,6 +22,10 @@ export const feedforwardSpec: CapSpec = {
     "*.internal.feedforward-collective.com",
   ],
   inject_mode: "header",
+  // The member portal's agent API authenticates with its own HMAC token. Behind the
+  // ingress that token cannot share `Authorization` with the OAuth door token, so it
+  // travels in this header when the caller sends it (see oma-vault companion injection).
+  companion_token_header: "x-agent-token",
   header: {
     strip: ["authorization"],
     set: { name: "Authorization", value: "Bearer ${token}" },

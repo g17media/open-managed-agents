@@ -29,6 +29,15 @@ export interface CapSpec {
 
   readonly inject_mode: InjectMode;
 
+  /**
+   * For apps behind an SSO ingress: the lowercase request header in which a
+   * static_bearer credential for the same host rides alongside this spec's
+   * OAuth token, which keeps `Authorization` for the ingress. The vault uses
+   * it only when the client sends that header, so callers that send only
+   * Authorization keep the single-credential behaviour.
+   */
+  readonly companion_token_header?: string;
+
   /** Required when inject_mode === "header". */
   readonly header?: HeaderInjectSpec;
 

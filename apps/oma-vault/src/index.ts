@@ -243,6 +243,14 @@ interface MatchedCred {
    * credentials that carry a refresh token and whose spec has a token endpoint.
    */
   refresh?: () => Promise<string | null>;
+  /**
+   * Second credential for an app behind an SSO ingress (a cap spec with
+   * `companion_token_header`): `door` is the OAuth credential that opens the ingress in
+   * `Authorization`, while this credential's static token moves into `header`. Resolved
+   * whenever both credentials exist for the host; applied only when the client sends the
+   * companion header, so single-credential callers are unchanged.
+   */
+  companion?: { header: string; door: MatchedCred };
 }
 
 // git smart-HTTP: ref advertisement (GET .../info/refs?service=git-upload-pack)
@@ -319,29 +327,21 @@ async function findCredentialForUrl(
       }
       const records = await listManagedVaultCredentials(managedCredentials, attr.tenantId, activeVaults);
       const credentials = records.map((record) => record.credential);
-      const credential = matchManagedCredential(credentials, url, selector)
-        ?? matchManagedCapCredential(credentials, hostname);
+      const primary = matchManagedCredential(credentials, url, selector);
+      const door = matchManagedCapCredential(credentials, hostname);
+      const credential = primary ?? door;
       if (!credential) return null;
-      const token = credentialBearer(credential.auth)!;
-      const workspaceId = attr.tenantId;
-      const record = records.find((r) => r.credential.id === credential.id);
-      const deviceFlow = credential.auth.type === "cap_cli" && credential.auth.extras?.refresh_token
-        ? capRegistry.byCliId(credential.auth.cliId)?.oauth?.device_flow : undefined;
-      return { credentialId: credential.id, vaultId: credential.vaultId,
-        injectHeader: { name: "authorization", value: `Bearer ${token}` },
-        apiKeyCapable: credential.auth.type === "static_bearer",
-        ...((credential.auth.type === "static_bearer" || credential.auth.type === "cap_cli") && {
-          gitBasicHeader: `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
-        }),
-        ...(record && deviceFlow && {
-          refresh: async () => {
-            const next = await refreshManagedCliCredential(
-              managedCredentials, workspaceId, record, deviceFlow.token_url, deviceFlow.client_id);
-            const fresh = credentialBearer(next.credential.auth);
-            return fresh && fresh !== token ? fresh : null;
-          },
-        }),
-      };
+      const matched = toManagedMatched(credential, records, attr.tenantId);
+      // An app behind an SSO ingress may need two credentials on one request: the OAuth
+      // credential opens the ingress in Authorization and the app's own static token rides in
+      // the spec's companion header. Both are resolved here; the injection site applies the
+      // pair only when the client sent the companion header, so a caller that sends only
+      // Authorization keeps the single-credential behaviour (static token, as before).
+      const companionHeader = capRegistry.byHostname(hostname)?.companion_token_header;
+      if (companionHeader && primary?.auth.type === "static_bearer" && door && door.id !== primary.id) {
+        matched.companion = { header: companionHeader, door: toManagedMatched(door, records, attr.tenantId) };
+      }
+      return matched;
     }
   }
   if (attr.sessionId) {
@@ -424,6 +424,36 @@ function matchManagedCapCredential(credentials: Credential[], hostname: string):
     if (best === null || Date.parse(credential.updatedAt) > Date.parse(best.updatedAt)) best = credential;
   }
   return best;
+}
+
+/**
+ * Builds the injection shape for one managed credential, with a refresh hook when it is a
+ * device-flow cap_cli token whose spec has a token endpoint.
+ */
+function toManagedMatched(
+  credential: Credential,
+  records: Awaited<ReturnType<typeof listManagedVaultCredentials>>,
+  workspaceId: string,
+): MatchedCred {
+  const token = credentialBearer(credential.auth)!;
+  const record = records.find((r) => r.credential.id === credential.id);
+  const deviceFlow = credential.auth.type === "cap_cli" && credential.auth.extras?.refresh_token
+    ? capRegistry.byCliId(credential.auth.cliId)?.oauth?.device_flow : undefined;
+  return { credentialId: credential.id, vaultId: credential.vaultId,
+    injectHeader: { name: "authorization", value: `Bearer ${token}` },
+    apiKeyCapable: credential.auth.type === "static_bearer",
+    ...((credential.auth.type === "static_bearer" || credential.auth.type === "cap_cli") && {
+      gitBasicHeader: `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+    }),
+    ...(record && deviceFlow && {
+      refresh: async () => {
+        const next = await refreshManagedCliCredential(
+          managedCredentials, workspaceId, record, deviceFlow.token_url, deviceFlow.client_id);
+        const fresh = credentialBearer(next.credential.auth);
+        return fresh && fresh !== token ? fresh : null;
+      },
+    }),
+  };
 }
 
 /** Legacy-row counterpart of matchManagedCapCredential. */
@@ -717,6 +747,12 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     "transfer-encoding",
     "upgrade",
   ]);
+  // A companion token header is a credential slot like Authorization: strip it whatever the
+  // match outcome, so the sandbox supplies the shape only and can never forward a value of its own.
+  let requestHostname = "";
+  try { requestHostname = new URL(url).hostname; } catch { /* an unparsable url gets no injection either */ }
+  const companionHeaderName = capRegistry.byHostname(requestHostname)?.companion_token_header;
+  if (companionHeaderName) STRIP.add(companionHeaderName);
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const lower = k.toLowerCase();
@@ -735,13 +771,33 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     const keyHeader = useGitBasic ? undefined : apiKeyHeaderFor(url, req.headers, matched);
     const bareToken = keyHeader !== undefined ? bearerToken(matched.injectHeader) : undefined;
     const injectName = bareToken !== undefined ? keyHeader! : matched.injectHeader.name;
-    headers[injectName] = useGitBasic ? matched.gitBasicHeader! : bareToken ?? matched.injectHeader.value;
-    // Only the plain Bearer shape is retried after a refresh; git Basic and API-key headers are not.
-    if (!useGitBasic && bareToken === undefined) refresh = matched.refresh;
-    logger.info(
-      { op: "oma_vault.inject", header: injectName, url, credential_id: matched.credentialId, session_id: attr.sessionId },
-      `inject ${injectName} for ${url}`,
-    );
+    // Two-credential shape for an app behind an SSO ingress, chosen only because the client sent
+    // the companion header (its inbound value was stripped above): the app's static token moves
+    // there and the OAuth door credential takes Authorization, so the 401 retry below refreshes
+    // the door token, which is the one the ingress judges.
+    const companion = !useGitBasic && bareToken === undefined && matched.companion && req.headers[matched.companion.header] !== undefined
+      ? matched.companion : undefined;
+    if (companion) {
+      headers[companion.header] = matched.injectHeader.value;
+      headers.authorization = companion.door.injectHeader.value;
+      refresh = companion.door.refresh;
+      logger.info(
+        { op: "oma_vault.inject", header: companion.header, url, credential_id: matched.credentialId, session_id: attr.sessionId },
+        `inject ${companion.header} for ${url}`,
+      );
+      logger.info(
+        { op: "oma_vault.inject", header: "authorization", url, credential_id: companion.door.credentialId, session_id: attr.sessionId },
+        `inject authorization (ingress door) for ${url}`,
+      );
+    } else {
+      headers[injectName] = useGitBasic ? matched.gitBasicHeader! : bareToken ?? matched.injectHeader.value;
+      // Only the plain Bearer shape is retried after a refresh; git Basic and API-key headers are not.
+      if (!useGitBasic && bareToken === undefined) refresh = matched.refresh;
+      logger.info(
+        { op: "oma_vault.inject", header: injectName, url, credential_id: matched.credentialId, session_id: attr.sessionId },
+        `inject ${injectName} for ${url}`,
+      );
+    }
   } else {
     logger.debug({ op: "oma_vault.passthrough", method: req.method, url }, `passthrough ${req.method} ${url}`);
   }
