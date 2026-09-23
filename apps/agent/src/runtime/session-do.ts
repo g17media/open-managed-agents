@@ -79,9 +79,11 @@ import { HarnessLease, resolveHarness } from "../harness/registry";
 import { composeSystemPrompt } from "../harness/platform-guidance";
 import {
   createPiModelRuntime,
+  nativeWebSearchActive,
   modelThinkingLevel,
   toAiSdkLanguageModel,
 } from "../harness/pi-provider";
+import { readWebSearchFilters, resolveWebSearchProvider, webSearchEnvFrom } from "../harness/web-search";
 import {
   bindStoredModelCardCredentials,
   type ResolvedModelCardCredentials,
@@ -94,7 +96,7 @@ import {
   type ActiveOutcomeState,
   type OutcomeEvaluationRecord,
 } from "./outcome-supervisor";
-import { buildTools, disposeTools } from "../harness/tools";
+import { buildTools, disposeTools, isWebSearchEnabled } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
@@ -4092,6 +4094,7 @@ export class SessionDO extends DurableObject<Env> {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+          webSearch: webSearchEnvFrom(this.env as unknown as Record<string, unknown>),
           toolResultMaxChars: this.toolResultMaxChars(),
           toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
           environmentConfig,
@@ -4535,6 +4538,7 @@ export class SessionDO extends DurableObject<Env> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+      webSearch: webSearchEnvFrom(this.env as unknown as Record<string, unknown>),
       toolResultMaxChars: this.toolResultMaxChars(),
       toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
       environmentConfig: subEnvironment?.config,
@@ -4864,12 +4868,45 @@ export class SessionDO extends DurableObject<Env> {
       turnThreadId,
     );
 
+    const webSearchEnv = webSearchEnvFrom(this.env as unknown as Record<string, unknown>);
+    // Resolve model — `agent.model` is a card.model_id handle. The card
+    // contains the wire-level LLM string we actually send to the provider.
+    const handle = typeof agent.model === "string" ? agent.model : agent.model?.id;
+    const effectiveHandle = handle || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+    const creds = await this.resolveModelCardCredentials(effectiveHandle);
+    const piRuntime = createPiModelRuntime({
+      model: creds.model,
+      apiKey: creds.apiKey,
+      provider: creds.provider,
+      baseURL: creds.baseURL,
+      customHeaders: creds.customHeaders,
+      piConfig: creds.piConfig,
+      providerOptions:
+        typeof agent.model !== "string" &&
+        agent.model.provider_options?.pi &&
+        typeof agent.model.provider_options.pi === "object" &&
+        !Array.isArray(agent.model.provider_options.pi)
+          ? agent.model.provider_options.pi as Record<string, unknown>
+          : undefined,
+      thinkingLevel: modelThinkingLevel(agent.model),
+      speed: typeof agent.model === "string" ? undefined : agent.model.speed,
+      // Native web search is only requested when the deployment/agent asks
+      // for it and the agent actually has web_search on — otherwise a
+      // file-tools-only agent would gain search through the payload splice.
+      webSearch:
+        resolveWebSearchProvider(webSearchEnv, agent).provider === "native" && isWebSearchEnabled(agent)
+          ? { filters: readWebSearchFilters(agent) }
+          : undefined,
+    });
+    const model = toAiSdkLanguageModel(piRuntime);
+
     // Build tools from agent config
     const auxResolved = await this.resolveAuxModel(agent);
     const allTools = await buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+      webSearch: { ...webSearchEnv, nativeActive: nativeWebSearchActive(piRuntime) },
       toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
       environmentConfig,
       mcpBinding: this.env.MAIN_MCP,
@@ -4905,29 +4942,6 @@ export class SessionDO extends DurableObject<Env> {
       memoryStoreService = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
     }
 
-    // Resolve model — `agent.model` is a card.model_id handle. The card
-    // contains the wire-level LLM string we actually send to the provider.
-    const handle = typeof agent.model === "string" ? agent.model : agent.model?.id;
-    const effectiveHandle = handle || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-    const creds = await this.resolveModelCardCredentials(effectiveHandle);
-    const piRuntime = createPiModelRuntime({
-      model: creds.model,
-      apiKey: creds.apiKey,
-      provider: creds.provider,
-      baseURL: creds.baseURL,
-      customHeaders: creds.customHeaders,
-      piConfig: creds.piConfig,
-      providerOptions:
-        typeof agent.model !== "string" &&
-        agent.model.provider_options?.pi &&
-        typeof agent.model.provider_options.pi === "object" &&
-        !Array.isArray(agent.model.provider_options.pi)
-          ? agent.model.provider_options.pi as Record<string, unknown>
-          : undefined,
-      thinkingLevel: modelThinkingLevel(agent.model),
-      speed: typeof agent.model === "string" ? undefined : agent.model.speed,
-    });
-    const model = toAiSdkLanguageModel(piRuntime);
 
     // Build system prompt: agent.system + platform guidance + skill /
     // memory_store / appendable_prompt content (the latter passed in as

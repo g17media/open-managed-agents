@@ -264,6 +264,10 @@ export interface HarnessContext {
     ANTHROPIC_WORK_SECRET?: string;
     ANTHROPIC_MODEL?: string;
     TAVILY_API_KEY?: string;
+    WEB_SEARCH_PROVIDER?: string;
+    BRAVE_SEARCH_API_KEY?: string;
+    EXA_API_KEY?: string;
+    SERPER_API_KEY?: string;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     CONFIG_KV?: KVNamespace;
     memoryStoreIds?: string[];

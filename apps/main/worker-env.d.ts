@@ -14,6 +14,10 @@ declare namespace Cloudflare {
     ANTHROPIC_BASE_URL?: string;
     ANTHROPIC_MODEL?: string;
     TAVILY_API_KEY?: string;
+    WEB_SEARCH_PROVIDER?: string;
+    BRAVE_SEARCH_API_KEY?: string;
+    EXA_API_KEY?: string;
+    SERPER_API_KEY?: string;
     CLOUDFLARE_API_TOKEN?: string;
     CLOUDFLARE_ACCOUNT_ID?: string;
     GITHUB_TOKEN?: string;

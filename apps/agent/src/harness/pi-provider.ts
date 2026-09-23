@@ -16,6 +16,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 export { toAiSdkLanguageModel } from "./pi-ai-sdk";
+import { nativeWebSearchServerTool, type WebSearchFilters } from "./web-search";
 
 /** Preserve stored agent reasoning settings when binding the Pi runtime. */
 export function modelThinkingLevel(model: string | {
@@ -37,6 +38,12 @@ export interface PiModelRuntime {
   thinkingLevel: ModelThinkingLevel;
   /** Managed Agents request priority. Model cards do not own this setting. */
   speed: "standard" | "fast";
+  /** Provider-hosted tools spliced into every request payload — today only
+   *  the native web search tool. Empty when the binding asked for none or
+   *  the provider cannot host one; callers read `nativeWebSearchActive()`
+   *  rather than this array. Optional because tests and older callers build
+   *  runtimes by hand; a missing array means "no server tools". */
+  serverTools?: Record<string, unknown>[];
 }
 
 /**
@@ -77,6 +84,11 @@ export interface PiModelCardBinding {
   thinkingLevel?: ModelThinkingLevel;
   /** Managed Agents `model.speed`; inherited by sessions pinned to this agent version. */
   speed?: "standard" | "fast";
+  /** Ask the model provider to host `web_search` itself (Anthropic server
+   *  tool / OpenAI Responses tool). Honoured only on first-party endpoints
+   *  that implement it — see nativeWebSearchServerTool. Callers must also
+   *  omit the harness's function tool when this takes effect. */
+  webSearch?: { filters?: WebSearchFilters };
 }
 
 interface ProviderPlan {
@@ -166,13 +178,43 @@ export function createPiModelRuntime(input: PiModelCardBinding): PiModelRuntime 
 
   const models = createModels();
   models.setProvider(provider);
+  const nativeSearch = input.webSearch
+    ? nativeWebSearchServerTool(
+        { api: String(model.api), providerId: plan.id, modelId: input.model },
+        input.webSearch.filters,
+      )
+    : null;
   return {
     models,
     model,
     providerOptions: structuredClone(input.providerOptions ?? {}) as SimpleStreamOptions,
     thinkingLevel: clampThinkingLevel(model, input.thinkingLevel ?? "off"),
     speed: input.speed ?? "standard",
+    serverTools: nativeSearch ? [nativeSearch] : [],
   };
+}
+
+/** True when this runtime will splice a provider-hosted web search tool into requests. */
+export function nativeWebSearchActive(runtime: Pick<PiModelRuntime, "serverTools">): boolean {
+  return (runtime.serverTools?.length ?? 0) > 0;
+}
+
+/**
+ * Resolve only the wire API and provider id a binding would use, without
+ * keeping the runtime. Lets tool builders that run before the model runtime
+ * exists decide whether native search is possible. Returns undefined when
+ * the card cannot be bound at all — the later real bind surfaces that error
+ * to the session, so here it just means "no native search".
+ */
+export function resolvePiModelApi(
+  input: Omit<PiModelCardBinding, "webSearch">,
+): { api: string; providerId: string } | undefined {
+  try {
+    const runtime = createPiModelRuntime(input);
+    return { api: String(runtime.model.api), providerId: runtime.model.provider };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -199,6 +241,11 @@ export function withPiRuntimeRequestOptions(
     ),
   };
   const baseFetch = merged.fetch ?? observablePiFetch;
+  // Server tools ride the payload hook because Pi's tool conversion only
+  // knows function tools; appending after Pi built `params.tools` keeps the
+  // function tools intact and lets the provider see its own tool type.
+  const withServerTools = injectServerTools(runtime, merged.onPayload);
+  if (withServerTools) merged.onPayload = withServerTools;
   if (runtime.speed !== "fast") return { ...merged, fetch: baseFetch };
 
   const originalPayload = merged.onPayload;
@@ -241,6 +288,29 @@ export function withPiRuntimeRequestOptions(
   throw new Error(
     `Managed Agents speed "fast" is not supported by Pi API "${api}"`,
   );
+}
+
+/**
+ * Wrap `onPayload` so the runtime's server tools are appended to the wire
+ * `tools` array. Only the two APIs whose tool arrays accept vendor tool
+ * types get the splice; anything else passes through untouched so a
+ * misconfigured provider never receives a tool it cannot parse.
+ */
+function injectServerTools(
+  runtime: PiModelRuntime,
+  previous: SimpleStreamOptions["onPayload"],
+): SimpleStreamOptions["onPayload"] | undefined {
+  const serverTools = runtime.serverTools ?? [];
+  if (serverTools.length === 0) return undefined;
+  const api = runtime.model.api;
+  if (api !== "anthropic-messages" && api !== "openai-responses") return undefined;
+  return async (payload, model) => {
+    const projected = previous ? (await previous(payload, model)) ?? payload : payload;
+    if (typeof projected !== "object" || projected === null || Array.isArray(projected)) return projected;
+    const current = (projected as { tools?: unknown }).tools;
+    const existing = Array.isArray(current) ? current : [];
+    return { ...projected, tools: [...existing, ...serverTools] };
+  };
 }
 
 async function fastAnthropicFetch(

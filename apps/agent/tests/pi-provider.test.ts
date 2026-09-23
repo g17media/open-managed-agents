@@ -221,6 +221,96 @@ describe("createPiModelRuntime", () => {
     }
   });
 
+  it("splices Anthropic's server-side web search into the request tools when asked", async () => {
+    const runtime = createPiModelRuntime({
+      model: "claude-sonnet-5",
+      apiKey: "secret",
+      provider: "anthropic",
+      webSearch: { filters: { allowedDomains: ["docs.example.com"] } },
+    });
+    expect(piProviderModule.nativeWebSearchActive(runtime)).toBe(true);
+
+    const options = withPiRuntimeRequestOptions(runtime);
+    const payload = await options.onPayload!(
+      { model: "claude-sonnet-5", tools: [{ name: "bash", description: "b", input_schema: {} }] },
+      runtime.model,
+    );
+    expect((payload as { tools: unknown[] }).tools).toEqual([
+      { name: "bash", description: "b", input_schema: {} },
+      { type: "web_search_20260209", name: "web_search", allowed_domains: ["docs.example.com"] },
+    ]);
+    // A request that carried no function tools still gets the server tool.
+    const bare = await options.onPayload!({ model: "claude-sonnet-5" }, runtime.model);
+    expect((bare as { tools: unknown[] }).tools).toHaveLength(1);
+  });
+
+  it("splices OpenAI's Responses web_search tool and keeps fast-mode decoration intact", async () => {
+    const runtime = createPiModelRuntime({
+      model: "gpt-5",
+      apiKey: "secret",
+      provider: "openai",
+      speed: "fast",
+      webSearch: { filters: {} },
+    });
+    expect(runtime.model.api).toBe("openai-responses");
+    expect(piProviderModule.nativeWebSearchActive(runtime)).toBe(true);
+    const options = withPiRuntimeRequestOptions(runtime);
+    const payload = await options.onPayload!({ model: "gpt-5", tools: [] }, runtime.model);
+    expect(payload).toMatchObject({ tools: [{ type: "web_search" }] });
+    expect(options).toMatchObject({ serviceTier: "priority" });
+  });
+
+  it("stays inert for providers that cannot host a search tool", async () => {
+    const compatible = createPiModelRuntime({
+      model: "claude-sonnet-5",
+      apiKey: "secret",
+      provider: "ant-compatible",
+      baseURL: "https://gateway.example.test/v1",
+      webSearch: { filters: {} },
+    });
+    expect(piProviderModule.nativeWebSearchActive(compatible)).toBe(false);
+    expect(withPiRuntimeRequestOptions(compatible).onPayload).toBeUndefined();
+
+    const noRequest = createPiModelRuntime({ model: "claude-sonnet-5", apiKey: "secret", provider: "anthropic" });
+    expect(piProviderModule.nativeWebSearchActive(noRequest)).toBe(false);
+    expect(piProviderModule.resolvePiModelApi({ model: "gpt-5", apiKey: "k", provider: "openai" }))
+      .toEqual({ api: "openai-responses", providerId: "openai" });
+    expect(piProviderModule.resolvePiModelApi({ model: "x", apiKey: "k", provider: "nowhere" })).toBeUndefined();
+  });
+
+  it("sends the Anthropic server tool on the wire", async () => {
+    let captured: Request | undefined;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      captured = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+      const events = [
+        ["message_start", { type: "message_start", message: { id: "msg_ws", type: "message", role: "assistant", content: [], model: "claude-opus-5", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } }],
+        ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
+        ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } }],
+        ["content_block_stop", { type: "content_block_stop", index: 0 }],
+        ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } }],
+        ["message_stop", { type: "message_stop" }],
+      ] as const;
+      return new Response(
+        events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(""),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    try {
+      const runtime = createPiModelRuntime({
+        model: "claude-opus-5",
+        apiKey: "tenant-secret",
+        provider: "anthropic",
+        webSearch: { filters: {} },
+      });
+      const model = piProviderModule.toAiSdkLanguageModel(runtime) as LanguageModel;
+      await expect(streamText({ model, prompt: "hello" }).text).resolves.toBe("ok");
+      const body = await captured!.clone().json() as { tools?: unknown[] };
+      expect(body.tools).toEqual([{ type: "web_search_20260209", name: "web_search" }]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("rejects fast speed when Pi has no equivalent request control", () => {
     const runtime = createPiModelRuntime({
       provider: "google",

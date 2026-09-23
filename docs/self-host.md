@@ -363,7 +363,7 @@ The same demo works on the Postgres compose unchanged.
 | `bash` tool via the selected isolated sandbox | ✓ |
 | `read` / `write` / `edit` / `glob` / `grep` tools | ✓ (workdir-relative) |
 | `web_fetch` tool (HTML → markdown via turndown) | ✓ |
-| `web_search` tool | ⏸  needs TAVILY_API_KEY env var |
+| `web_search` tool | ✓ DuckDuckGo by default; set `WEB_SEARCH_PROVIDER` (+ key) for Tavily / Brave / Exa / Serper, or `native` for Anthropic / OpenAI hosted search |
 | `browser` tool | ✗  CF-only (uses @cloudflare/playwright) |
 | Memory stores | ✓ legacy `/v1/oma` mount + watcher; official `/v1/sessions` local harness mounts immutable read-only snapshots and rejects `read_write` until reverse sync is configured |
 | `/v1/vaults` + `/v1/vaults/:id/credentials` full CRUD + `mcp_oauth_validate` | ✓ via package |

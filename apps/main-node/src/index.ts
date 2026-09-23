@@ -144,8 +144,17 @@ import {
 import {
   createPiModelRuntime,
   modelThinkingLevel,
+  resolvePiModelApi,
   toAiSdkLanguageModel,
 } from "@open-managed-agents/agent/harness/pi-provider";
+import { isWebSearchEnabled } from "@open-managed-agents/agent/harness/tools";
+import {
+  nativeWebSearchServerTool,
+  readWebSearchFilters,
+  resolveWebSearchProvider,
+  webSearchEnvFrom,
+  type WebSearchFilters,
+} from "@open-managed-agents/agent/harness/web-search";
 
 import type { PiModelConfig } from "@open-managed-agents/agent/harness/pi-provider";
 
@@ -1041,9 +1050,45 @@ async function resolveNodeModelCreds(
   };
 }
 
+/**
+ * Web search wiring for one (tenant, agent) pair, computed the same way by
+ * the model builder and the tool builder so the two halves agree: when the
+ * provider is "native" AND the agent has web_search enabled AND the model
+ * card sits on a first-party Anthropic/OpenAI endpoint, the runtime splices
+ * the vendor's search tool into the payload and buildTools omits its
+ * function tool. Any other combination leaves the function-tool backends in
+ * charge (keyed provider or DuckDuckGo).
+ */
+async function resolveNodeWebSearchWiring(
+  tenantId: string,
+  agent: import("@open-managed-agents/shared").AgentConfig,
+): Promise<{
+  env: ReturnType<typeof webSearchEnvFrom>;
+  nativeActive: boolean;
+  binding?: { filters: WebSearchFilters };
+}> {
+  const env = webSearchEnvFrom(process.env);
+  if (resolveWebSearchProvider(env, agent).provider !== "native" || !isWebSearchEnabled(agent)) {
+    return { env, nativeActive: false };
+  }
+  const creds = await resolveNodeModelCreds(tenantId, agent.model);
+  const target = resolvePiModelApi({
+    model: creds.wireModel,
+    apiKey: creds.apiKey,
+    provider: creds.provider,
+    baseURL: creds.baseURL,
+    customHeaders: creds.customHeaders,
+    piConfig: creds.piConfig,
+  });
+  const filters = readWebSearchFilters(agent);
+  const hosted = target && nativeWebSearchServerTool({ ...target, modelId: creds.wireModel }, filters);
+  return hosted ? { env, nativeActive: true, binding: { filters } } : { env, nativeActive: false };
+}
+
 async function buildNodeLanguageModel(
   tenantId: string,
   agentModel: import("@open-managed-agents/shared").AgentConfig["model"],
+  webSearch?: { filters: WebSearchFilters },
 ) {
   const creds = await resolveNodeModelCreds(tenantId, agentModel);
   const configuredProviderOptions =
@@ -1068,6 +1113,7 @@ async function buildNodeLanguageModel(
     speed: typeof agentModel === "string"
       ? undefined
       : agentModel.speed === "fast" ? "fast" : "standard",
+    webSearch,
   }));
 }
 
@@ -1099,12 +1145,15 @@ const sessionRegistry = new SessionRegistry({
   sqlDialect: dialect,
   mountSessionResources: sessionPreparation.mountSessionResources,
   promoteSessionOutputs: sessionPreparation.promoteSessionOutputs,
-  buildModel: (agent, tenantId) => buildNodeLanguageModel(tenantId, agent.model),
+  buildModel: async (agent, tenantId) =>
+    buildNodeLanguageModel(tenantId, agent.model, (await resolveNodeWebSearchWiring(tenantId, agent)).binding),
   buildTools: async (agent, sandbox, sessionId, tenantId) => {
     const creds = await resolveNodeModelCreds(tenantId, agent.model);
+    const webSearch = await resolveNodeWebSearchWiring(tenantId, agent);
     return buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: creds.apiKey,
       ANTHROPIC_BASE_URL: creds.baseURL,
+      webSearch: { ...webSearch.env, nativeActive: webSearch.nativeActive },
       toMarkdown: toMarkdownProvider,
       tenantId,
       sessionId,
@@ -1127,6 +1176,7 @@ const sessionRegistry = new SessionRegistry({
   },
   buildHarnessContext: async (input) => {
     const creds = await resolveNodeModelCreds(input.tenantId, input.agent.model);
+    const webSearch = await resolveNodeWebSearchWiring(input.tenantId, input.agent);
     const pi = createPiModelRuntime({
       model: creds.wireModel,
       apiKey: creds.apiKey,
@@ -1134,6 +1184,7 @@ const sessionRegistry = new SessionRegistry({
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      webSearch: webSearch.binding,
       providerOptions:
         typeof input.agent.model !== "string" &&
         input.agent.model.provider_options?.pi &&
@@ -1407,6 +1458,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
         toLegacyHarnessAgentConfig(session),
       );
       const creds = await resolveNodeModelCreds(workspaceId, agent.model);
+      const webSearch = await resolveNodeWebSearchWiring(workspaceId, agent);
       const auxiliary = await resolveNodeManagedAuxiliaryToolModel(
         session,
         (model) => buildNodeLanguageModel(workspaceId, model),
@@ -1414,6 +1466,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       return buildTools(agent, sandbox, {
         ANTHROPIC_API_KEY: creds.apiKey,
         ANTHROPIC_BASE_URL: creds.baseURL,
+        webSearch: { ...webSearch.env, nativeActive: webSearch.nativeActive },
         toMarkdown: toMarkdownProvider,
         tenantId: workspaceId,
         sessionId: session.id,
@@ -1584,11 +1637,16 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       executionId: input.executionFence.executionId,
     }, "Completed Session output could not be published as an Agents API artifact");
   }),
-  buildModel: ({ workspaceId, session }) =>
-    buildNodeLanguageModel(workspaceId, session.agent.model),
+  buildModel: async ({ workspaceId, session }) =>
+    buildNodeLanguageModel(
+      workspaceId,
+      session.agent.model,
+      (await resolveNodeWebSearchWiring(workspaceId, toLegacyHarnessAgentConfig(session))).binding,
+    ),
       buildTools: async ({ workspaceId, session, environment, sandbox, subagents, delegateToAgent, runtime }) => {
     const agent = toLegacyHarnessAgentConfig(session);
     const creds = await resolveNodeModelCreds(workspaceId, agent.model);
+    const webSearch = await resolveNodeWebSearchWiring(workspaceId, agent);
     const auxiliary = await resolveNodeManagedAuxiliaryToolModel(
       session,
       (model) => buildNodeLanguageModel(workspaceId, model),
@@ -1596,6 +1654,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     const tools = await buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: creds.apiKey,
       ANTHROPIC_BASE_URL: creds.baseURL,
+      webSearch: { ...webSearch.env, nativeActive: webSearch.nativeActive },
       toMarkdown: toMarkdownProvider,
       tenantId: workspaceId,
       sessionId: session.id,
