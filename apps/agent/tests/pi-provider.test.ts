@@ -2,6 +2,8 @@ import {
   createModels,
   fauxAssistantMessage,
   fauxProvider,
+  fauxText,
+  fauxThinking,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import type { LanguageModel } from "ai";
@@ -441,6 +443,50 @@ describe("createPiModelRuntime", () => {
       expect.any(Object),
       expect.objectContaining({ reasoning: "high" }),
     );
+  });
+
+  it("mints reasoning part ids that are stable within a stream and unique across streams", async () => {
+    // Regression: Pi numbers blocks per response, so the adapter used to emit a
+    // bare `pi-reasoning-0` on every turn. That id becomes the persisted
+    // `agent.thinking` event id, and the projection store rejects a repeat with
+    // different content, which aborted the second thinking turn of a session.
+    const faux = fauxProvider({ tokensPerSecond: 100_000 });
+    faux.setResponses([
+      fauxAssistantMessage([fauxThinking("first turn"), fauxText("one")]),
+      fauxAssistantMessage([fauxThinking("second turn"), fauxText("two")]),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+
+    const candidate = Reflect.get(piProviderModule, "toAiSdkLanguageModel");
+    expect(typeof candidate).toBe("function");
+    if (typeof candidate !== "function") return;
+    const model = candidate({
+      models,
+      model: faux.getModel(),
+      thinkingLevel: "high",
+    }) as LanguageModel;
+
+    const reasoningIds = async () => {
+      const start: string[] = [];
+      const delta = new Set<string>();
+      const end: string[] = [];
+      for await (const part of streamText({ model, prompt: "reason" }).fullStream) {
+        if (part.type === "reasoning-start") start.push(part.id);
+        if (part.type === "reasoning-delta") delta.add(part.id);
+        if (part.type === "reasoning-end") end.push(part.id);
+      }
+      return { start, delta: [...delta], end };
+    };
+
+    const first = await reasoningIds();
+    const second = await reasoningIds();
+
+    expect(first.start).toHaveLength(1);
+    expect(first.delta).toEqual(first.start);
+    expect(first.end).toEqual(first.start);
+    expect(second.start).toHaveLength(1);
+    expect(second.start[0]).not.toBe(first.start[0]);
   });
 
   it("supports the non-streaming AI SDK shape used by compaction and outcome judging", async () => {

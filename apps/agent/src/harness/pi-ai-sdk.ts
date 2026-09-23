@@ -24,6 +24,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Api } from "@earendil-works/pi-ai";
+import { generateEventId } from "@open-managed-agents/shared";
 import {
   withPiRuntimeRequestOptions,
   type PiModelRuntime,
@@ -87,6 +88,9 @@ async function streamWithPi(
   );
   const iterator = piStream[Symbol.asyncIterator]();
   const warnings = collectWarnings(options);
+  // One id minter per response: see createContentIds for why the ids must
+  // not repeat across streams.
+  const contentId = createContentIds();
   let emittedStart = false;
   let terminal = false;
 
@@ -106,7 +110,7 @@ async function streamWithPi(
           options.abortSignal?.removeEventListener("abort", forwardAbort);
           return;
         }
-        const parts = toAiSdkStreamParts(next.value);
+        const parts = toAiSdkStreamParts(next.value, contentId);
         for (const part of parts) controller.enqueue(part);
         if (next.value.type === "done" || next.value.type === "error") {
           terminal = true;
@@ -288,7 +292,10 @@ function toPiStreamOptions(
   });
 }
 
-function toAiSdkStreamParts(event: AssistantMessageEvent): LanguageModelV3StreamPart[] {
+function toAiSdkStreamParts(
+  event: AssistantMessageEvent,
+  contentId: ContentIdMinter,
+): LanguageModelV3StreamPart[] {
   switch (event.type) {
     case "start":
       return event.partial.responseId
@@ -487,8 +494,27 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function contentId(kind: "text" | "reasoning", index: number): string {
-  return `pi-${kind}-${index}`;
+type ContentIdMinter = (kind: "text" | "reasoning", index: number) => string;
+
+/**
+ * Mint the AI SDK part ids for one streamed response.
+ *
+ * Pi addresses content blocks by their index within a single response, so a
+ * bare `pi-reasoning-0` would recur on every turn of a session. That is not
+ * cosmetic: DefaultHarness forwards the reasoning part id as `thinking_id`,
+ * the runtime event decoder promotes `thinking_id` to the persisted
+ * `agent.thinking` event id, and the projection store refuses an id that
+ * already exists with different content. With the bare id, the second turn
+ * of a session that started with thinking failed with "Runtime projection
+ * event IDs collide with a different or partial batch" and the session sat
+ * at `running` forever (observed 2026-09-23). The AI SDK only de-duplicates
+ * ids within one streamText call, so the adapter has to make them unique
+ * across calls itself. A per-response nonce keeps start/delta/end of one
+ * block correlated while never repeating between responses.
+ */
+function createContentIds(): ContentIdMinter {
+  const nonce = generateEventId();
+  return (kind, index) => `pi-${nonce}-${kind}-${index}`;
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
