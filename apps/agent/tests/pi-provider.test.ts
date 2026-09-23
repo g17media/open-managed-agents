@@ -274,7 +274,7 @@ describe("createPiModelRuntime", () => {
     const noRequest = createPiModelRuntime({ model: "claude-sonnet-5", apiKey: "secret", provider: "anthropic" });
     expect(piProviderModule.nativeWebSearchActive(noRequest)).toBe(false);
     expect(piProviderModule.resolvePiModelApi({ model: "gpt-5", apiKey: "k", provider: "openai" }))
-      .toEqual({ api: "openai-responses", providerId: "openai" });
+      .toEqual({ api: "openai-responses", providerId: "openai", baseUrl: "https://api.openai.com/v1" });
     expect(piProviderModule.resolvePiModelApi({ model: "x", apiKey: "k", provider: "nowhere" })).toBeUndefined();
   });
 

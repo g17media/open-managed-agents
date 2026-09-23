@@ -83,7 +83,7 @@ import {
   modelThinkingLevel,
   toAiSdkLanguageModel,
 } from "../harness/pi-provider";
-import { readWebSearchFilters, resolveWebSearchProvider, webSearchEnvFrom } from "../harness/web-search";
+import { readWebSearchFilters, webSearchEnvFrom } from "../harness/web-search";
 import {
   bindStoredModelCardCredentials,
   type ResolvedModelCardCredentials,
@@ -96,7 +96,7 @@ import {
   type ActiveOutcomeState,
   type OutcomeEvaluationRecord,
 } from "./outcome-supervisor";
-import { buildTools, disposeTools, isWebSearchEnabled } from "../harness/tools";
+import { buildTools, disposeTools, nativeWebSearchRequested } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
@@ -4533,12 +4533,39 @@ export class SessionDO extends DurableObject<Env> {
     const subEnvironment = this.state.environment_id
       ? await this.getEnvConfig(this.state.environment_id)
       : null;
+    const subWebSearchEnv = webSearchEnvFrom(this.env as unknown as Record<string, unknown>);
+    const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model?.id;
+    const subHandle = subModelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+    const subCreds = await this.resolveModelCardCredentials(subHandle);
+    const subPiRuntime = createPiModelRuntime({
+      model: subCreds.model,
+      apiKey: subCreds.apiKey,
+      provider: subCreds.provider,
+      baseURL: subCreds.baseURL,
+      customHeaders: subCreds.customHeaders,
+      piConfig: subCreds.piConfig,
+      providerOptions:
+        typeof subAgent.model !== "string" &&
+        subAgent.model.provider_options?.pi &&
+        typeof subAgent.model.provider_options.pi === "object" &&
+        !Array.isArray(subAgent.model.provider_options.pi)
+          ? subAgent.model.provider_options.pi as Record<string, unknown>
+          : undefined,
+      thinkingLevel: modelThinkingLevel(subAgent.model),
+      speed: typeof subAgent.model === "string" ? undefined : subAgent.model.speed,
+      // Same gate as the primary agent: a sub-agent that enables web_search
+      // gets the deployment's chosen backend, not a silent DuckDuckGo fallback.
+      webSearch: nativeWebSearchRequested(subWebSearchEnv, subAgent)
+        ? { filters: readWebSearchFilters(subAgent) }
+        : undefined,
+    });
+    const subModel = toAiSdkLanguageModel(subPiRuntime);
     const subAuxResolved = await this.resolveAuxModel(subAgent);
     const subTools = await buildTools(subAgent, childSandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-      webSearch: webSearchEnvFrom(this.env as unknown as Record<string, unknown>),
+      webSearch: { ...subWebSearchEnv, nativeActive: nativeWebSearchActive(subPiRuntime) },
       toolResultMaxChars: this.toolResultMaxChars(),
       toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
       environmentConfig: subEnvironment?.config,
@@ -4570,27 +4597,6 @@ export class SessionDO extends DurableObject<Env> {
         return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, childSandbox, threadId, childSignal);
       },
     });
-    const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model?.id;
-    const subHandle = subModelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-    const subCreds = await this.resolveModelCardCredentials(subHandle);
-    const subPiRuntime = createPiModelRuntime({
-      model: subCreds.model,
-      apiKey: subCreds.apiKey,
-      provider: subCreds.provider,
-      baseURL: subCreds.baseURL,
-      customHeaders: subCreds.customHeaders,
-      piConfig: subCreds.piConfig,
-      providerOptions:
-        typeof subAgent.model !== "string" &&
-        subAgent.model.provider_options?.pi &&
-        typeof subAgent.model.provider_options.pi === "object" &&
-        !Array.isArray(subAgent.model.provider_options.pi)
-          ? subAgent.model.provider_options.pi as Record<string, unknown>
-          : undefined,
-      thinkingLevel: modelThinkingLevel(subAgent.model),
-      speed: typeof subAgent.model === "string" ? undefined : subAgent.model.speed,
-    });
-    const subModel = toAiSdkLanguageModel(subPiRuntime);
 
     // Build sub-agent context: own history, shared sandbox, parent event log
     const subCtx: HarnessContext = {
@@ -4891,12 +4897,12 @@ export class SessionDO extends DurableObject<Env> {
       thinkingLevel: modelThinkingLevel(agent.model),
       speed: typeof agent.model === "string" ? undefined : agent.model.speed,
       // Native web search is only requested when the deployment/agent asks
-      // for it and the agent actually has web_search on — otherwise a
-      // file-tools-only agent would gain search through the payload splice.
-      webSearch:
-        resolveWebSearchProvider(webSearchEnv, agent).provider === "native" && isWebSearchEnabled(agent)
-          ? { filters: readWebSearchFilters(agent) }
-          : undefined,
+      // for it, the agent actually has web_search on and its policy is
+      // always_allow — otherwise a file-tools-only or confirm-first agent
+      // would gain unconfirmed search through the payload splice.
+      webSearch: nativeWebSearchRequested(webSearchEnv, agent)
+        ? { filters: readWebSearchFilters(agent) }
+        : undefined,
     });
     const model = toAiSdkLanguageModel(piRuntime);
 

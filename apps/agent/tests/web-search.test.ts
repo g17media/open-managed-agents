@@ -95,28 +95,31 @@ describe("readWebSearchFilters", () => {
 
 describe("nativeWebSearchServerTool", () => {
   it("picks the 2026 Anthropic tool on current Claude models and the 2025 one on older ones", () => {
-    expect(nativeWebSearchServerTool({ api: "anthropic-messages", providerId: "anthropic", modelId: "claude-sonnet-5" }))
+    expect(nativeWebSearchServerTool({ api: "anthropic-messages", providerId: "anthropic", modelId: "claude-sonnet-5", baseUrl: "https://api.anthropic.com" }))
       .toEqual({ type: "web_search_20260209", name: "web_search" });
-    expect(nativeWebSearchServerTool({ api: "anthropic-messages", providerId: "anthropic", modelId: "claude-opus-4-7" }))
+    expect(nativeWebSearchServerTool({ api: "anthropic-messages", providerId: "anthropic", modelId: "claude-opus-4-7", baseUrl: "https://api.anthropic.com" }))
       .toMatchObject({ type: "web_search_20260209" });
-    expect(nativeWebSearchServerTool({ api: "anthropic-messages", providerId: "anthropic", modelId: "claude-haiku-4-5" }))
+    expect(nativeWebSearchServerTool({ api: "anthropic-messages", providerId: "anthropic", modelId: "claude-haiku-4-5", baseUrl: "https://api.anthropic.com/" }))
       .toMatchObject({ type: "web_search_20250305" });
   });
 
-  it("forwards filters, preferring the allow list when both are set", () => {
+  it("forwards filters; Anthropic gets one list or none at all, OpenAI gets both", () => {
+    const anthropic = { api: "anthropic-messages", providerId: "anthropic", modelId: "claude-opus-5", baseUrl: "https://api.anthropic.com" };
+    expect(nativeWebSearchServerTool(anthropic, { blockedDomains: ["b.com"], userLocation: { type: "approximate", city: "Berlin", country: null } }))
+      .toEqual({ type: "web_search_20260209", name: "web_search", blocked_domains: ["b.com"], user_location: { type: "approximate", city: "Berlin" } });
+    // Anthropic cannot take both lists on one tool — decline native so a
+    // function-tool backend enforces both instead of dropping the deny list.
+    expect(nativeWebSearchServerTool(anthropic, { allowedDomains: ["a.com"], blockedDomains: ["b.com"] })).toBeNull();
     expect(nativeWebSearchServerTool(
-      { api: "anthropic-messages", providerId: "anthropic", modelId: "claude-opus-5" },
-      { allowedDomains: ["a.com"], blockedDomains: ["b.com"], userLocation: { type: "approximate", city: "Berlin", country: null } },
-    )).toEqual({
-      type: "web_search_20260209",
-      name: "web_search",
-      allowed_domains: ["a.com"],
-      user_location: { type: "approximate", city: "Berlin" },
-    });
-    expect(nativeWebSearchServerTool(
-      { api: "openai-responses", providerId: "openai", modelId: "gpt-5" },
+      { api: "openai-responses", providerId: "openai", modelId: "gpt-5", baseUrl: "https://api.openai.com/v1" },
       { allowedDomains: ["a.com"], blockedDomains: ["b.com"] },
-    )).toEqual({ type: "web_search", filters: { allowed_domains: ["a.com"] } });
+    )).toEqual({ type: "web_search", filters: { allowed_domains: ["a.com"], blocked_domains: ["b.com"] } });
+  });
+
+  it("refuses first-party provider ids that point at a gateway base URL", () => {
+    expect(nativeWebSearchServerTool({ api: "anthropic-messages", providerId: "anthropic", modelId: "claude-sonnet-5", baseUrl: "https://proxy.internal/v1" })).toBeNull();
+    expect(nativeWebSearchServerTool({ api: "openai-responses", providerId: "openai", modelId: "gpt-5", baseUrl: "https://gateway.example.test/openai/v1" })).toBeNull();
+    expect(nativeWebSearchServerTool({ api: "openai-responses", providerId: "openai", modelId: "gpt-5" })).toBeNull();
   });
 
   it("refuses gateways, compatible endpoints and non-Claude models on the Anthropic API", () => {
@@ -133,7 +136,18 @@ describe("domain filtering", () => {
     expect(hostMatchesDomainList("https://example.com/x", ["www.example.com"])).toBe(true);
     expect(hostMatchesDomainList("https://notexample.com/x", ["example.com"])).toBe(false);
     expect(hostMatchesDomainList("https://example.com/blog", ["example.com/blog"])).toBe(true);
+    expect(hostMatchesDomainList("https://example.com/blog/post-1", ["example.com/blog"])).toBe(true);
+    // A path suffix narrows the entry: other paths on the host do not match.
+    expect(hostMatchesDomainList("https://example.com/untrusted", ["example.com/trusted"])).toBe(false);
+    expect(hostMatchesDomainList("https://example.com/trusted-not", ["example.com/trusted"])).toBe(false);
     expect(hostMatchesDomainList("not a url", ["example.com"])).toBe(false);
+  });
+
+  it("normalises pasted URLs in agent domain lists", () => {
+    const cfg = agent([{ type: "agent_toolset_20260401", configs: [
+      { name: "web_search", enabled: true, allowed_domains: ["https://user@Example.com:443/Blog/", "/nope"] } as never,
+    ] }]);
+    expect(readWebSearchFilters(cfg)).toEqual({ allowedDomains: ["example.com/blog"] });
   });
 
   it("applies allow then block lists", () => {
