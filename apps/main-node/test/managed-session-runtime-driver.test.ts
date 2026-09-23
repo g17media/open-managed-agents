@@ -304,6 +304,108 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
     ]);
   });
 
+  it("tracks committed idles per execution so sibling accepts on one session do not interfere", async () => {
+    // Accept A fails healthily (its own error + idle land) but is held
+    // before it rethrows. Accept B, a different execution on the same
+    // session, starts in that window and is held before it emits anything.
+    // A session-scoped marker would be cleared by B's start, so A would
+    // synthesize a duplicate pair, and B would then see A's duplicate idle
+    // and skip its own repair. Per-execution keys must give A no repair and
+    // B its own.
+    const fenceA: SessionExecutionFence = { ...executionFence, executionId: "event_input_a", attemptId: "attempt_a" };
+    const fenceB: SessionExecutionFence = { ...executionFence, executionId: "event_input_b", attemptId: "attempt_b" };
+    let emit: ((frame: unknown) => Promise<void>) | undefined;
+    let releaseA: () => void = () => {};
+    const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+    let releaseB: () => void = () => {};
+    const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+    let aEmitted: () => void = () => {};
+    const aEmittedPromise = new Promise<void>((resolve) => { aEmitted = resolve; });
+    const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];
+    const engine: RuntimeEngine = {
+      start: async (_input, output) => { emit = output; },
+      stop: async () => {},
+      accept: async (input) => {
+        if (input.executionFence?.executionId === "event_input_a") {
+          await emit?.({
+            id: "event_a_error",
+            type: "session.error",
+            error: { type: "unknown_error", message: "A failed", retry_status: "terminal" },
+            processed_at: "2026-08-26T01:00:00.000Z",
+          });
+          await emit?.({
+            id: "event_a_idle",
+            type: "session.status_idle",
+            stop_reason: { type: "end_turn" },
+            processed_at: "2026-08-26T01:00:01.000Z",
+          });
+          aEmitted();
+          await gateA;
+          throw new Error("A failed");
+        }
+        await gateB;
+        await emit?.({
+          id: "event_b_poisoned",
+          type: "session.status_running",
+          processed_at: "2026-08-26T01:00:02.000Z",
+        });
+      },
+      archiveThread: async () => {},
+    };
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine,
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async (command) => {
+          projectionCalls.push(structuredClone(command));
+          if (command.events.some((event) => event.id === "event_b_poisoned")) {
+            throw new Error("Runtime projection event IDs collide with a different or partial batch");
+          }
+          return { type: "recorded", session };
+        },
+      }),
+      clock: { now: () => new Date("2026-08-26T01:00:30.000Z") },
+      ids: {
+        nextEventId: (() => {
+          let id = 0;
+          return () => `event_repair_0${++id}`;
+        })(),
+      },
+    });
+    const acceptFor = (fence: SessionExecutionFence) => driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      events: [{
+        id: fence.executionId,
+        type: "user.message",
+        content: [{ type: "text", text: "Run" }],
+        processedAt: "2026-08-26T00:59:00.000Z",
+      }],
+      executionFence: fence,
+    });
+
+    const a = acceptFor(fenceA);
+    await aEmittedPromise;
+    const b = acceptFor(fenceB);
+    releaseA();
+    await expect(a).rejects.toThrow("A failed");
+    releaseB();
+    await expect(b).rejects.toThrow("Runtime projection event IDs collide");
+
+    expect(projectionCalls.map((command) => [
+      command.events[0]?.type,
+      command.executionFence?.executionId,
+    ])).toEqual([
+      ["session.error", "event_input_a"],
+      ["session.status_idle", "event_input_a"],
+      ["session.status_running", "event_input_b"],
+      ["session.error", "event_input_b"],
+      ["session.status_idle", "event_input_b"],
+    ]);
+  });
+
   it("projects a terminal error and idle state when a turn's output projection fails", async () => {
     // Regression: a turn whose output the projection refused (event-id
     // collision) settled the execution as failed but left

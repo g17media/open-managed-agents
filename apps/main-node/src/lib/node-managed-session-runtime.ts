@@ -259,6 +259,22 @@ function createLiveSubscription(onClose: () => void): LiveSubscription {
  * longer ours. Typed so accept() can skip writing terminal events for an
  * execution that another owner now holds.
  */
+/**
+ * Identity under which an accept()'s terminal events are tracked: the
+ * execution fence when there is one (unique per execution attempt), else the
+ * session. Frames are attributed to the fence the session held when they
+ * were enqueued (see the output callback in start()), so this is the same
+ * identity handleOutput sees.
+ */
+function terminalKey(
+  scope: { workspaceId: string; sessionId: string },
+  fence?: SessionExecutionFence,
+): string {
+  return fence === undefined
+    ? `session:${scope.workspaceId}/${scope.sessionId}`
+    : `execution:${fence.workspaceId}/${fence.executionId}/${fence.attemptId}/${fence.generation}`;
+}
+
 class ExecutionFenceLostError extends Error {
   constructor(message: string) {
     super(message);
@@ -272,8 +288,14 @@ export class DefaultNodeManagedSessionRuntimeDriver
   private readonly outputChains = new ScopedSessionMap<Promise<void>>();
   private readonly starts = new ScopedSessionMap<Promise<void>>();
   private readonly executionFences = new ScopedSessionMap<SessionExecutionFence>();
-  /** Sessions whose current accept() already committed a `session.status_idle`. */
-  private readonly idleProjected = new ScopedSessionMap<true>();
+  /**
+   * Accepts that already committed a `session.status_idle`, keyed by
+   * `terminalKey` (the producing execution fence, or the session when the
+   * accept runs unfenced). Keyed per execution rather than per session so a
+   * sibling-lane accept on the same session cannot clear or satisfy another
+   * accept's marker.
+   */
+  private readonly committedIdles = new Set<string>();
   private readonly realtime: SessionRealtimeHub;
 
   constructor(
@@ -310,7 +332,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
       await this.outputChains.get(input);
     } finally {
       this.starts.delete(input);
-      this.idleProjected.delete(input);
+      this.committedIdles.delete(terminalKey(input));
       this.closeSession(input);
     }
   }
@@ -351,7 +373,8 @@ export class DefaultNodeManagedSessionRuntimeDriver
       throw new Error("Session execution fence scope does not match runtime input");
     }
     if (fence !== undefined) this.executionFences.set(input, fence);
-    this.idleProjected.delete(input);
+    const acceptKey = terminalKey(input, fence);
+    this.committedIdles.delete(acceptKey);
     try {
       try {
         await this.start({
@@ -387,7 +410,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
         // owner holds the execution and the projection would refuse us.
         if (
           !(error instanceof ExecutionFenceLostError) &&
-          !this.idleProjected.has(input)
+          !this.committedIdles.has(acceptKey)
         ) {
           try {
             await this.projectTerminalFailure(input, error);
@@ -408,6 +431,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
         throw error;
       }
     } finally {
+      this.committedIdles.delete(acceptKey);
       if (fence !== undefined && this.executionFences.get(input) === fence) {
         this.executionFences.delete(input);
       }
@@ -506,7 +530,9 @@ export class DefaultNodeManagedSessionRuntimeDriver
           // Lets accept() tell a turn the runner closed itself from one whose
           // terminal events never got through.
           if (event.type === "session.status_idle") {
-            this.idleProjected.set({ workspaceId, sessionId }, true);
+            this.committedIdles.add(
+              terminalKey({ workspaceId, sessionId }, executionFence),
+            );
           }
           break;
         }
