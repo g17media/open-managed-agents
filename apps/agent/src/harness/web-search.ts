@@ -105,8 +105,11 @@ function cleanDomains(list: string[] | null | undefined): string[] | undefined {
   if (!Array.isArray(list)) return undefined;
   const cleaned = list
     .filter((d): d is string => typeof d === "string")
-    .map((d) => d.trim().toLowerCase().replace(/\/$/, ""))
-    .filter((d) => d.length > 0);
+    // Tolerate a pasted URL: drop the scheme and any userinfo/port so the
+    // entry is host[/path], which is what both vendors accept.
+    .map((d) => d.trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, "").replace(/^[^/@]*@/, "").replace(/\/$/, ""))
+    .map((d) => d.replace(/^([^/]*):\d+(\/|$)/, "$1$2"))
+    .filter((d) => d.length > 0 && !d.startsWith("/"));
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
@@ -214,6 +217,23 @@ export interface NativeWebSearchTarget {
   providerId: string;
   /** Wire-level model id sent to the provider. */
   modelId: string;
+  /** Resolved request base URL. A first-party provider id with a custom
+   *  base URL is a gateway, and gateways do not implement server tools. */
+  baseUrl?: string;
+}
+
+/** Vendor endpoints that actually implement the hosted search tools. */
+const NATIVE_SEARCH_ENDPOINTS: Record<string, string[]> = {
+  anthropic: ["https://api.anthropic.com", "https://api.anthropic.com/v1"],
+  openai: ["https://api.openai.com/v1", "https://api.openai.com"],
+};
+
+function isVendorEndpoint(providerId: string, baseUrl: string | undefined): boolean {
+  // pi-ai always resolves a base URL; an absent one means the caller could
+  // not tell, and "unknown" must not unlock a tool the endpoint may reject.
+  if (!baseUrl) return false;
+  const normalized = baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+  return (NATIVE_SEARCH_ENDPOINTS[providerId] ?? []).includes(normalized);
 }
 
 /**
@@ -230,7 +250,13 @@ export function nativeWebSearchServerTool(
   target: NativeWebSearchTarget,
   filters: WebSearchFilters = {},
 ): Record<string, unknown> | null {
+  if (!isVendorEndpoint(target.providerId, target.baseUrl)) return null;
   if (target.api === "anthropic-messages" && target.providerId === "anthropic" && target.modelId.startsWith("claude-")) {
+    // Anthropic accepts at most one of the two lists per tool. A config that
+    // sets both cannot be honoured server-side, and silently dropping the
+    // deny list would widen the policy — let a function-tool backend enforce
+    // both instead.
+    if (filters.allowedDomains && filters.blockedDomains) return null;
     const type = ANTHROPIC_WEB_SEARCH_2026_MODELS.test(target.modelId)
       ? "web_search_20260209"
       : "web_search_20250305";
@@ -238,15 +264,18 @@ export function nativeWebSearchServerTool(
       type,
       name: "web_search",
       ...(filters.allowedDomains ? { allowed_domains: filters.allowedDomains } : {}),
-      // Anthropic rejects both lists on one tool; allow wins because it is the stricter contract.
-      ...(!filters.allowedDomains && filters.blockedDomains ? { blocked_domains: filters.blockedDomains } : {}),
+      ...(filters.blockedDomains ? { blocked_domains: filters.blockedDomains } : {}),
       ...(filters.userLocation ? { user_location: compactLocation(filters.userLocation) } : {}),
     };
   }
   if (target.api === "openai-responses" && target.providerId === "openai") {
+    const domainFilters = {
+      ...(filters.allowedDomains ? { allowed_domains: filters.allowedDomains } : {}),
+      ...(filters.blockedDomains ? { blocked_domains: filters.blockedDomains } : {}),
+    };
     return {
       type: "web_search",
-      ...(filters.allowedDomains ? { filters: { allowed_domains: filters.allowedDomains } } : {}),
+      ...(Object.keys(domainFilters).length > 0 ? { filters: domainFilters } : {}),
       ...(filters.userLocation ? { user_location: compactLocation(filters.userLocation) } : {}),
     };
   }
@@ -272,17 +301,31 @@ export interface WebSearchResult {
   description: string;
 }
 
-/** True when the URL's host is one of `domains` or a subdomain of one. */
+/**
+ * True when the URL matches one of `domains`: same host or a subdomain, and,
+ * when the entry carries a path suffix (`example.com/blog`), the URL path is
+ * that prefix on a segment boundary. Path suffixes are part of both vendors'
+ * contracts, so an allow entry with a path must not admit the whole host and
+ * a block entry with a path must not block it.
+ */
 export function hostMatchesDomainList(url: string, domains: string[]): boolean {
-  let host: string;
+  let parsed: URL;
   try {
-    host = new URL(url).hostname.toLowerCase();
+    parsed = new URL(url);
   } catch {
     return false;
   }
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname.replace(/\/+$/, "") || "/";
   return domains.some((domain) => {
-    const bare = domain.replace(/^www\./, "").split("/")[0];
-    return host === bare || host.endsWith(`.${bare}`);
+    const slash = domain.indexOf("/");
+    const bare = (slash === -1 ? domain : domain.slice(0, slash)).replace(/^www\./, "");
+    const prefix = slash === -1 ? "" : domain.slice(slash).replace(/\/+$/, "");
+    if (!bare) return false;
+    const hostOk = host === bare || host.endsWith(`.${bare}`);
+    if (!hostOk) return false;
+    if (!prefix) return true;
+    return path === prefix || path.startsWith(`${prefix}/`);
   });
 }
 

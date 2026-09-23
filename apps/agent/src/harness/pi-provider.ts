@@ -180,7 +180,7 @@ export function createPiModelRuntime(input: PiModelCardBinding): PiModelRuntime 
   models.setProvider(provider);
   const nativeSearch = input.webSearch
     ? nativeWebSearchServerTool(
-        { api: String(model.api), providerId: plan.id, modelId: input.model },
+        { api: String(model.api), providerId: plan.id, modelId: input.model, baseUrl },
         input.webSearch.filters,
       )
     : null;
@@ -208,10 +208,10 @@ export function nativeWebSearchActive(runtime: Pick<PiModelRuntime, "serverTools
  */
 export function resolvePiModelApi(
   input: Omit<PiModelCardBinding, "webSearch">,
-): { api: string; providerId: string } | undefined {
+): { api: string; providerId: string; baseUrl: string } | undefined {
   try {
     const runtime = createPiModelRuntime(input);
-    return { api: String(runtime.model.api), providerId: runtime.model.provider };
+    return { api: String(runtime.model.api), providerId: runtime.model.provider, baseUrl: runtime.model.baseUrl };
   } catch {
     return undefined;
   }

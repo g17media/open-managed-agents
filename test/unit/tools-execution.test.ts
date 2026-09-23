@@ -614,6 +614,24 @@ describe("Built-in tool execution", () => {
     expect(ddg.web_search.description).toContain("DuckDuckGo");
   });
 
+  it("native search is never requested for always_ask agents", async () => {
+    const { nativeWebSearchRequested } = await import("../../apps/agent/src/harness/tools");
+    const env = { WEB_SEARCH_PROVIDER: "native" };
+    expect(nativeWebSearchRequested(env, makeAgentConfig())).toBe(true);
+    const askFirst = makeAgentConfig({
+      tools: [{ type: "agent_toolset_20260401", configs: [{ name: "web_search", enabled: true, permission_policy: { type: "always_ask" } }] }],
+    });
+    expect(nativeWebSearchRequested(env, askFirst)).toBe(false);
+    const noSearch = makeAgentConfig({
+      tools: [{ type: "agent_toolset_20260401", configs: [{ name: "web_search", enabled: false }] }],
+    });
+    expect(nativeWebSearchRequested(env, noSearch)).toBe(false);
+    expect(nativeWebSearchRequested({ WEB_SEARCH_PROVIDER: "brave" }, makeAgentConfig())).toBe(false);
+    // A caller that binds native anyway is a bug, and buildTools says so rather than colliding tool names.
+    await expect(buildTools(askFirst, new TestSandbox(), { webSearch: { ...env, nativeActive: true } }))
+      .rejects.toThrow(/always_allow/);
+  });
+
   it("web_search is omitted when the runtime hosts native search, and falls back when it cannot", async () => {
     const sandbox = new TestSandbox();
     const native = await buildTools(makeAgentConfig(), sandbox, {

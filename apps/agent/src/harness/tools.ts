@@ -333,6 +333,22 @@ export function isWebSearchEnabled(agentConfig: AgentConfig): boolean {
   return getEnabledTools(agentConfig.tools).has("web_search") || webSearchToolTypeOverride(agentConfig) !== undefined;
 }
 
+/**
+ * The single decision callers must use before binding a provider-hosted
+ * search tool to a model runtime: the deployment/agent selected "native",
+ * the agent has web_search on, and its permission policy is always_allow.
+ * A hosted search runs inside the provider's turn, so an `always_ask`
+ * policy could never pause it for confirmation — those agents keep a
+ * function tool, which the confirmation wrapper below can intercept.
+ */
+export function nativeWebSearchRequested(env: WebSearchEnv | undefined, agentConfig: AgentConfig): boolean {
+  return (
+    resolveWebSearchProvider(env, agentConfig).provider === "native" &&
+    isWebSearchEnabled(agentConfig) &&
+    getToolPermission(agentConfig, "web_search") === "always_allow"
+  );
+}
+
 function getEnabledTools(tools: AgentConfig["tools"]): Set<string> {
   // Default = DEFAULT_TOOLS only. OPT_IN_TOOLS (browser) require an
   // explicit per-tool { enabled: true } in the agent's tools config.
@@ -1080,6 +1096,12 @@ export async function buildTools(
     const selection = resolveWebSearchProvider(webSearchEnv, agentConfig);
     let provider = selection.provider;
     if (provider === "native") {
+      if (webSearchEnv.nativeActive && getToolPermission(agentConfig, "web_search") !== "always_allow") {
+        // Should be unreachable: callers gate the runtime binding with
+        // nativeWebSearchRequested(). Adding a same-named function tool here
+        // would collide with the injected server tool, so surface it instead.
+        throw new Error("web_search: native search bound to an agent whose permission policy is not always_allow");
+      }
       if (!webSearchEnv.nativeActive) {
         // Native was asked for but the runtime could not host it (non
         // first-party endpoint, or a caller that never wired the runtime).

@@ -147,11 +147,10 @@ import {
   resolvePiModelApi,
   toAiSdkLanguageModel,
 } from "@open-managed-agents/agent/harness/pi-provider";
-import { isWebSearchEnabled } from "@open-managed-agents/agent/harness/tools";
+import { nativeWebSearchRequested } from "@open-managed-agents/agent/harness/tools";
 import {
   nativeWebSearchServerTool,
   readWebSearchFilters,
-  resolveWebSearchProvider,
   webSearchEnvFrom,
   type WebSearchFilters,
 } from "@open-managed-agents/agent/harness/web-search";
@@ -1052,12 +1051,18 @@ async function resolveNodeModelCreds(
 
 /**
  * Web search wiring for one (tenant, agent) pair, computed the same way by
- * the model builder and the tool builder so the two halves agree: when the
- * provider is "native" AND the agent has web_search enabled AND the model
- * card sits on a first-party Anthropic/OpenAI endpoint, the runtime splices
- * the vendor's search tool into the payload and buildTools omits its
- * function tool. Any other combination leaves the function-tool backends in
- * charge (keyed provider or DuckDuckGo).
+ * the model builder and the tool builder so the two halves agree: when
+ * nativeWebSearchRequested() holds (provider "native", web_search enabled,
+ * always_allow policy) AND the model card sits on the vendor's own
+ * Anthropic/OpenAI endpoint, the runtime splices the vendor's search tool
+ * into the payload and buildTools omits its function tool. Any other
+ * combination leaves the function-tool backends in charge (keyed provider
+ * or DuckDuckGo).
+ *
+ * Both halves re-read the model card, so an edit that moves the card
+ * between a vendor endpoint and a gateway while a turn is being prepared
+ * could make them disagree for that one turn. Accepted: card edits are rare
+ * operator actions and the next turn re-resolves both sides.
  */
 async function resolveNodeWebSearchWiring(
   tenantId: string,
@@ -1068,9 +1073,7 @@ async function resolveNodeWebSearchWiring(
   binding?: { filters: WebSearchFilters };
 }> {
   const env = webSearchEnvFrom(process.env);
-  if (resolveWebSearchProvider(env, agent).provider !== "native" || !isWebSearchEnabled(agent)) {
-    return { env, nativeActive: false };
-  }
+  if (!nativeWebSearchRequested(env, agent)) return { env, nativeActive: false };
   const creds = await resolveNodeModelCreds(tenantId, agent.model);
   const target = resolvePiModelApi({
     model: creds.wireModel,
