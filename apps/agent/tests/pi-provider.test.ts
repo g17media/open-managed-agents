@@ -445,7 +445,7 @@ describe("createPiModelRuntime", () => {
     );
   });
 
-  it("mints reasoning part ids that are stable within a stream and unique across streams", async () => {
+  it("mints part ids that are stable within a stream and unique across streams", async () => {
     // Regression: Pi numbers blocks per response, so the adapter used to emit a
     // bare `pi-reasoning-0` on every turn. That id becomes the persisted
     // `agent.thinking` event id, and the projection store rejects a repeat with
@@ -467,26 +467,35 @@ describe("createPiModelRuntime", () => {
       thinkingLevel: "high",
     }) as LanguageModel;
 
-    const reasoningIds = async () => {
-      const start: string[] = [];
-      const delta = new Set<string>();
-      const end: string[] = [];
+    // Both block kinds share the minter, so text ids are checked the same way:
+    // a consumer that correlates its own text stream must see one id per block.
+    const partIds = async () => {
+      const ids = {
+        reasoning: { start: [] as string[], delta: new Set<string>(), end: [] as string[] },
+        text: { start: [] as string[], delta: new Set<string>(), end: [] as string[] },
+      };
       for await (const part of streamText({ model, prompt: "reason" }).fullStream) {
-        if (part.type === "reasoning-start") start.push(part.id);
-        if (part.type === "reasoning-delta") delta.add(part.id);
-        if (part.type === "reasoning-end") end.push(part.id);
+        if (part.type === "reasoning-start") ids.reasoning.start.push(part.id);
+        if (part.type === "reasoning-delta") ids.reasoning.delta.add(part.id);
+        if (part.type === "reasoning-end") ids.reasoning.end.push(part.id);
+        if (part.type === "text-start") ids.text.start.push(part.id);
+        if (part.type === "text-delta") ids.text.delta.add(part.id);
+        if (part.type === "text-end") ids.text.end.push(part.id);
       }
-      return { start, delta: [...delta], end };
+      return ids;
     };
 
-    const first = await reasoningIds();
-    const second = await reasoningIds();
+    const first = await partIds();
+    const second = await partIds();
 
-    expect(first.start).toHaveLength(1);
-    expect(first.delta).toEqual(first.start);
-    expect(first.end).toEqual(first.start);
-    expect(second.start).toHaveLength(1);
-    expect(second.start[0]).not.toBe(first.start[0]);
+    for (const kind of ["reasoning", "text"] as const) {
+      expect(first[kind].start).toHaveLength(1);
+      expect([...first[kind].delta]).toEqual(first[kind].start);
+      expect(first[kind].end).toEqual(first[kind].start);
+      expect(second[kind].start).toHaveLength(1);
+      expect(second[kind].start[0]).not.toBe(first[kind].start[0]);
+    }
+    expect(first.text.start[0]).not.toBe(first.reasoning.start[0]);
   });
 
   it("supports the non-streaming AI SDK shape used by compaction and outcome judging", async () => {
