@@ -219,13 +219,15 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
       },
       archiveThread: async () => {},
     };
+    let projectionAttempts = 0;
     const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
       engine,
       realtime: new MemorySessionRealtimeHub(),
       projectionFor: () => ({
-        recordSessionRuntimeEvents: async () => ({
-          type: "execution_fence_lost",
-        }),
+        recordSessionRuntimeEvents: async () => {
+          projectionAttempts += 1;
+          return { type: "execution_fence_lost" };
+        },
       }),
     });
 
@@ -242,6 +244,93 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
       }],
       executionFence,
     })).rejects.toThrow("execution fence was lost");
+    // Another owner holds the execution now; no terminal events are ours to write.
+    expect(projectionAttempts).toBe(1);
+  });
+
+  it("projects a terminal error and idle state when a turn's output projection fails", async () => {
+    // Regression: a turn whose output the projection refused (event-id
+    // collision) settled the execution as failed but left
+    // `session.status_running` as the last visible event, so the session
+    // looked live forever.
+    let emit: ((frame: unknown) => Promise<void>) | undefined;
+    const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];
+    const engine: RuntimeEngine = {
+      start: async (_input, output) => { emit = output; },
+      stop: async () => {},
+      accept: async () => {
+        await emit?.({
+          id: "event_status_collision",
+          type: "session.status_running",
+          processed_at: "2026-08-26T01:00:00.000Z",
+        });
+      },
+      archiveThread: async () => {},
+    };
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine,
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async (command) => {
+          projectionCalls.push(structuredClone(command));
+          if (command.events.some((event) => event.type === "session.status_running")) {
+            throw new Error("Runtime projection event IDs collide with a different or partial batch");
+          }
+          return { type: "recorded", session };
+        },
+      }),
+      clock: { now: () => new Date("2026-08-26T01:00:30.000Z") },
+      ids: {
+        nextEventId: (() => {
+          let id = 0;
+          return () => `event_turn_failure_0${++id}`;
+        })(),
+      },
+    });
+
+    await expect(driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      events: [{
+        id: "event_input_collision",
+        type: "user.message",
+        content: [{ type: "text", text: "Run" }],
+        processedAt: "2026-08-26T00:59:00.000Z",
+      }],
+      executionFence,
+    })).rejects.toThrow("Runtime projection event IDs collide");
+
+    expect(projectionCalls.map((command) => command.events.map((event) => event.type))).toEqual([
+      ["session.status_running"],
+      ["session.error"],
+      ["session.status_idle"],
+    ]);
+    expect(projectionCalls[1]).toEqual({
+      sessionId: "session_01",
+      events: [{
+        id: "event_turn_failure_01",
+        type: "session.error",
+        error: {
+          type: "unknown_error",
+          message: "Runtime projection event IDs collide with a different or partial batch",
+          retryStatus: "terminal",
+        },
+        processedAt: "2026-08-26T01:00:30.000Z",
+      }],
+      executionFence,
+    });
+    expect(projectionCalls[2]).toEqual({
+      sessionId: "session_01",
+      events: [{
+        id: "event_turn_failure_02",
+        type: "session.status_idle",
+        stopReason: { type: "end_turn" },
+        processedAt: "2026-08-26T01:00:30.000Z",
+      }],
+      executionFence,
+    });
   });
 
   it("publishes application-native frames through the injected realtime Port", async () => {

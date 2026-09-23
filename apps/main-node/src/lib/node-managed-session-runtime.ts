@@ -254,6 +254,18 @@ function createLiveSubscription(onClose: () => void): LiveSubscription {
   };
 }
 
+/**
+ * The projection refused our output because the execution fence is no
+ * longer ours. Typed so accept() can skip writing terminal events for an
+ * execution that another owner now holds.
+ */
+class ExecutionFenceLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecutionFenceLostError";
+  }
+}
+
 export class DefaultNodeManagedSessionRuntimeDriver
   implements NodeManagedSessionRuntimeDriver
 {
@@ -346,15 +358,36 @@ export class DefaultNodeManagedSessionRuntimeDriver
           initialEvents: [],
         });
       } catch (error) {
-        await this.projectTerminalStartFailure(input, error);
+        await this.projectTerminalFailure(input, error);
         throw error;
       }
       const { executionFence: _executionFence, ...accepted } = input;
-      await this.dependencies.engine.accept({
-        ...accepted,
-        ...(fence !== undefined && { executionFence: fence }),
-      });
-      await this.outputChains.get(input);
+      try {
+        await this.dependencies.engine.accept({
+          ...accepted,
+          ...(fence !== undefined && { executionFence: fence }),
+        });
+        await this.outputChains.get(input);
+      } catch (error) {
+        // A turn that dies after start (harness throw, or a rejected output
+        // projection such as an event-id collision) used to leave the
+        // session with `session.status_running` as its last visible event:
+        // the worker settled the execution as failed, but nothing wrote a
+        // terminal event, so clients saw a turn that never ended and the
+        // status stayed `running` until the next restart (2026-09-23).
+        // Record the failure the same way a start failure is recorded.
+        // A lost fence is the one case to skip: another owner holds the
+        // execution now, and the projection would (rightly) refuse us.
+        if (!(error instanceof ExecutionFenceLostError)) {
+          try {
+            await this.projectTerminalFailure(input, error);
+          } catch {
+            // The original failure is the one that must surface; a second
+            // failure while recording it must not mask it.
+          }
+        }
+        throw error;
+      }
     } finally {
       if (fence !== undefined && this.executionFences.get(input) === fence) {
         this.executionFences.delete(input);
@@ -362,7 +395,13 @@ export class DefaultNodeManagedSessionRuntimeDriver
     }
   }
 
-  private async projectTerminalStartFailure(
+  /**
+   * Close the visible turn after a failure: a terminal `session.error`
+   * followed by `session.status_idle`, both under the execution fence that
+   * the failed turn ran with. Used for start failures and for failures
+   * during the turn itself.
+   */
+  private async projectTerminalFailure(
     input: ExecuteNodeManagedSessionEvents,
     error: unknown,
   ): Promise<void> {
@@ -447,7 +486,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
         if (projected.type === "recorded") break;
         if (projected.type === "not_found") return;
         if (projected.type === "execution_fence_lost") {
-          throw new Error(
+          throw new ExecutionFenceLostError(
             `Session ${workspaceId}/${sessionId} execution fence was lost`,
           );
         }
