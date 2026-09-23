@@ -1,6 +1,5 @@
 import { dynamicTool, generateText, jsonSchema, tool } from "ai";
 import { z } from "zod";
-import { anthropic } from "@ai-sdk/anthropic";
 import type { LanguageModel } from "ai";
 import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import {
@@ -11,6 +10,15 @@ import type { AgentConfig, ToolsetConfig, CustomToolConfig, SessionEvent } from 
 import type { ToMarkdownProvider } from "@open-managed-agents/markdown";
 import type { SandboxPort, ProcessHandle } from "./interface";
 import type { ModelCallOptions } from "./provider";
+import {
+  createWebSearchExecutor,
+  keyedWebSearchFallback,
+  readWebSearchFilters,
+  resolveWebSearchProvider,
+  webSearchToolDescription,
+  webSearchToolTypeOverride,
+  type WebSearchEnv,
+} from "./web-search";
 import { nanoid } from "nanoid";
 // Browser tools depend on the runtime-agnostic BrowserHarness interface.
 // Concrete adapters (CF / Node / CDP / Disabled) live in the package and
@@ -314,6 +322,17 @@ function isMcpToolEnabled(
   return configured?.enabled ?? ts.default_config?.enabled ?? true;
 }
 
+/**
+ * Whether this agent will get a `web_search` tool from buildTools. Callers
+ * that host the model runtime use it to decide whether a native (server-side)
+ * search tool should be spliced into the request; without web_search enabled
+ * the runtime must not add one, or a sub-agent scoped to file tools would
+ * suddenly be able to search.
+ */
+export function isWebSearchEnabled(agentConfig: AgentConfig): boolean {
+  return getEnabledTools(agentConfig.tools).has("web_search") || webSearchToolTypeOverride(agentConfig) !== undefined;
+}
+
 function getEnabledTools(tools: AgentConfig["tools"]): Set<string> {
   // Default = DEFAULT_TOOLS only. OPT_IN_TOOLS (browser) require an
   // explicit per-tool { enabled: true } in the agent's tools config.
@@ -356,7 +375,15 @@ export async function buildTools(
   env?: {
     ANTHROPIC_API_KEY?: string;
     ANTHROPIC_BASE_URL?: string;
+    /** Legacy single-key form; superseded by `webSearch` but still honoured
+     *  so existing deployments that only set TAVILY_API_KEY keep working. */
     TAVILY_API_KEY?: string;
+    /** Web search backend selection (see web-search.ts). `nativeActive` is
+     *  set by the caller once the model runtime has actually spliced a
+     *  provider-hosted search tool into the request — only then is it safe
+     *  to omit the function tool, otherwise the model would have no search
+     *  at all. */
+    webSearch?: WebSearchEnv & { nativeActive?: boolean };
     /** Markdown converter for web_fetch (HTML/PDF/DOCX → markdown). On
      *  Cloudflare it wraps env.AI.toMarkdown(); on Node it's
      *  turndown/pdf-parse/mammoth. Optional — when absent the tool falls
@@ -1040,96 +1067,43 @@ export async function buildTools(
   }
 
   // --- Web search ---
-  // Default: DuckDuckGo (free, no config). Override with explicit tool types:
-  //   "web_search_20250305" → Anthropic built-in server-side (Claude only)
-  //   "web_search_tavily"   → Tavily API (needs TAVILY_API_KEY)
-  const toolTypes = new Set((agentConfig.tools || []).map(t => t.type));
-
-  if (toolTypes.has("web_search_20250305")) {
-    tools.web_search = anthropic.tools.webSearch_20250305();
-  } else if (toolTypes.has("web_search_ddg") || enabled.has("web_search")) {
-    // DuckDuckGo — default web search, free, no API key
-    tools.web_search = tool({
-      description:
-        "Search the web using DuckDuckGo. Returns titles, URLs, and descriptions.",
-      inputSchema: z.object({
-        query: z.string().describe("Search query"),
-        max_results: z.number().optional().describe("Max results (default 5)"),
-      }),
-      execute: safe(async ({ query, max_results }) => {
-        const count = max_results || 5;
-        // Step 1: Get VQD token from DuckDuckGo
-        const vqdRes = await fetch(`https://duckduckgo.com/?${new URLSearchParams({ q: query, ia: "web" })}`);
-        if (!vqdRes.ok) return `DuckDuckGo error: ${vqdRes.status}`;
-        const vqdText = await vqdRes.text();
-        const vqd = /vqd=['"](\d+-\d+(?:-\d+)?)['"]/?.exec(vqdText)?.[1];
-        if (!vqd) return "DuckDuckGo: failed to get search token";
-
-        // Step 2: Fetch search results
-        const params = new URLSearchParams({
-          q: query, l: "en-us", kl: "wt-wt", s: "0", dl: "en",
-          ct: "US", ss_mkt: "us", vqd, sp: "1", bpa: "1",
-        });
-        const searchRes = await fetch(`https://links.duckduckgo.com/d.js?${params}`);
-        if (!searchRes.ok) return `DuckDuckGo search error: ${searchRes.status}`;
-        const body = await searchRes.text();
-
-        if (body.includes("DDG.deep.anomalyDetectionBlock"))
-          return "DuckDuckGo rate limited. Try again in a moment.";
-
-        // Step 3: Parse results from JSONP-like response
-        const match = /DDG\.pageLayout\.load\('d',(\[.+?\])\);DDG\.duckbar\.load/.exec(body);
-        if (!match) return "DuckDuckGo: no results found";
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const raw = JSON.parse(match[1].replace(/\t/g, "    ")) as any[];
-        const results = raw
-          .filter((r) => r.u && !("n" in r))
-          .slice(0, count)
-          .map((r) => ({
-            title: r.t,
-            url: r.u,
-            description: (r.a || "").replace(/<\/?b>/g, ""),
-          }));
-
-        return JSON.stringify(results);
-      }),
-    });
-  }
-
-  if (toolTypes.has("web_search_tavily")) {
-    const tavilyKey = env?.TAVILY_API_KEY;
-    tools.web_search = tool({
-      description:
-        "Search the web for information. Returns relevant search results.",
-      inputSchema: z.object({
-        query: z.string().describe("Search query"),
-        max_results: z.number().optional().describe("Max results (default 5)"),
-      }),
-      execute: safe(async ({ query, max_results }) => {
-        if (!tavilyKey)
-          return "web_search unavailable: TAVILY_API_KEY not configured";
-        const res = await fetch("https://api.tavily.com/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            api_key: tavilyKey,
-            query,
-            max_results: max_results || 5,
-          }),
-        });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const data = (await res.json()) as any;
-        return JSON.stringify(
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          data.results?.map((r: any) => ({
-            title: r.title,
-            url: r.url,
-            snippet: r.content,
-          })) || data
+  // Backend is a deployment/agent choice (web-search.ts). A legacy
+  // `web_search_<provider>` tool type counts as enabling the tool, matching
+  // the old behaviour where `web_search_tavily` alone produced it.
+  const webSearchOverride = webSearchToolTypeOverride(agentConfig);
+  if (enabled.has("web_search") || webSearchOverride) {
+    const webSearchEnv: WebSearchEnv & { nativeActive?: boolean } = {
+      ...(env?.TAVILY_API_KEY ? { TAVILY_API_KEY: env.TAVILY_API_KEY } : {}),
+      ...(env?.webSearch ?? {}),
+    };
+    const filters = readWebSearchFilters(agentConfig);
+    const selection = resolveWebSearchProvider(webSearchEnv, agentConfig);
+    let provider = selection.provider;
+    if (provider === "native") {
+      if (!webSearchEnv.nativeActive) {
+        // Native was asked for but the runtime could not host it (non
+        // first-party endpoint, or a caller that never wired the runtime).
+        // Fall back to a keyed backend so the agent still has a search
+        // tool rather than silently none.
+        provider = keyedWebSearchFallback(webSearchEnv);
+        console.warn(
+          `[web_search] native search unavailable for this model provider; falling back to ${provider}`,
         );
-      }),
-    });
+      }
+    }
+    if (provider !== "native") {
+      const run = createWebSearchExecutor(provider, webSearchEnv, filters);
+      tools.web_search = tool({
+        description: webSearchToolDescription(provider),
+        inputSchema: z.object({
+          query: z.string().describe("Search query"),
+          max_results: z.number().optional().describe("Max results (default 5)"),
+        }),
+        execute: safe(async ({ query, max_results }) => run(query, max_results || 5)),
+      });
+    }
+    // provider === "native" with nativeActive: no function tool on purpose —
+    // the pi runtime injects the provider's server tool into the request.
   }
 
   // Custom tools — convert JSON Schema to Zod for proper parameter definitions

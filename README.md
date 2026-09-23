@@ -442,7 +442,7 @@ The `agent_toolset_20260401` provides:
 | `glob` | Find files matching a pattern |
 | `grep` | Search file contents with regex |
 | `web_fetch` | URL → markdown via Workers AI; auto-summarized when `agent.aux_model` is set, raw saved to `/workspace/.web/` |
-| `web_search` | Web search via Tavily API (requires `TAVILY_API_KEY`) |
+| `web_search` | Web search. Backend chosen by `WEB_SEARCH_PROVIDER`: `tavily`, `brave`, `exa`, `serper` (keyed HTTP APIs), `native` (Anthropic / OpenAI hosted search on first-party model cards), or the keyless `ddg` default. Unset = first provider with a key, else `ddg` |
 | `schedule` / `cancel_schedule` / `list_schedules` | Cron-style self-wakeup for long-running agents |
 | `browser` (opt-in) | Headless browser session — navigate, click, screenshot. Opt-in via `tools: [{ name: "browser", enabled: true }]` so the default-tool list nudges agents toward cheaper `web_fetch` |
 
@@ -730,7 +730,8 @@ The variables that gate boot and at-rest safety:
 | `ANTHROPIC_BASE_URL` | No | Override for Anthropic-compatible proxies. |
 | `PUBLIC_BASE_URL` | No (dev) / Yes (prod) | Cookie domain + OAuth redirect base. Defaults to `*` trusted-origins — only safe for local dev. |
 | `SANDBOX_PROVIDER` | **Yes** (Node/Fly) | Explicit isolated backend: `litebox` (local Firecracker), `daytona`, `e2b`, `boxrun`, or `belljar` (Cloudflare sandbox containers on your own Docker/Podman host, `BELLJAR_URL` + `BELLJAR_TOKEN`). Deployable entrypoints have no subprocess fallback. |
-| `TAVILY_API_KEY` | No | Backend for the `web_search` built-in tool. |
+| `WEB_SEARCH_PROVIDER` | No | Backend for the `web_search` built-in tool: `ddg` (default, keyless DuckDuckGo scrape — rate limited from shared egress IPs), `tavily`, `brave`, `exa`, `serper`, or `native` (the model provider's own search tool; only Anthropic `claude-*` and OpenAI cards on the vendor endpoint, others fall back to a keyed provider). Unset picks the first keyed provider whose key is present. |
+| `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `EXA_API_KEY` / `SERPER_API_KEY` | No | Credentials for the keyed `web_search` backends. |
 
 Full list (integrations OAuth credentials, Postgres URL, sandbox tunables, memory-bucket config, Google sign-in, etc.) — see **[docs.openma.dev/reference/configuration](https://docs.openma.dev/reference/configuration/)** and `.env.example` / `.dev.vars.example`.
 

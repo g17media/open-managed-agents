@@ -154,7 +154,7 @@ The `agent_toolset_20260401` provides 8 tools designed for general-purpose agent
 | **glob** | File search | Pattern matching (e.g. `**/*.ts`). Returns sorted file list. |
 | **grep** | Content search | Regex search across files. Returns matching lines with context. |
 | **web_fetch** | URL → markdown | Fetches a URL, converts HTML/PDF/DOCX/etc. to markdown via Workers AI `env.AI.toMarkdown()`. When `agent.aux_model` is set, large pages (>5KB) are summarized by the aux model and the full markdown is offloaded to `/workspace/.web/<sha>.md` (readable via the `read` tool with offset/limit). Falls back to raw curl with an explicit warning if extraction fails. |
-| **web_search** | Web search | Search via Tavily API. Requires `TAVILY_API_KEY`. |
+| **web_search** | Web search | Backend set by `WEB_SEARCH_PROVIDER` (`ddg` default, `tavily`, `brave`, `exa`, `serper`, `native`); keyed providers need their `*_API_KEY`. `native` drops the function tool and the pi runtime splices the provider's server tool into the request (`apps/agent/src/harness/web-search.ts`). Agent `allowed_domains` / `blocked_domains` / `user_location` on the `web_search` config entry are forwarded or post-filtered on every backend. |
 
 ### Tool Configuration
 

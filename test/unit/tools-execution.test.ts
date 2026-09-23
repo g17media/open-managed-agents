@@ -600,6 +600,39 @@ describe("Built-in tool execution", () => {
     expect(tools.web_search).toBeDefined();
     expect(typeof tools.web_search).toBe("object");
   });
+
+  it("web_search backend follows WEB_SEARCH_PROVIDER and names the engine to the model", async () => {
+    const sandbox = new TestSandbox();
+    const brave = await buildTools(makeAgentConfig(), sandbox, {
+      webSearch: { WEB_SEARCH_PROVIDER: "brave", BRAVE_SEARCH_API_KEY: "bk" },
+    });
+    expect(brave.web_search.description).toContain("Brave Search");
+    // Key detection alone (no explicit provider) picks the first keyed backend.
+    const exa = await buildTools(makeAgentConfig(), sandbox, { webSearch: { EXA_API_KEY: "ek" } });
+    expect(exa.web_search.description).toContain("Exa");
+    const ddg = await buildTools(makeAgentConfig(), sandbox, {});
+    expect(ddg.web_search.description).toContain("DuckDuckGo");
+  });
+
+  it("web_search is omitted when the runtime hosts native search, and falls back when it cannot", async () => {
+    const sandbox = new TestSandbox();
+    const native = await buildTools(makeAgentConfig(), sandbox, {
+      webSearch: { WEB_SEARCH_PROVIDER: "native", nativeActive: true },
+    });
+    expect(native.web_search).toBeUndefined();
+    expect(native.web_fetch).toBeDefined();
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const fallback = await buildTools(makeAgentConfig(), sandbox, {
+        webSearch: { WEB_SEARCH_PROVIDER: "native", TAVILY_API_KEY: "t" },
+      });
+      expect(fallback.web_search.description).toContain("Tavily");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("falling back to tavily"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 // ============================================================

@@ -112,7 +112,7 @@ Required CI vars/secrets (already used by `deploy.yml`):
 - `secrets.API_KEY`, `secrets.ANTHROPIC_API_KEY`, `secrets.BETTER_AUTH_SECRET`,
   `secrets.INTEGRATIONS_INTERNAL_SECRET`, `secrets.PLATFORM_ROOT_SECRET`,
   `secrets.INTERNAL_TOKEN`
-- Optional: `secrets.ANTHROPIC_BASE_URL`, `secrets.TAVILY_API_KEY`
+- Optional: `secrets.ANTHROPIC_BASE_URL`, `secrets.WEB_SEARCH_PROVIDER`, `secrets.TAVILY_API_KEY` (or `BRAVE_SEARCH_API_KEY` / `EXA_API_KEY` / `SERPER_API_KEY`)
 
 Lanes use Cloudflare's published always-pass Turnstile keys (site
 `1x00000000000000000000AA` / secret `1x0000000000000000000000000000000AA`)

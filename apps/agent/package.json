@@ -10,6 +10,7 @@
     "./harness/builtins": "./src/harness/builtins.ts",
     "./harness/interface": "./src/harness/interface.ts",
     "./harness/tools": "./src/harness/tools.ts",
+    "./harness/web-search": "./src/harness/web-search.ts",
     "./harness/tool-timing": "./src/harness/tool-timing.ts",
     "./harness/registry": "./src/harness/registry.ts",
     "./harness/provider": "./src/harness/provider.ts",

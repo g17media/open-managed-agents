@@ -103,6 +103,7 @@ interface HarnessContext {
     ANTHROPIC_API_KEY: string;
     ANTHROPIC_BASE_URL?: string;
     TAVILY_API_KEY?: string;
+    WEB_SEARCH_PROVIDER?: string; // + BRAVE_SEARCH_API_KEY / EXA_API_KEY / SERPER_API_KEY
     CONFIG_KV?: KVNamespace;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
   };

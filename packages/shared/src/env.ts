@@ -149,6 +149,12 @@ export interface Env {
    *  (TODO(llm-logging): add per-tenant flag in tenant config). */
   LLM_LOGS_DISABLED?: string;
   TAVILY_API_KEY?: string;
+  /** Web search backend for the built-in `web_search` tool: ddg (default),
+   *  tavily, brave, exa, serper, or native (the model provider's own tool). */
+  WEB_SEARCH_PROVIDER?: string;
+  BRAVE_SEARCH_API_KEY?: string;
+  EXA_API_KEY?: string;
+  SERPER_API_KEY?: string;
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   GITHUB_TOKEN?: string;
