@@ -248,6 +248,62 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
     expect(projectionAttempts).toBe(1);
   });
 
+  it("keeps the runner's own terminal pair when the harness fails with a healthy projection", async () => {
+    // The runner emits session.error + session.status_idle itself before it
+    // rethrows a harness failure; the driver must not add a second pair.
+    let emit: ((frame: unknown) => Promise<void>) | undefined;
+    const projectionCalls: RecordSessionRuntimeEventsCommand[] = [];
+    const engine: RuntimeEngine = {
+      start: async (_input, output) => { emit = output; },
+      stop: async () => {},
+      accept: async () => {
+        await emit?.({
+          id: "event_runner_error",
+          type: "session.error",
+          error: { type: "unknown_error", message: "model exploded", retry_status: "terminal" },
+          processed_at: "2026-08-26T01:00:00.000Z",
+        });
+        await emit?.({
+          id: "event_runner_idle",
+          type: "session.status_idle",
+          stop_reason: { type: "end_turn" },
+          processed_at: "2026-08-26T01:00:01.000Z",
+        });
+        throw new Error("model exploded");
+      },
+      archiveThread: async () => {},
+    };
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine,
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async (command) => {
+          projectionCalls.push(structuredClone(command));
+          return { type: "recorded", session };
+        },
+      }),
+    });
+
+    await expect(driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      events: [{
+        id: "event_input_healthy_failure",
+        type: "user.message",
+        content: [{ type: "text", text: "Run" }],
+        processedAt: "2026-08-26T00:59:00.000Z",
+      }],
+      executionFence,
+    })).rejects.toThrow("model exploded");
+
+    expect(projectionCalls.map((command) => command.events.map((event) => event.type))).toEqual([
+      ["session.error"],
+      ["session.status_idle"],
+    ]);
+  });
+
   it("projects a terminal error and idle state when a turn's output projection fails", async () => {
     // Regression: a turn whose output the projection refused (event-id
     // collision) settled the execution as failed but left

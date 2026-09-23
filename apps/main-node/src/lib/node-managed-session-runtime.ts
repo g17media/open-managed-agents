@@ -272,6 +272,8 @@ export class DefaultNodeManagedSessionRuntimeDriver
   private readonly outputChains = new ScopedSessionMap<Promise<void>>();
   private readonly starts = new ScopedSessionMap<Promise<void>>();
   private readonly executionFences = new ScopedSessionMap<SessionExecutionFence>();
+  /** Sessions whose current accept() already committed a `session.status_idle`. */
+  private readonly idleProjected = new ScopedSessionMap<true>();
   private readonly realtime: SessionRealtimeHub;
 
   constructor(
@@ -308,6 +310,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
       await this.outputChains.get(input);
     } finally {
       this.starts.delete(input);
+      this.idleProjected.delete(input);
       this.closeSession(input);
     }
   }
@@ -348,6 +351,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
       throw new Error("Session execution fence scope does not match runtime input");
     }
     if (fence !== undefined) this.executionFences.set(input, fence);
+    this.idleProjected.delete(input);
     try {
       try {
         await this.start({
@@ -369,21 +373,36 @@ export class DefaultNodeManagedSessionRuntimeDriver
         });
         await this.outputChains.get(input);
       } catch (error) {
-        // A turn that dies after start (harness throw, or a rejected output
-        // projection such as an event-id collision) used to leave the
-        // session with `session.status_running` as its last visible event:
-        // the worker settled the execution as failed, but nothing wrote a
-        // terminal event, so clients saw a turn that never ended and the
-        // status stayed `running` until the next restart (2026-09-23).
-        // Record the failure the same way a start failure is recorded.
-        // A lost fence is the one case to skip: another owner holds the
-        // execution now, and the projection would (rightly) refuse us.
-        if (!(error instanceof ExecutionFenceLostError)) {
+        // The runner closes an ordinary harness failure itself: it emits
+        // `session.error` and `session.status_idle` and drains them before
+        // rethrowing, so by the time the error reaches us the pair has
+        // usually been projected. The exception is a poisoned output chain
+        // (a projection rejection such as an event-id collision): delivery
+        // stops at the rejected frame, the runner's pair never lands, the
+        // worker settles the execution as failed, and the session keeps
+        // `session.status_running` as its last visible event until the next
+        // restart (2026-09-23). Repair only that case, keyed on whether an
+        // idle for this accept was committed, so a healthy failure does not
+        // get a duplicate pair. A lost fence is skipped as well: another
+        // owner holds the execution and the projection would refuse us.
+        if (
+          !(error instanceof ExecutionFenceLostError) &&
+          !this.idleProjected.has(input)
+        ) {
           try {
             await this.projectTerminalFailure(input, error);
-          } catch {
-            // The original failure is the one that must surface; a second
-            // failure while recording it must not mask it.
+          } catch (repairError) {
+            // The original failure is the one that must surface, but a
+            // failed repair leaves the session looking live, so it must be
+            // visible to operators rather than silently dropped.
+            if (!(repairError instanceof ExecutionFenceLostError)) {
+              console.warn(
+                `[node-managed-session-runtime] could not record terminal events for `
+                + `${input.workspaceId}/${input.sessionId}`
+                + ` (execution ${fence?.executionId ?? "none"}): `
+                + (repairError instanceof Error ? repairError.message : String(repairError)),
+              );
+            }
           }
         }
         throw error;
@@ -483,7 +502,14 @@ export class DefaultNodeManagedSessionRuntimeDriver
           events: [event],
           ...(executionFence !== undefined && { executionFence }),
         });
-        if (projected.type === "recorded") break;
+        if (projected.type === "recorded") {
+          // Lets accept() tell a turn the runner closed itself from one whose
+          // terminal events never got through.
+          if (event.type === "session.status_idle") {
+            this.idleProjected.set({ workspaceId, sessionId }, true);
+          }
+          break;
+        }
         if (projected.type === "not_found") return;
         if (projected.type === "execution_fence_lost") {
           throw new ExecutionFenceLostError(
