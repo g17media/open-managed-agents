@@ -3,6 +3,7 @@ import {
   type SandboxExecutor,
 } from "@open-managed-agents/sandbox";
 import { randomUUID } from "node:crypto";
+import { getPendingSessionToolUses } from "@open-managed-agents/managed-agents-application";
 import type {
   HarnessContext,
   HarnessInterface,
@@ -298,24 +299,25 @@ export class DefaultNodeManagedSessionRunner
     let runFailed = false;
     try {
       await this.dependencies.prepareSession?.({ workspaceId: input.workspaceId, session: input.session, environment: input.environment, sandbox });
-      if (event.type === "user.tool_confirmation") {
+      for (const confirmation of input.events) {
+        if (confirmation.type !== "user.tool_confirmation") continue;
         const toolUse = findLastMatching(
-          input.historyEvents,
+          getPendingSessionToolUses(runtime.getApplicationHistoryEvents(), { includeConfirmed: true, agentTools: input.session.agent.tools }),
           (candidate): candidate is ManagedNodeConfirmableToolUse =>
             (candidate.type === "agent.tool_use" ||
               candidate.type === "agent.mcp_tool_use") &&
-            candidate.id === event.toolUseId,
+            candidate.id === confirmation.toolUseId,
         );
         if (toolUse === undefined) {
           throw new Error(
-            `Tool use ${event.toolUseId} was not found in session history`,
+            `Tool use ${confirmation.toolUseId} is not pending confirmation`,
           );
         }
-        const result = event.result === "deny"
+        const result = confirmation.result === "deny"
           ? {
               content: [{
                 type: "text" as const,
-                text: `Denied: ${event.denyMessage ?? "Tool execution was denied by the user."}`,
+                text: `Denied: ${confirmation.denyMessage ?? "Tool execution was denied by the user."}`,
               }],
               isError: true,
             }
@@ -324,7 +326,7 @@ export class DefaultNodeManagedSessionRunner
               session: input.session,
               environment: input.environment,
               sandbox,
-              confirmation: event,
+              confirmation,
               toolUse,
               abortSignal: abortController.signal,
             });
@@ -342,6 +344,7 @@ export class DefaultNodeManagedSessionRunner
               },
         );
       }
+      if (getPendingSessionToolUses(runtime.getApplicationHistoryEvents(), { includeConfirmed: true, agentTools: input.session.agent.tools }).length > 0) return;
       const context = {
         workspaceId: input.workspaceId,
         session: input.session,
@@ -414,6 +417,7 @@ export class DefaultNodeManagedSessionRunner
         await this.dependencies.buildHarness().run(harnessContext);
       };
       await runHarness();
+      if (getPendingSessionToolUses(runtime.getApplicationHistoryEvents(), { includeConfirmed: true, agentTools: input.session.agent.tools }).length > 0) return;
       if (event.type === "user.define_outcome") {
         const maxIterations = Math.min(
           20,
@@ -484,6 +488,7 @@ export class DefaultNodeManagedSessionRunner
           if (!needsRevision || result === "max_iterations_reached") break;
           runtime.appendOutcomeFeedback(iteration, evaluation.explanation);
           await runHarness();
+          if (getPendingSessionToolUses(runtime.getApplicationHistoryEvents(), { includeConfirmed: true, agentTools: input.session.agent.tools }).length > 0) break;
         }
       }
     } catch (error) {
@@ -568,9 +573,15 @@ export class DefaultNodeManagedSessionRunner
           },
         });
       }
+      const pending = getPendingSessionToolUses(runtime.getApplicationHistoryEvents(), { includeConfirmed: true, agentTools: input.session.agent.tools });
+      const confirmations = pending.filter((call) => call.type !== "agent.custom_tool_use");
       runtime.broadcastProducedEvent({
         type: "session.status_idle",
-        stopReason: { type: "end_turn" },
+        stopReason: pending.length === 0 ? { type: "end_turn" } : {
+          type: "requires_action",
+          actionType: confirmations.length > 0 ? "tool_confirmation" : "custom_tool_result",
+          eventIds: (confirmations.length > 0 ? confirmations : pending).map((call) => call.id),
+        },
       });
       try {
         await runtime.drain();

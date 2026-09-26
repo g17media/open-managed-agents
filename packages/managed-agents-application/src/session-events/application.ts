@@ -17,6 +17,8 @@ import type {
   SessionExecutionContextSourcePort,
 } from "@open-managed-agents/session-runtime-contract/context";
 import { sessionInitialEventId, type SessionBootstrapEvent } from "../domain/session-bootstrap";
+import { getPendingSessionToolUses } from "./pending-tool-uses";
+import type { SessionEventView } from "../domain/session-event";
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -252,6 +254,29 @@ export class SessionEventsApplicationService
       }
       if (command.expectedRevision !== undefined && command.expectedRevision !== execution.revision) {
         return { type: "version_conflict", message: "Session changed after input validation; retrieve the session before retrying" };
+      }
+      const confirmations = events.filter((event) => event.type === "user.tool_confirmation");
+      if (confirmations.length > 0) {
+        const history: SessionEventView[] = [];
+        let position: { processedAt: string; eventId: string } | undefined;
+        for (;;) {
+          const page = await this.dependencies.store.list({
+            workspaceId: this.dependencies.workspaceId, sessionId: command.sessionId,
+            order: "asc", limit: 100, ...(position && { position }),
+          });
+          history.push(...page);
+          if (page.length < 100) break;
+          const last = page.at(-1)!;
+          position = { processedAt: last.processedAt!, eventId: last.id };
+        }
+        const pending = new Set(getPendingSessionToolUses(history, { agentTools: execution.session.agent.tools })
+          .filter((call) => call.type !== "agent.custom_tool_use")
+          .map((call) => call.id));
+        for (const confirmation of confirmations) {
+          if (!pending.delete(confirmation.toolUseId)) {
+            return { type: "invalid_request", message: `Tool use ${confirmation.toolUseId} is not pending confirmation` };
+          }
+        }
       }
       const appended = await this.dependencies.store.append({
         workspaceId: this.dependencies.workspaceId,

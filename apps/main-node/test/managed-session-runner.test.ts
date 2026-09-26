@@ -818,6 +818,82 @@ describe("DefaultNodeManagedSessionRunner", () => {
     ]);
   });
 
+  it.each(["ask", "allow", "custom"] as const)("reports the correct stop reason for %s tool calls", async (kind) => {
+    const { DefaultNodeManagedSessionRunner } = await import("../src/lib/node-managed-session-runner.js");
+    let nextId = 0;
+    const runner = new DefaultNodeManagedSessionRunner({
+      buildSandbox: async () => ({} as SandboxExecutor), buildModel: async () => ({} as never), buildTools: async () => ({}),
+      buildHarness: () => ({ run: async ({ runtime }) => {
+        for (const id of ["tool_b", "tool_a"]) {
+          runtime.broadcast(kind === "custom"
+            ? { id, type: "agent.custom_tool_use", name: "deploy", input: {} }
+            : { id, type: "agent.tool_use", name: "bash", input: {}, evaluated_permission: kind });
+        }
+      } }), buildHarnessContext: async (input) => input as never,
+      confirmedTools: { execute: async () => { throw new Error("unexpected"); } },
+      outcomes: { evaluate: async () => { throw new Error("unexpected"); } },
+      clock: { now: () => new Date("2026-08-26T04:00:00Z") }, ids: { nextEventId: () => `pause_${++nextId}` },
+    });
+    const base = { workspaceId: "workspace_01", sessionId: session.id, session, environment, initialEvents: [] };
+    await runner.start(base);
+    const output: unknown[] = [];
+    await runner.accept({ ...base, historyEvents: [], events: [{ id: "message", type: "user.message", content: [{ type: "text", text: "work" }], processedAt: session.updatedAt }], output: async (frame) => { output.push(frame); } });
+    expect(output.at(-1)).toMatchObject({ type: "session.status_idle", stop_reason: kind === "allow" ? { type: "end_turn" } : { type: "requires_action", action_type: kind === "custom" ? "custom_tool_result" : "tool_confirmation", event_ids: ["tool_b", "tool_a"] } });
+  });
+
+  it("keeps ordered built-in and MCP confirmations pending until all are answered", async () => {
+    const { DefaultNodeManagedSessionRunner } = await import("../src/lib/node-managed-session-runner.js");
+    const run = vi.fn(async () => {});
+    const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "done" }] }));
+    let nextId = 0;
+    const runner = new DefaultNodeManagedSessionRunner({
+      buildSandbox: async () => ({} as SandboxExecutor),
+      buildModel: async () => ({} as never), buildTools: async () => ({}),
+      buildHarness: () => ({ run }), buildHarnessContext: async (input) => input as never,
+      confirmedTools: { execute }, outcomes: { evaluate: async () => { throw new Error("unexpected"); } },
+      clock: { now: () => new Date("2026-08-26T04:00:00Z") },
+      ids: { nextEventId: () => `event_pending_${++nextId}` },
+    });
+    const base = { workspaceId: "workspace_01", sessionId: session.id, session, environment, initialEvents: [] };
+    await runner.start(base);
+    const history: SessionEventView[] = [
+      { id: "ask_bash", type: "agent.tool_use", name: "bash", input: {}, evaluatedPermission: "ask", processedAt: session.createdAt },
+      { id: "ask_mcp", type: "agent.mcp_tool_use", name: "search", mcpServerName: "server", input: {}, evaluatedPermission: "ask", processedAt: session.createdAt },
+    ];
+    const output: unknown[] = [];
+    const first = { id: "confirm_bash", type: "user.tool_confirmation" as const, toolUseId: "ask_bash", result: "deny" as const, denyMessage: "No shell", processedAt: session.updatedAt };
+    await runner.accept({ ...base, historyEvents: [...history, first], events: [first], output: async (frame) => { output.push(frame); } });
+    expect(run).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(output.at(-1)).toMatchObject({ type: "session.status_idle", stop_reason: { type: "requires_action", action_type: "tool_confirmation", event_ids: ["ask_mcp"] } });
+    expect(output).toContainEqual(expect.objectContaining({ type: "agent.tool_result", is_error: true, content: [{ type: "text", text: "Denied: No shell" }] }));
+    const second = { ...first, id: "confirm_mcp", toolUseId: "ask_mcp", result: "allow" as const };
+    await runner.accept({ ...base, historyEvents: [...history, first, { id: "result_bash", type: "agent.tool_result", toolUseId: "ask_bash", processedAt: session.updatedAt }, second], events: [second], output: async (frame) => { output.push(frame); } });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(output.at(-1)).toMatchObject({ stop_reason: { type: "end_turn" } });
+  });
+
+  it("handles every confirmation in an accepted batch", async () => {
+    const { DefaultNodeManagedSessionRunner } = await import("../src/lib/node-managed-session-runner.js");
+    const run = vi.fn(async () => {});
+    const execute = vi.fn(async () => ({}));
+    let nextId = 0;
+    const runner = new DefaultNodeManagedSessionRunner({
+      buildSandbox: async () => ({} as SandboxExecutor), buildModel: async () => ({} as never), buildTools: async () => ({}),
+      buildHarness: () => ({ run }), buildHarnessContext: async (input) => input as never,
+      confirmedTools: { execute }, outcomes: { evaluate: async () => { throw new Error("unexpected"); } },
+      clock: { now: () => new Date("2026-08-26T04:00:00Z") }, ids: { nextEventId: () => `batch_${++nextId}` },
+    });
+    const base = { workspaceId: "workspace_01", sessionId: session.id, session, environment, initialEvents: [] };
+    await runner.start(base);
+    const calls: SessionEventView[] = ["one", "two"].map(id => ({ id, type: "agent.tool_use", name: "bash", input: {}, evaluatedPermission: "ask", processedAt: session.createdAt }));
+    const confirmations = calls.map(call => ({ id: `confirm_${call.id}`, type: "user.tool_confirmation" as const, toolUseId: call.id, result: "allow" as const, processedAt: session.updatedAt }));
+    await runner.accept({ ...base, historyEvents: [...calls, ...confirmations], events: confirmations, output: async () => {} });
+    expect(execute.mock.calls).toHaveLength(2);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
   it("runs and evaluates a defined outcome through official spans", async () => {
     const modulePath = "../src/lib/node-managed-session-runner.ts";
     const runnerModule = await import(/* @vite-ignore */ modulePath) as {

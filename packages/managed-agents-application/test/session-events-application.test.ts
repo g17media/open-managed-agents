@@ -112,6 +112,41 @@ const executionEnvironment: Environment = {
 };
 
 describe("SessionEventsApplicationService", () => {
+  it.each(["missing", "allowed", "answered", "confirmed", "custom", "duplicate"])("rejects %s tool confirmations before persistence", async (kind) => {
+    const store = new MemorySessionEventStore();
+    const call = { id: "tool", type: kind === "custom" ? "agent.custom_tool_use" : "agent.tool_use", name: "bash", input: {}, evaluatedPermission: kind === "allowed" ? "allow" : "ask", processedAt: activeSession.createdAt };
+    const history = kind === "missing" ? [] : [call];
+    if (kind === "answered") history.push({ id: "result", type: "agent.tool_result", toolUseId: "tool", processedAt: activeSession.createdAt } as never);
+    if (kind === "confirmed") history.push({ id: "confirmed", type: "user.tool_confirmation", toolUseId: "tool", result: "allow", processedAt: activeSession.createdAt } as never);
+    store.list = async () => history as never;
+    let nextId = 0;
+    const service = new SessionEventsApplicationService({
+      workspaceId: "workspace_01", store,
+      sessions: { find: async () => activeSession },
+      execution: { find: async () => ({ session: activeSession, environment: executionEnvironment, revision: 1 }) },
+      stream: emptySessionEventStream, dispatch: silentEventDispatch,
+      clock: { now: () => new Date("2026-09-07T00:00:00Z") },
+      ids: { nextEventId: () => `confirm_${++nextId}`, nextOutcomeId: () => "outcome" },
+    });
+    const confirmation = { type: "user.tool_confirmation" as const, toolUseId: "tool", result: "allow" as const };
+    expect(await service.sendSessionEvents({ sessionId: activeSession.id, events: kind === "duplicate" ? [confirmation, confirmation] : [confirmation] })).toMatchObject({ type: "invalid_request" });
+    expect(store.appendCalls).toHaveLength(0);
+  });
+
+  it.each(["agent.tool_use", "agent.mcp_tool_use"] as const)("accepts a pending %s confirmation", async (type) => {
+    const store = new MemorySessionEventStore();
+    store.list = async () => [{ id: "tool", type, name: "read", mcpServerName: "docs", input: {}, evaluatedPermission: "ask", processedAt: activeSession.createdAt }] as never;
+    const service = new SessionEventsApplicationService({
+      workspaceId: "workspace_01", store, sessions: { find: async () => activeSession },
+      execution: { find: async () => ({ session: activeSession, environment: executionEnvironment, revision: 1 }) },
+      stream: emptySessionEventStream, dispatch: silentEventDispatch,
+      clock: { now: () => new Date("2026-09-07T00:00:00Z") },
+      ids: { nextEventId: () => "confirmation", nextOutcomeId: () => "outcome" },
+    });
+    expect(await service.sendSessionEvents({ sessionId: activeSession.id, events: [{ type: "user.tool_confirmation", toolUseId: "tool", result: "allow" }] })).toMatchObject({ type: "accepted" });
+    expect(store.appendCalls).toHaveLength(1);
+  });
+
   it("persists an explicit empty vault set before dispatching the interaction", async () => {
     const store = new MemorySessionEventStore();
     const session = { ...activeSession, vaultIds: ["old_vault"] };

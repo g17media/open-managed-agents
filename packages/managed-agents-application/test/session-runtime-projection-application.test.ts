@@ -32,6 +32,20 @@ const idleSession: Session = {
 };
 
 describe("SessionRuntimeProjectionApplicationService", () => {
+  it("persists the idle stop reason and clears it when execution resumes", async () => {
+    let stored = structuredClone(idleSession);
+    const service = new SessionRuntimeProjectionApplicationService({ workspaceId: "workspace_01", persistence: {
+      findCurrent: async () => ({ session: stored, revision: 1 }),
+      project: async ({ next }) => { stored = structuredClone(next); return { type: "projected", record: { session: stored, revision: 2 } }; },
+    } });
+    const stopReason = { type: "requires_action" as const, actionType: "tool_confirmation" as const, eventIds: ["tool_b", "tool_a"] };
+    await service.recordSessionRuntimeEvents({ sessionId: stored.id, events: [{ id: "idle", type: "session.status_idle", processedAt: stored.updatedAt, stopReason }] });
+    expect(stored).toMatchObject({ status: "idle", stopReason });
+    await service.recordSessionRuntimeEvents({ sessionId: stored.id, events: [{ id: "running", type: "session.status_running", processedAt: stored.updatedAt }] });
+    expect(stored.status).toBe("running");
+    expect(stored).not.toHaveProperty("stopReason");
+  });
+
   it("atomically projects official runtime history and lifecycle state", async () => {
     const writes: object[] = [];
     const service = new SessionRuntimeProjectionApplicationService({

@@ -155,7 +155,7 @@ export type AgentMessageContentBlock = TextContentBlock | RedactedContentBlock;
 
 export type SessionStopReason =
   | { type: "end_turn" }
-  | { type: "requires_action"; eventIds: string[] }
+  | { type: "requires_action"; eventIds: string[]; actionType?: "tool_confirmation" | "custom_tool_result" }
   | { type: "retries_exhausted" }
   | { type: "budget_reached" };
 
@@ -220,6 +220,7 @@ export type HistorySessionEvent =
       name: string;
       processedAt: string;
       evaluatedPermission?: "allow" | "ask" | "deny";
+      evaluation?: { type: "always_allow" | "always_ask" };
       sessionThreadId?: string | null;
     }
   | {
@@ -270,6 +271,7 @@ export type HistorySessionEvent =
       name: string;
       processedAt: string;
       evaluatedPermission?: "allow" | "ask" | "deny";
+      evaluation?: { type: "always_allow" | "always_ask" };
       sessionThreadId?: string | null;
     }
   | {

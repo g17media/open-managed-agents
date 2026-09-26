@@ -398,3 +398,13 @@ describe("recoverInterruptedState", () => {
     });
   });
 });
+
+it("does not synthesize results for permission-gated tools awaiting the client", async () => {
+  const f = newFixture();
+  f.log.append({ type: "agent.tool_use", id: "ask_builtin", name: "bash", input: {}, evaluated_permission: "ask" });
+  f.log.append({ type: "agent.mcp_tool_use", id: "ask_mcp", name: "mcp__test__echo", mcp_server_name: "test", input: {}, evaluated_permission: "ask" });
+  const report = await recoverInterruptedState(f.streams, f.log);
+  expect(report.injectedToolResults).toEqual([]);
+  expect(report.injectedMcpToolResults).toEqual([]);
+  expect(f.allEvents()).toHaveLength(2);
+});

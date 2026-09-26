@@ -409,9 +409,9 @@ function fromSessionUsage(usage: SessionUsageView): object {
   };
 }
 
-function fromSessionStopReason(reason: SessionStopReason): object {
+export function fromSessionStopReason(reason: SessionStopReason): object {
   return reason.type === "requires_action"
-    ? { type: reason.type, event_ids: reason.eventIds }
+    ? { type: reason.type, event_ids: reason.eventIds, ...(reason.actionType !== undefined && { action_type: reason.actionType }) }
     : { type: reason.type };
 }
 
@@ -522,6 +522,7 @@ export function toSessionEventResponse(event: SessionEventView): object {
         ...(event.evaluatedPermission !== undefined && {
           evaluated_permission: event.evaluatedPermission,
         }),
+        ...(event.evaluation !== undefined && { evaluation: event.evaluation }),
         ...(event.sessionThreadId !== undefined && {
           session_thread_id: event.sessionThreadId,
         }),
@@ -621,6 +622,7 @@ export function toSessionEventResponse(event: SessionEventView): object {
         ...(event.evaluatedPermission !== undefined && {
           evaluated_permission: event.evaluatedPermission,
         }),
+        ...(event.evaluation !== undefined && { evaluation: event.evaluation }),
         ...(event.sessionThreadId !== undefined && {
           session_thread_id: event.sessionThreadId,
         }),

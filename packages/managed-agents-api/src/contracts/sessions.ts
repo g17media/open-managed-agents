@@ -18,6 +18,7 @@ import {
   userMessageEventInputSchema,
 } from "./session-event-inputs";
 import { sessionResourceResponseSchema } from "./session-resources";
+import { stopReasonSchema } from "./session-stop-reason";
 
 type OfficialSessionCreateBody = Omit<SessionCreateParams, "betas">;
 type OfficialSessionAgent = Exclude<OfficialSessionCreateBody["agent"], string>;
@@ -237,6 +238,7 @@ export const sessionResponseSchema = z
     resources: z.array(sessionResourceResponseSchema),
     stats: sessionStatsResponseSchema,
     status: z.enum(["rescheduling", "running", "idle", "terminated"]),
+    stop_reason: stopReasonSchema.optional(),
     title: z.string().nullable(),
     type: z.literal("session"),
     updated_at: z.string(),

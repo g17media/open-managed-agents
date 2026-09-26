@@ -26,6 +26,7 @@ import {
   type PiCompactionPolicy,
   type PiCompactionResult,
 } from "./pi-compaction";
+import { toolPermissionEvaluation } from "./tools";
 import { withPiRuntimeRequestOptions } from "./pi-provider";
 
 const EMPTY_USAGE: Usage = {
@@ -318,12 +319,21 @@ async function translatePiEvent(
       } else if (block.type === "toolCall") {
         const streamId = state.toolIds.get(index);
         if (streamId) await runtime.broadcastToolInputEnd(streamId, "completed");
-        runtime.broadcast({
-          type: "agent.tool_use",
-          id: block.id,
-          name: block.name,
-          input: block.arguments,
-        });
+        const common = { id: block.id, name: block.name, input: block.arguments };
+        if (ctx.tools[block.name]?.metadata?.openmaCustom === true) {
+          runtime.broadcast({ type: "agent.custom_tool_use", ...common });
+        } else if (block.name.startsWith("mcp__")) {
+          const registered = ctx.tools[block.name] as { metadata?: { serverName?: string } };
+          runtime.broadcast({
+            type: "agent.mcp_tool_use", ...common,
+            mcp_server_name: registered?.metadata?.serverName ?? block.name.slice(5).split("__")[0],
+            ...toolPermissionEvaluation(ctx.agent, block.name),
+          });
+        } else if (ctx.agent.tools?.some(tool => tool.type === "custom" && "name" in tool && tool.name === block.name)) {
+          runtime.broadcast({ type: "agent.custom_tool_use", ...common });
+        } else {
+          runtime.broadcast({ type: "agent.tool_use", ...common, ...toolPermissionEvaluation(ctx.agent, block.name) });
+        }
         producedOutput = true;
       }
     }
@@ -360,12 +370,18 @@ async function translatePiEvent(
   if (event.type === "tool_execution_end") {
     const details = event.result?.details as { openmaPendingConfirmation?: boolean } | undefined;
     if (!details?.openmaPendingConfirmation) {
-      runtime.broadcast({
+      const content = piContentToWire(event.result?.content ?? []);
+      runtime.broadcast(event.toolName.startsWith("mcp__") ? {
+        type: "agent.mcp_tool_result",
+        mcp_tool_use_id: event.toolCallId,
+        content,
+        is_error: event.isError,
+      } : {
         type: "agent.tool_result",
         tool_use_id: event.toolCallId,
-        content: piContentToWire(event.result?.content ?? []),
+        content,
         is_error: event.isError,
-      } as SessionEvent);
+      });
     }
   }
 
@@ -594,7 +610,7 @@ function modelMessagesToPi(
               toolCallId: part.toolCallId,
               toolName: part.toolName,
               content: toolOutputToPi(part.output),
-              isError: false,
+              isError: part.output.type === "error-text" || part.output.type === "error-json",
               timestamp,
             }]
           : [],
@@ -607,8 +623,8 @@ function modelMessagesToPi(
 function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
   if (!output || typeof output !== "object") return valueToPiContent(output);
   const value = output as { type?: string; value?: unknown };
-  if (value.type === "text") return [{ type: "text", text: String(value.value ?? "") }];
-  if (value.type === "json") return valueToPiContent(value.value);
+  if (value.type === "text" || value.type === "error-text") return [{ type: "text", text: String(value.value ?? "") }];
+  if (value.type === "json" || value.type === "error-json") return valueToPiContent(value.value);
   if (value.type === "content" && Array.isArray(value.value)) {
     return value.value.flatMap((part): Array<TextContent | ImageContent> => {
       if (!part || typeof part !== "object") return valueToPiContent(part);

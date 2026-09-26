@@ -282,7 +282,7 @@ function jsonSchemaPropertyToZod(prop: Record<string, unknown>): z.ZodTypeAny {
 export function getToolPermission(agentConfig: AgentConfig, toolName: string): string {
   const mcpPrefix = "mcp__";
   if (toolName.startsWith(mcpPrefix)) {
-    for (const toolset of agentConfig.tools) {
+    for (const toolset of agentConfig.tools ?? []) {
       if (toolset.type !== "mcp_toolset") continue;
       const ts = toolset as ToolsetConfig & { mcp_server_name?: string };
       if (!ts.mcp_server_name) continue;
@@ -296,7 +296,7 @@ export function getToolPermission(agentConfig: AgentConfig, toolName: string): s
     return "always_allow";
   }
 
-  const toolset = agentConfig.tools.find((tool) => tool.type === "agent_toolset_20260401");
+  const toolset = agentConfig.tools?.find((tool) => tool.type === "agent_toolset_20260401");
   if (toolset) {
     const ts = toolset as ToolsetConfig;
     const cfg = ts.configs?.find((candidate) => candidate.name === toolName);
@@ -304,6 +304,20 @@ export function getToolPermission(agentConfig: AgentConfig, toolName: string): s
     if (ts.default_config?.permission_policy?.type) return ts.default_config.permission_policy.type;
   }
   return "always_allow";
+}
+
+/** Wire evaluation for policies with a deterministic local decision. Auto
+ * retains today's executable/allow behavior without claiming a fixed policy. */
+export function toolPermissionEvaluation(agent: AgentConfig, name: string): {
+  evaluated_permission: "allow" | "ask";
+  evaluation?: { type: "always_allow" | "always_ask" };
+} {
+  const policy = getToolPermission(agent, name);
+  return {
+    evaluated_permission: policy === "always_ask" ? "ask" as const : "allow" as const,
+    ...(policy === "always_ask" || policy === "always_allow"
+      ? { evaluation: { type: policy } } : {}),
+  };
 }
 
 function isMcpToolEnabled(
@@ -389,6 +403,8 @@ export async function buildTools(
   agentConfig: AgentConfig,
   sandbox: SandboxPort,
   env?: {
+    /** Only for executing an already accepted user.tool_confirmation. */
+    skipPermissionCheck?: boolean;
     ANTHROPIC_API_KEY?: string;
     ANTHROPIC_BASE_URL?: string;
     /** Legacy single-key form; superseded by `webSearch` but still honoured
@@ -1136,6 +1152,7 @@ export async function buildTools(
         ? jsonSchemaToZod(ct.input_schema)
         : z.object({});
       tools[ct.name] = tool({
+        metadata: { openmaCustom: true },
         description: ct.description,
         inputSchema: params,
         // No execute — custom tools are handled by the client
@@ -1334,14 +1351,11 @@ export async function buildTools(
   // Strip execute from always_ask tools so AI SDK returns them as pending calls
   // requiring user confirmation before execution
   for (const [name, t] of Object.entries(tools)) {
-    if (getToolPermission(agentConfig, name) === "always_ask") {
-      tools[name] = tool({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        description: (t as any).description,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        inputSchema: (t as any).parameters || (t as any).inputSchema,
-        // No execute — AI SDK treats this as a pending tool call
-      });
+    if (!env?.skipPermissionCheck && getToolPermission(agentConfig, name) === "always_ask") {
+      // Retain metadata (MCP server identity / built-in classification) and
+      // schemas while making the model call pending instead of executable.
+      const { execute: _execute, ...pendingTool } = t;
+      tools[name] = pendingTool;
     }
   }
 

@@ -90,6 +90,25 @@ describe("OpenMA MCP client port", () => {
     expect(fake.state.counts.DELETE).toBe(1);
   });
 
+  it("preserves MCP metadata and schema while gating execution on confirmation", async () => {
+    const fake = createFakeMcpFetch();
+    const config = {
+      id: "agent_ask", name: "Ask", model: "test", system: "", version: 1, created_at: "2026-09-26",
+      tools: [{ type: "mcp_toolset" as const, mcp_server_name: "demo", default_config: { permission_policy: { type: "always_ask" as const } } }],
+      mcp_servers: [{ name: "demo", type: "url" as const, url: "https://mcp.example.test/rpc" }],
+    };
+    const env = { mcpBinding: { fetch: fake.fetch }, tenantId: "tenant", sessionId: "session" };
+    const pending = await harnessTools.buildTools(config, new TestSandbox(), env);
+    expect(pending.mcp__demo__echo.execute).toBeUndefined();
+    expect(pending.mcp__demo__echo.metadata).toMatchObject({ serverName: "demo" });
+    expect(pending.mcp__demo__echo.inputSchema.jsonSchema).toMatchObject({ type: "object" });
+    await harnessTools.disposeTools(pending);
+    const allowed = await harnessTools.buildTools(config, new TestSandbox(), { ...env, mcpBinding: { fetch: createFakeMcpFetch().fetch }, skipPermissionCheck: true });
+    await expect(allowed.mcp__demo__echo.execute({ value: "confirmed" }, { toolCallId: "call", messages: [] }))
+      .resolves.toMatchObject({ content: [{ type: "text", text: "echo:confirmed" }] });
+    await harnessTools.disposeTools(allowed);
+  });
+
   it("projects MCP tools into a disposable harness tool set", async () => {
     const disposeTools = (
       harnessTools as Record<string, unknown>

@@ -8,6 +8,7 @@ import type {
   EventStreamParams,
 } from "@anthropic-ai/sdk/resources/beta/sessions/events";
 import { z } from "zod";
+import { stopReasonSchema } from "./session-stop-reason";
 import {
   budgetSchema,
   monetaryAmountSchema,
@@ -288,18 +289,6 @@ const sessionExecutionErrorSchema = z.discriminatedUnion("type", [
     .strict(),
 ]);
 
-const stopReasonSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("end_turn") }).strict(),
-  z
-    .object({
-      type: z.literal("requires_action"),
-      event_ids: z.array(z.string()),
-    })
-    .strict(),
-  z.object({ type: z.literal("retries_exhausted") }).strict(),
-  z.object({ type: z.literal("budget_reached") }).strict(),
-]);
-
 const spanModelUsageSchema = z
   .object({
     cache_creation_input_tokens: z.number().int(),
@@ -352,6 +341,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
       name: z.string(),
       processed_at: z.string(),
       evaluated_permission: z.enum(["allow", "ask", "deny"]).optional(),
+      evaluation: z.object({ type: z.enum(["always_allow", "always_ask"]) }).strict().optional(),
       session_thread_id: z.string().nullable().optional(),
     })
     .strict(),
@@ -422,6 +412,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
       name: z.string(),
       processed_at: z.string(),
       evaluated_permission: z.enum(["allow", "ask", "deny"]).optional(),
+      evaluation: z.object({ type: z.enum(["always_allow", "always_ask"]) }).strict().optional(),
       session_thread_id: z.string().nullable().optional(),
     })
     .strict(),

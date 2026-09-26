@@ -11,6 +11,8 @@ import type { SessionEvent } from "@open-managed-agents/shared";
 import type { HarnessContext, HarnessRuntime } from "../src/harness/interface";
 import type { PiCompactionPolicy } from "../src/harness/pi-compaction";
 import { PiSummaryCompactionPolicy } from "../src/harness/pi-compaction";
+import { buildTools } from "../src/harness/tools";
+import { TestSandbox } from "../src/runtime/sandbox";
 import { PiHarness } from "../src/harness/pi-loop";
 import { createPiModelRuntime } from "../src/harness/pi-provider";
 
@@ -77,6 +79,74 @@ function makeContext(responses: ReturnType<typeof fauxAssistantMessage>[]) {
 }
 
 describe("PiHarness", () => {
+  it("preserves client tools whose names begin with the MCP prefix", async () => {
+    const name = "mcp__client__answer";
+    const { ctx, events } = makeContext([fauxAssistantMessage(fauxToolCall(name, {}, { id: "client_mcp" }), { stopReason: "toolUse" })]);
+    ctx.agent.tools = [{ type: "custom", name, description: "Client answer", input_schema: { type: "object" } }];
+    ctx.tools = await buildTools(ctx.agent, new TestSandbox());
+    await new PiHarness().run(ctx);
+    expect(events).toContainEqual(expect.objectContaining({ type: "agent.custom_tool_use", id: "client_mcp" }));
+    expect(events.some(event => event.type === "agent.mcp_tool_use")).toBe(false);
+    expect(ctx.runtime.pendingConfirmations).toEqual(["client_mcp"]);
+  });
+
+  it("reports an unknown MCP tool as a tool error without crashing event translation", async () => {
+    const { ctx, events } = makeContext([
+      fauxAssistantMessage(fauxToolCall("mcp__missing__tool", {}, { id: "missing" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("That tool is unavailable"),
+    ]);
+    await new PiHarness().run(ctx);
+    expect(events).toContainEqual(expect.objectContaining({ type: "agent.mcp_tool_result", mcp_tool_use_id: "missing", is_error: true }));
+    expect(ctx.runtime.pendingConfirmations).toEqual([]);
+  });
+
+  it.each(["bash", "mcp__docs__create"])("reports pending permission for %s", async (name) => {
+    const { ctx, events } = makeContext([fauxAssistantMessage(fauxToolCall(name, { value: "confirm" }, { id: "pending" }), { stopReason: "toolUse" })]);
+    ctx.agent.tools = [
+      { type: "agent_toolset_20260401", default_config: { permission_policy: { type: "always_ask" } } },
+      { type: "mcp_toolset", mcp_server_name: "docs", default_config: { permission_policy: { type: "always_ask" } } },
+    ];
+    ctx.tools = { [name]: { inputSchema: z.object({ value: z.string() }) } };
+    await new PiHarness().run(ctx);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: name.startsWith("mcp__") ? "agent.mcp_tool_use" : "agent.tool_use",
+      id: "pending", evaluated_permission: "ask", evaluation: { type: "always_ask" },
+    }));
+    expect(ctx.runtime.pendingConfirmations).toEqual(["pending"]);
+  });
+
+  it("lists every parallel pending tool and identifies client tools", async () => {
+    const { ctx, events } = makeContext([fauxAssistantMessage([
+      fauxToolCall("mcp__docs__create", { value: "one" }, { id: "mcp" }),
+      fauxToolCall("bash", { value: "two" }, { id: "bash" }),
+      fauxToolCall("client", { value: "three" }, { id: "client" }),
+    ], { stopReason: "toolUse" })]);
+    ctx.agent.tools = [
+      { type: "agent_toolset_20260401", default_config: { permission_policy: { type: "always_ask" } } },
+      { type: "custom", name: "client", description: "client tool", input_schema: { type: "object" } },
+    ];
+    ctx.tools = Object.fromEntries(["mcp__docs__create", "bash", "client"].map(name => [name, { inputSchema: z.object({ value: z.string() }) }]));
+    await new PiHarness().run(ctx);
+    expect(ctx.runtime.pendingConfirmations).toEqual(["mcp", "bash", "client"]);
+    expect(events).toContainEqual(expect.objectContaining({ type: "agent.custom_tool_use", id: "client" }));
+    expect(events.some(event => event.type === "agent.tool_result" || event.type === "agent.mcp_tool_result")).toBe(false);
+  });
+
+  it("replays a denied call as an error result to the model", async () => {
+    const { ctx, events, faux } = makeContext([]);
+    events.push(
+      { type: "agent.tool_use", id: "denied", name: "bash", input: {} },
+      { type: "agent.tool_result", tool_use_id: "denied", content: "Denied: no shell", is_error: true },
+    );
+    let result: unknown;
+    faux.setResponses([(context) => {
+      result = context.messages.find(message => message.role === "toolResult");
+      return fauxAssistantMessage("Understood");
+    }]);
+    await new PiHarness().run(ctx);
+    expect(result).toMatchObject({ isError: true, content: [{ type: "text", text: "Denied: no shell" }] });
+  });
+
   it("keeps thinking off by default even when the model supports reasoning", async () => {
     const { ctx, faux } = makeContext([]);
     ctx.pi!.model = { ...ctx.pi!.model, reasoning: true };
