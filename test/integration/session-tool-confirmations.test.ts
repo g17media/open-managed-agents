@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { env, exports } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { SqliteHistory } from "../../apps/agent/src/runtime/history";
 import { TestSandbox } from "../../apps/agent/src/runtime/sandbox";
@@ -199,3 +199,31 @@ it("accepts confirmation after the ask event is emitted while the harness is sti
     } finally { drain.mockRestore(); schedule.mockRestore(); }
   });
 });
+
+it("preserves pending MCP and built-in calls across an actual DO eviction", async () => {
+  const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(`restart-${crypto.randomUUID()}`));
+  await runInDurableObject(stub, async (instance, state) => {
+    instance.ensureSchema();
+    await instance.recoverInterruptedState();
+    const history = new SqliteHistory(state.storage.sql);
+    history.append({ type: "agent.tool_use", id: "restart_builtin", name: "bash", input: {}, evaluated_permission: "ask" });
+    history.append({ type: "agent.mcp_tool_use", id: "restart_mcp", name: "mcp__test__echo", mcp_server_name: "test", input: {}, evaluated_permission: "ask" });
+    instance.setState({ ...instance.state, pending_tool_calls: [
+      { eventType: "agent.tool_use", toolCallId: "restart_builtin", toolName: "bash", args: {} },
+      { eventType: "agent.mcp_tool_use", toolCallId: "restart_mcp", toolName: "mcp__test__echo", args: {} },
+    ] });
+    history.append({ type: "session.status_idle", stop_reason: instance.pendingToolStopReason() });
+  });
+  await evictDurableObject(stub);
+  await runInDurableObject(stub, async (instance, state) => {
+    instance.ensureSchema();
+    await instance.recoverInterruptedState();
+    await instance._finalizeStaleTurns().catch(() => {}); // No canonical session row in this fixture.
+    const history = new SqliteHistory(state.storage.sql);
+    expect(history.getEvents().filter(e => e.type === "agent.tool_result" || e.type === "agent.mcp_tool_result")).toEqual([]);
+    expect(instance.pendingToolStopReason()).toEqual({ type: "requires_action", action_type: "tool_confirmation", event_ids: ["restart_builtin", "restart_mcp"] });
+    await instance.handleToolConfirmation({ type: "user.tool_confirmation", tool_use_id: "restart_builtin", result: "deny" }, history);
+    expect(instance.state.pending_tool_calls.map(p => p.toolCallId)).toEqual(["restart_mcp"]);
+    expect(history.getEvents().filter(e => e.type === "session.status_idle").at(-1).stop_reason).toEqual({ type: "requires_action", action_type: "tool_confirmation", event_ids: ["restart_mcp"] });
+  });
+}, 30_000);

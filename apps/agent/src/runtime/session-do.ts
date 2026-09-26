@@ -855,7 +855,7 @@ export class SessionDO extends DurableObject<Env> {
     if (!this.streams) return;
     const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
     try {
-      const { warnings } = await runRecovery(this.streams, history);
+      const { warnings } = await runRecovery(this.streams, history, new Set(this.state.pending_tool_calls.map(call => call.toolCallId)));
       for (const w of warnings) {
         this.broadcastEvent({
           type: "session.warning",
@@ -2389,7 +2389,7 @@ export class SessionDO extends DurableObject<Env> {
           history.append({ type: evType, id: s.id, name: s.name ?? "test_tool" } as SessionEvent);
         }
       }
-      const report = await runRecovery(this.streams, history);
+      const report = await runRecovery(this.streams, history, new Set(this.state.pending_tool_calls.map(call => call.toolCallId)));
       // Broadcast warnings same as the cold-start path.
       for (const w of report.warnings) {
         this.broadcastEvent({
@@ -6429,7 +6429,11 @@ export class SessionDO extends DurableObject<Env> {
       );
       for (const row of useCursor) {
         try {
-          const d = JSON.parse(row.data as string) as { id?: string };
+          const d = JSON.parse(row.data as string) as { id?: string; evaluated_permission?: string };
+          // Client waits survive eviction; only interrupted executions need a
+          // synthetic result. Preserve legacy asks recorded in durable state.
+          if (row.type === "agent.custom_tool_use" || d.evaluated_permission === "ask" ||
+            this.state.pending_tool_calls.some(call => call.toolCallId === d.id)) continue;
           if (d.id) usedIds.set(d.id, {
             type: row.type as string,
             thread: row.session_thread_id as string | null,

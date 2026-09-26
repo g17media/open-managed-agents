@@ -55,6 +55,7 @@ export interface RecoveryReport {
 export async function recoverInterruptedState(
   streams: StreamRepo,
   history: Pick<EventLogRepo, "append" | "getEvents">,
+  pendingToolUseIds: ReadonlySet<string> = new Set(),
 ): Promise<RecoveryReport> {
   const report: RecoveryReport = {
     finalizedStreams: [],
@@ -92,11 +93,14 @@ export async function recoverInterruptedState(
   >();
   const resolved = new Set<string>();
   for (const e of all) {
-    const ev = e as { type: string; id?: string; name?: string; tool_use_id?: string; mcp_tool_use_id?: string };
+    const ev = e as { type: string; id?: string; name?: string; tool_use_id?: string; mcp_tool_use_id?: string; evaluated_permission?: string };
     switch (ev.type) {
       case "agent.tool_use":
       case "agent.mcp_tool_use":
       case "agent.custom_tool_use":
+        // An intentional client wait is not an interrupted execution. The
+        // explicit set also preserves older events without permission metadata.
+        if (ev.evaluated_permission === "ask" || (ev.id && pendingToolUseIds.has(ev.id))) break;
         if (ev.id) {
           useTypes.set(ev.id, {
             type: ev.type as "agent.tool_use" | "agent.mcp_tool_use" | "agent.custom_tool_use",
