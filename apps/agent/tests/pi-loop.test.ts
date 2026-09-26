@@ -11,6 +11,8 @@ import type { SessionEvent } from "@open-managed-agents/shared";
 import type { HarnessContext, HarnessRuntime } from "../src/harness/interface";
 import type { PiCompactionPolicy } from "../src/harness/pi-compaction";
 import { PiSummaryCompactionPolicy } from "../src/harness/pi-compaction";
+import { buildTools } from "../src/harness/tools";
+import { TestSandbox } from "../src/runtime/sandbox";
 import { PiHarness } from "../src/harness/pi-loop";
 import { createPiModelRuntime } from "../src/harness/pi-provider";
 
@@ -77,6 +79,17 @@ function makeContext(responses: ReturnType<typeof fauxAssistantMessage>[]) {
 }
 
 describe("PiHarness", () => {
+  it("preserves client tools whose names begin with the MCP prefix", async () => {
+    const name = "mcp__client__answer";
+    const { ctx, events } = makeContext([fauxAssistantMessage(fauxToolCall(name, {}, { id: "client_mcp" }), { stopReason: "toolUse" })]);
+    ctx.agent.tools = [{ type: "custom", name, description: "Client answer", input_schema: { type: "object" } }];
+    ctx.tools = await buildTools(ctx.agent, new TestSandbox());
+    await new PiHarness().run(ctx);
+    expect(events).toContainEqual(expect.objectContaining({ type: "agent.custom_tool_use", id: "client_mcp" }));
+    expect(events.some(event => event.type === "agent.mcp_tool_use")).toBe(false);
+    expect(ctx.runtime.pendingConfirmations).toEqual(["client_mcp"]);
+  });
+
   it("reports an unknown MCP tool as a tool error without crashing event translation", async () => {
     const { ctx, events } = makeContext([
       fauxAssistantMessage(fauxToolCall("mcp__missing__tool", {}, { id: "missing" }), { stopReason: "toolUse" }),

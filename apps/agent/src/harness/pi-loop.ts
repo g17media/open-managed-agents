@@ -320,7 +320,9 @@ async function translatePiEvent(
         const streamId = state.toolIds.get(index);
         if (streamId) await runtime.broadcastToolInputEnd(streamId, "completed");
         const common = { id: block.id, name: block.name, input: block.arguments };
-        if (block.name.startsWith("mcp__")) {
+        if (ctx.tools[block.name]?.metadata?.openmaCustom === true) {
+          runtime.broadcast({ type: "agent.custom_tool_use", ...common });
+        } else if (block.name.startsWith("mcp__")) {
           const registered = ctx.tools[block.name] as { metadata?: { serverName?: string } };
           runtime.broadcast({
             type: "agent.mcp_tool_use", ...common,
