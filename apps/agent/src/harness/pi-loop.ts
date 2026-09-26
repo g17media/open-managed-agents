@@ -324,7 +324,7 @@ async function translatePiEvent(
           const registered = ctx.tools[block.name] as { metadata?: { serverName?: string } };
           runtime.broadcast({
             type: "agent.mcp_tool_use", ...common,
-            mcp_server_name: registered.metadata?.serverName ?? block.name.slice(5).split("__")[0],
+            mcp_server_name: registered?.metadata?.serverName ?? block.name.slice(5).split("__")[0],
             ...toolPermissionEvaluation(ctx.agent, block.name),
           });
         } else if (ctx.agent.tools?.some(tool => tool.type === "custom" && "name" in tool && tool.name === block.name)) {

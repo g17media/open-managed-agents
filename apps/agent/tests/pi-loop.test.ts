@@ -77,6 +77,16 @@ function makeContext(responses: ReturnType<typeof fauxAssistantMessage>[]) {
 }
 
 describe("PiHarness", () => {
+  it("reports an unknown MCP tool as a tool error without crashing event translation", async () => {
+    const { ctx, events } = makeContext([
+      fauxAssistantMessage(fauxToolCall("mcp__missing__tool", {}, { id: "missing" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("That tool is unavailable"),
+    ]);
+    await new PiHarness().run(ctx);
+    expect(events).toContainEqual(expect.objectContaining({ type: "agent.mcp_tool_result", mcp_tool_use_id: "missing", is_error: true }));
+    expect(ctx.runtime.pendingConfirmations).toEqual([]);
+  });
+
   it.each(["bash", "mcp__docs__create"])("reports pending permission for %s", async (name) => {
     const { ctx, events } = makeContext([fauxAssistantMessage(fauxToolCall(name, { value: "confirm" }, { id: "pending" }), { stopReason: "toolUse" })]);
     ctx.agent.tools = [
