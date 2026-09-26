@@ -109,6 +109,8 @@ export interface OutcomeSupervisorDeps {
   judgeModelId?: string;
   /** Run another harness turn after a needs_revision verdict. */
   runHarnessTurn: (msg: UserMessageEvent) => Promise<void>;
+  /** Pause revision evaluation while the harness awaits a client answer. */
+  hasPendingToolCalls?: () => boolean;
   /** Persist a delta back to SessionState. Caller decides what to merge. */
   persistState: (delta: {
     outcome?: ActiveOutcomeState | null;
@@ -130,12 +132,13 @@ const TERMINAL_RESULTS = new Set([
 
 export interface OutcomeSupervisorReport {
   iterations: OutcomeEvaluationRecord[];
-  terminal: OutcomeEvaluationRecord;
+  /** Null when a revision pauses for a client tool answer. */
+  terminal: OutcomeEvaluationRecord | null;
 }
 
 /**
- * Run the supervisor loop until a terminal verdict. Returns the final
- * verdict + per-iteration trail. Throws only on caller-side errors
+ * Run the supervisor loop until a terminal verdict or a pending tool call.
+ * Returns the final verdict (null when paused) and per-iteration trail. Throws only on caller-side errors
  * (e.g. failure to persist state); supervisor-internal failures land in
  * the verdict as `failed`.
  */
@@ -294,6 +297,7 @@ export async function runOutcomeSupervisor(
 
     try {
       await deps.runHarnessTurn(feedbackMsg);
+      if (deps.hasPendingToolCalls?.()) return { iterations: evaluations, terminal: null };
     } catch (err) {
       // Harness crash mid-revision. Emit a `failed` end span so callers
       // see a terminal outcome; surface the underlying error in

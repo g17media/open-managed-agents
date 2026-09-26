@@ -2,7 +2,7 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { eventsToMessages, InMemoryHistory } from "../../apps/agent/src/runtime/history";
+import { eventsToMessages, eventsToMessagesAsync, InMemoryHistory } from "../../apps/agent/src/runtime/history";
 import type {
   SessionEvent,
   UserMessageEvent,
@@ -439,5 +439,21 @@ describe("InMemoryHistory", () => {
     expect(firstAssistant[0].toolName).toBe("grep");
     const secondAssistant = messages[3].content as any[];
     expect(secondAssistant[0].toolName).toBe("read");
+  });
+});
+
+
+describe("confirmed tool history", () => {
+  it.each([eventsToMessages, eventsToMessagesAsync])("preserves projected MCP names and denial errors", async convert => {
+    const events: SessionEvent[] = [
+      { type: "agent.mcp_tool_use", id: "mcp", name: "mcp__docs__create", mcp_server_name: "docs", input: {} },
+      { type: "agent.mcp_tool_result", mcp_tool_use_id: "mcp", content: "Denied: leave docs alone", is_error: true },
+      { type: "agent.tool_use", id: "bash", name: "bash", input: {} },
+      { type: "agent.tool_result", tool_use_id: "bash", content: [{ type: "text", text: "Denied: no shell" }], is_error: true },
+    ];
+    const messages = await convert(events);
+    expect(messages[0].content[0].toolName).toBe("mcp__docs__create");
+    expect(messages[1].content[0]).toMatchObject({ toolName: "mcp__docs__create", output: { type: "error-text", value: "Denied: leave docs alone" } });
+    expect(messages[3].content[0].output).toEqual({ type: "error-text", value: "Denied: no shell" });
   });
 });

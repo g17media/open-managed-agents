@@ -7,7 +7,7 @@ import { generateEventId, classifyExternalError, ModelError } from "@open-manage
 import { eventsToMessagesAsync } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
-import { ALL_TOOLS } from "./tools";
+import { ALL_TOOLS, toolPermissionEvaluation } from "./tools";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
 import { modelCallOptions } from "./provider";
 import {
@@ -66,6 +66,7 @@ function extractMcpServerName(toolName: string): string {
  */
 function emitToolCallEvent(
   runtime: HarnessContext["runtime"],
+  agent: HarnessContext["agent"],
   tools: Record<string, any>,
   part: ContentPart<any> & { type: "tool-call" },
   timings?: Map<string, ToolTimingRecord>,
@@ -93,6 +94,7 @@ function emitToolCallEvent(
   if (isMcpTool(toolName)) {
     const registeredServerName = tools[toolName]?.metadata?.serverName;
     runtime.broadcast({
+      ...toolPermissionEvaluation(agent, toolName),
       type: "agent.mcp_tool_use",
       id: toolCallId,
       mcp_server_name:
@@ -104,12 +106,12 @@ function emitToolCallEvent(
     });
   } else if (isBuiltinTool(toolName) || tools[toolName]?.metadata?.openmaBuiltin === true) {
     const event: AgentToolUseEvent = {
+      ...toolPermissionEvaluation(agent, toolName),
       type: "agent.tool_use",
       id: toolCallId,
       name: toolName,
       input: callInput,
     };
-    if (!tools[toolName]?.execute) event.evaluated_permission = "ask";
     const timing = timings?.get(toolCallId);
     if (timing) event.metadata = toolUseTimingMetadata(timing, harnessName);
     runtime.broadcast(event);
@@ -293,6 +295,7 @@ export class DefaultHarness implements HarnessInterface {
     // can carry true per-call timings (see tool-timing.ts). Custom and
     // always_ask tools have no execute and pass through by reference.
     const { tools: timedTools, timings: toolTimings } = instrumentToolTimings(tools);
+    const completedToolCalls = new Set<string>();
     const harnessName = agent.harness ?? "default";
 
     // Resolve compaction params from agent config. Strategy class is
@@ -602,11 +605,12 @@ export class DefaultHarness implements HarnessInterface {
                 await runtime.broadcastToolInputEnd(partTC.toolCallId, "completed");
                 liveToolInput.delete(partTC.toolCallId);
               }
-              emitToolCallEvent(runtime, timedTools, part, toolTimings, harnessName);
+              emitToolCallEvent(runtime, ctx.agent, timedTools, part, toolTimings, harnessName);
               break;
             }
             case "tool-result":
             case "tool-error":
+              completedToolCalls.add(part.toolCallId);
               emitToolResultEvent(runtime, part, toolTimings, harnessName);
               break;
             // source / file / tool-approval-request: not produced by current
@@ -866,14 +870,15 @@ export class DefaultHarness implements HarnessInterface {
 
     // 8. Detect pending tool confirmations and custom tool results
     if (result.toolCalls?.length) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const resultedIds = new Set((result.toolResults as any[])?.map((r: any) => r.toolCallId) ?? []);
+      // AI SDK's toolResults omits tool-error parts. Both successful and
+      // error results settle a call, so use the emitted step content instead.
       const pending = result.toolCalls
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .filter((c: any) => !resultedIds.has(c.toolCallId))
+        .filter((c: any) => !completedToolCalls.has(c.toolCallId))
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .map((c: any) => c.toolCallId);
-      if (pending.length && ctx.runtime.pendingConfirmations) {
+      if (pending.length) {
+        ctx.runtime.pendingConfirmations ??= [];
         ctx.runtime.pendingConfirmations.push(...pending);
       }
     }

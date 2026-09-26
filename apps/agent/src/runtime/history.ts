@@ -79,9 +79,7 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
       event.type === "agent.custom_tool_use"
     ) {
       const e = event as AgentToolUseEvent | AgentMcpToolUseEvent | AgentCustomToolUseEvent;
-      const name = event.type === "agent.mcp_tool_use"
-        ? `mcp_${(e as AgentMcpToolUseEvent).mcp_server_name}_call`
-        : (e as AgentToolUseEvent | AgentCustomToolUseEvent).name;
+      const name = e.name;
       toolNameById.set(e.id, name);
     }
   }
@@ -175,9 +173,7 @@ export async function eventsToMessagesAsync(
       event.type === "agent.custom_tool_use"
     ) {
       const e = event as AgentToolUseEvent | AgentMcpToolUseEvent | AgentCustomToolUseEvent;
-      const name = event.type === "agent.mcp_tool_use"
-        ? `mcp_${(e as AgentMcpToolUseEvent).mcp_server_name}_call`
-        : (e as AgentToolUseEvent | AgentCustomToolUseEvent).name;
+      const name = e.name;
       toolNameById.set(e.id, name);
     }
   }
@@ -318,9 +314,7 @@ function buildMessages(
       case "agent.custom_tool_use": {
         flushTools();
         const e = event as AgentToolUseEvent | AgentMcpToolUseEvent | AgentCustomToolUseEvent;
-        const toolName = event.type === "agent.mcp_tool_use"
-          ? `mcp_${(e as AgentMcpToolUseEvent).mcp_server_name}_call`
-          : (e as AgentToolUseEvent | AgentCustomToolUseEvent).name;
+        const toolName = e.name;
         pendingAssistantContent.push({
           type: "tool-call",
           toolCallId: e.id,
@@ -337,7 +331,7 @@ function buildMessages(
           ? (e as AgentToolResultEvent).tool_use_id
           : (e as AgentMcpToolResultEvent).mcp_tool_use_id;
         const toolName = toolNameById.get(toolCallId) ?? "unknown";
-        const output = wireContentToToolOutput((e as AgentToolResultEvent).content);
+        const output = wireContentToToolOutput(e.content, e.is_error);
         pendingToolContent.push({
           type: "tool-result",
           toolCallId,
@@ -426,9 +420,7 @@ async function buildMessagesAsync(
       case "agent.custom_tool_use": {
         flushTools();
         const e = event as AgentToolUseEvent | AgentMcpToolUseEvent | AgentCustomToolUseEvent;
-        const toolName = event.type === "agent.mcp_tool_use"
-          ? `mcp_${(e as AgentMcpToolUseEvent).mcp_server_name}_call`
-          : (e as AgentToolUseEvent | AgentCustomToolUseEvent).name;
+        const toolName = e.name;
         pendingAssistantContent.push({
           type: "tool-call",
           toolCallId: e.id,
@@ -445,7 +437,7 @@ async function buildMessagesAsync(
           ? (e as AgentToolResultEvent).tool_use_id
           : (e as AgentMcpToolResultEvent).mcp_tool_use_id;
         const toolName = toolNameById.get(toolCallId) ?? "unknown";
-        const output = wireContentToToolOutput((e as AgentToolResultEvent).content);
+        const output = wireContentToToolOutput(e.content, e.is_error);
         pendingToolContent.push({
           type: "tool-result",
           toolCallId,
@@ -575,7 +567,11 @@ function pickPreservedTail(
  */
 function wireContentToToolOutput(
   content: string | ContentBlock[],
-): { type: "text"; value: string } | { type: "content"; value: any[] } {
+  isError = false,
+): { type: "error-text"; value: string } | { type: "text"; value: string } | { type: "content"; value: any[] } {
+  if (isError) {
+    return { type: "error-text", value: typeof content === "string" ? content : content.map(block => block.type === "text" ? block.text : JSON.stringify(block)).join("\n") };
+  }
   if (typeof content === "string") {
     return { type: "text", value: content };
   }

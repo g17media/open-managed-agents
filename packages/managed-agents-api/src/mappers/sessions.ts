@@ -26,7 +26,7 @@ import {
   toAgentToolInput,
 } from "./agent-definition";
 import { toSessionResourceResponse } from "./session-resources";
-import { toSendableSessionEvent } from "./session-events";
+import { fromSessionStopReason, toSendableSessionEvent } from "./session-events";
 import { fromOpenMaAgentExtension } from "./openma-agent-extension";
 
 function toAgentSelector(agent: SessionCreateBody["agent"]): SessionAgentSelector {
@@ -251,6 +251,7 @@ export function toSessionResponse(session: SessionView): object {
       }),
     },
     status: session.status,
+    ...(session.stopReason !== undefined && { stop_reason: fromSessionStopReason(session.stopReason) }),
     title: session.title,
     type: "session",
     updated_at: session.updatedAt,

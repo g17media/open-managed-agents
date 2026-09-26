@@ -4,6 +4,15 @@ import { makeSessionsPort, sessionView, sessionWire } from "./session-fixtures";
 import { buildSessionsTestApi } from "./test-api";
 
 describe("Managed Agents API — GET /v1/sessions/:session_id", () => {
+  it("returns the persisted requires_action stop reason", async () => {
+    const api = buildSessionsTestApi(makeSessionsPort({ retrieveSession: async () => ({ type: "found", session: {
+      ...sessionView, status: "idle", stopReason: { type: "requires_action", actionType: "tool_confirmation", eventIds: ["tool_b", "tool_a"] },
+    } }) }));
+    const response = await api.request(`http://openma.test/v1/sessions/${sessionWire.id}`, { headers: { "anthropic-beta": "managed-agents-2026-04-01" } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "idle", stop_reason: { type: "requires_action", action_type: "tool_confirmation", event_ids: ["tool_b", "tool_a"] } });
+  });
+
   it("maps the official SDK retrieve call to an application query", async () => {
     const retrieveCalls: unknown[] = [];
     const port = makeSessionsPort({

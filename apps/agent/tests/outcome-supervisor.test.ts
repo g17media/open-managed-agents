@@ -232,6 +232,20 @@ describe("runOutcomeSupervisor", () => {
     expect(report.iterations[0].result).toBe("needs_revision");
   });
 
+  it("pauses evaluation when a revision awaits tool confirmation", async () => {
+    let pending = false;
+    const h = makeFakeHarness({
+      outcome: { outcome_id: "outc_pending", description: "Write a file", verifier: { type: "verifiable", scorer: "fileWritten", opts: { path: "/workspace/x.txt" } }, max_iterations: 3 },
+      onHarnessTurn: () => { pending = true; },
+    });
+    h.deps.hasPendingToolCalls = () => pending;
+    const report = await runOutcomeSupervisor(h.deps as any);
+    expect(report.terminal).toBeNull();
+    expect(report.iterations.map(e => e.result)).toEqual(["needs_revision"]);
+    expect(h.state.outcome?.outcome_id).toBe("outc_pending");
+    expect(h.state.outcome_iteration).toBe(1);
+  });
+
   // ---------- Scenario 4: max_iterations exhausted ----------
 
   it("max_iterations exhausted → max_iterations_reached", async () => {

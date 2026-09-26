@@ -37,6 +37,11 @@ function applyRuntimeEvents(
   for (const event of events) {
     const status = statusFromEvent(event);
     if (status !== null) next.status = status;
+    if (event.type === "session.status_idle") {
+      next.stopReason = structuredClone(event.stopReason);
+    } else if (status !== null) {
+      delete next.stopReason;
+    }
     if (event.type === "session.usage") {
       next.usage = structuredClone(event.usage);
       if (event.budget !== undefined) next.budget = event.budget;

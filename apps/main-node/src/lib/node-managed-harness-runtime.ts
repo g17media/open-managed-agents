@@ -238,6 +238,7 @@ export interface ManagedNodeHarnessRuntimeInput {
 }
 
 export class ManagedNodeHarnessRuntime implements HarnessRuntime {
+  readonly pendingConfirmations: string[] = [];
   readonly history: HistoryStore;
   readonly sandbox: SandboxExecutor;
   readonly abortSignal?: AbortSignal;

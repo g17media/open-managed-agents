@@ -480,10 +480,12 @@ export interface AgentToolUseEvent extends EventBase {
   id: string;
   name: string;
   input: Record<string, unknown>;
-  evaluated_permission?: "allow" | "ask";
+  evaluated_permission?: "allow" | "ask" | "deny";
+  evaluation?: { type: "always_allow" | "always_ask" };
 }
 
 export interface AgentToolResultEvent extends EventBase {
+  is_error?: boolean;
   type: "agent.tool_result";
   tool_use_id: string;
   // string for text/JSON results; ContentBlock[] for multimodal results
@@ -513,6 +515,8 @@ export interface SessionStatusEvent extends EventBase {
 }
 
 export interface AgentMcpToolUseEvent extends EventBase {
+  evaluated_permission?: "allow" | "ask" | "deny";
+  evaluation?: { type: "always_allow" | "always_ask" };
   type: "agent.mcp_tool_use";
   id: string;
   mcp_server_name: string;
@@ -523,7 +527,7 @@ export interface AgentMcpToolUseEvent extends EventBase {
 export interface AgentMcpToolResultEvent extends EventBase {
   type: "agent.mcp_tool_result";
   mcp_tool_use_id: string;
-  content: string;
+  content: string | ContentBlock[];
   is_error?: boolean;
 }
 

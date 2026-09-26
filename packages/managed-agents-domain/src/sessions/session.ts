@@ -7,6 +7,7 @@ import type {
 } from "../agents";
 import type { SessionResource } from "./resource";
 import type { SessionThreadAgent } from "./thread";
+import type { SessionStopReason } from "./event";
 
 export type SessionStatus = "rescheduling" | "running" | "idle" | "terminated";
 
@@ -79,6 +80,7 @@ export interface Session {
   resources: SessionResource[];
   stats: SessionStats;
   status: SessionStatus;
+  stopReason?: SessionStopReason;
   title: string | null;
   updatedAt: string;
   usage: SessionUsage;
