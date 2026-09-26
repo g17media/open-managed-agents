@@ -178,3 +178,24 @@ describe("DO pending confirmations", () => {
     await vi.waitFor(async () => expect(await runInDurableObject(stub, i => i.state.pending_tool_calls)).toEqual([]));
   }, 30_000);
 });
+
+it("accepts confirmation after the ask event is emitted while the harness is still running", async () => {
+  const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(`early-${crypto.randomUUID()}`));
+  await runInDurableObject(stub, async (instance, state) => {
+    // A real running turn has already passed the first-fetch recovery scan.
+    instance.ensureSchema();
+    await instance.recoverInterruptedState();
+    instance._coldStartFlushDone = true;
+    const history = new SqliteHistory(state.storage.sql);
+    history.append({ type: "session.status_running" });
+    history.append({ type: "agent.tool_use", id: "early_ask", name: "bash", input: {}, evaluated_permission: "ask", evaluation: { type: "always_ask" } });
+    // This is the real state between broadcast(tool_use) and harness.run returning.
+    expect(instance.state.pending_tool_calls).toEqual([]);
+    const drain = vi.spyOn(instance, "drainEventQueue").mockResolvedValue();
+    const schedule = vi.spyOn(instance, "schedule").mockResolvedValue();
+    try {
+      const response = await instance.fetch(new Request("http://internal/event", { method: "POST", headers, body: JSON.stringify({ type: "user.tool_confirmation", tool_use_id: "early_ask", result: "deny" }) }));
+      expect(response.status, JSON.stringify({ body: await response.text(), events: history.getEvents(), pending: instance.state.pending_tool_calls })).toBe(202);
+    } finally { drain.mockRestore(); schedule.mockRestore(); }
+  });
+});

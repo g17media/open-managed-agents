@@ -1226,6 +1226,25 @@ export class SessionDO extends DurableObject<Env> {
     return null;
   }
 
+  private findPendingToolCall(toolUseId: string): PendingToolCall | undefined {
+    const stored = this.state.pending_tool_calls.find(call => call.toolCallId === toolUseId);
+    if (stored) return stored;
+    if (this.hasAcceptedToolAnswer(toolUseId)) return;
+    // A client may answer an emitted ask before harness.run finishes and
+    // snapshots pendingConfirmations. The durable event is already authoritative.
+    const events = new SqliteHistory(this.ctx.storage.sql).getEvents();
+    const event = events.find(event => event.id === toolUseId);
+    if (!event || !(event.type === "agent.custom_tool_use" ||
+      ((event.type === "agent.tool_use" || event.type === "agent.mcp_tool_use") && event.evaluated_permission === "ask"))) return;
+    if (events.some(event =>
+      (event.type === "agent.tool_result" && event.tool_use_id === toolUseId) ||
+      (event.type === "agent.mcp_tool_result" && event.mcp_tool_use_id === toolUseId) ||
+      (event.type === "user.custom_tool_result" && event.custom_tool_use_id === toolUseId))) return;
+    const pending: PendingToolCall = { eventType: event.type, toolCallId: toolUseId, toolName: event.name, args: event.input };
+    this.setState({ ...this.state, pending_tool_calls: [...this.state.pending_tool_calls, pending] });
+    return pending;
+  }
+
   private hasAcceptedToolAnswer(toolUseId: string): boolean {
     for (const _row of this.ctx.storage.sql.exec(
       `SELECT 1 FROM (
@@ -2211,7 +2230,7 @@ export class SessionDO extends DurableObject<Env> {
           (tc as unknown as { session_thread_id?: string }).session_thread_id ??
           "sthr_primary";
         if (tc.id && (this.localEventExists(tc.id) || this.pendingRowForEvent(tc.id))) return new Response(null, { status: 202 });
-        const pendingCall = this.state.pending_tool_calls.find(p => p.toolCallId === tc.tool_use_id);
+        const pendingCall = this.findPendingToolCall(tc.tool_use_id);
         if (!pendingCall || this.pendingToolEventType(pendingCall) === "agent.custom_tool_use" || this.hasAcceptedToolAnswer(tc.tool_use_id)) {
           return Response.json({ type: "error", error: { type: "invalid_request_error", message: "Unknown pending tool confirmation" } }, { status: 400 });
         }
@@ -2234,7 +2253,7 @@ export class SessionDO extends DurableObject<Env> {
           (customResult as unknown as { session_thread_id?: string })
             .session_thread_id ?? "sthr_primary";
         if (customResult.id && (this.localEventExists(customResult.id) || this.pendingRowForEvent(customResult.id))) return new Response(null, { status: 202 });
-        const pendingCall = this.state.pending_tool_calls.find(p => p.toolCallId === customResult.custom_tool_use_id);
+        const pendingCall = this.findPendingToolCall(customResult.custom_tool_use_id);
         if (!pendingCall || this.pendingToolEventType(pendingCall) !== "agent.custom_tool_use" || this.hasAcceptedToolAnswer(customResult.custom_tool_use_id)) {
           return Response.json({ type: "error", error: { type: "invalid_request_error", message: "Unknown pending custom tool call" } }, { status: 400 });
         }
