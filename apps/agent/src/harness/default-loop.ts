@@ -76,6 +76,12 @@ function emitToolCallEvent(
   const toolName = part.toolName;
   const toolCallId = part.toolCallId;
 
+  // Client tools can replace built-ins with the same name in buildTools.
+  if (tools[toolName]?.metadata?.openmaCustom === true) {
+    runtime.broadcast({ type: "agent.custom_tool_use", id: toolCallId, name: toolName, input: callInput });
+    return;
+  }
+
   if (toolName.startsWith("call_agent_")) {
     runtime.broadcast({
       type: "agent.thread_message_sent",

@@ -1152,6 +1152,7 @@ export async function buildTools(
         ? jsonSchemaToZod(ct.input_schema)
         : z.object({});
       tools[ct.name] = tool({
+        metadata: { openmaCustom: true },
         description: ct.description,
         inputSchema: params,
         // No execute — custom tools are handled by the client

@@ -77,3 +77,14 @@ it.each(["always_allow", "always_ask"] as const)("does not ask again after a %s 
   expect(events).toContainEqual(expect.objectContaining({ type: "agent.tool_result", tool_use_id: "call_0" }));
   expect(ctx.runtime.pendingConfirmations ?? []).toEqual([]);
 });
+
+// Review regression: buildTools permits client tools to shadow built-in names.
+it("keeps a client tool named bash on the custom-result path", async () => {
+  const { ctx, events } = setup("always_allow", ["bash"]);
+  ctx.agent.tools = [{ type: "custom", name: "bash", input_schema: { type: "object", properties: { value: { type: "string" } } } }];
+  ctx.tools = await buildTools(ctx.agent, new TestSandbox());
+  await new DefaultHarness().run(ctx);
+  expect(events).toContainEqual(expect.objectContaining({ type: "agent.custom_tool_use", id: "call_0", name: "bash" }));
+  expect(events.some(e => e.type === "agent.tool_use")).toBe(false);
+  expect(ctx.runtime.pendingConfirmations).toEqual(["call_0"]);
+});
