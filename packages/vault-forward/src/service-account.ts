@@ -39,7 +39,9 @@ export async function mintServiceAccountToken(auth: ServiceAccountAuth, request:
       redirect: "error", signal: AbortSignal.timeout(10_000) });
     if (!response.ok) { await response.body?.cancel(); throw new Error(); }
     const tokens = await response.json() as { access_token?: unknown; expires_in?: unknown };
-    if (typeof tokens.access_token !== "string" || !tokens.access_token || /[\r\n]/.test(tokens.access_token)
+    // RFC 6750 b64token: reject unsafe header bytes before storage or transport.
+    // Keep the line-break check explicit because JS `$` can match before a final LF.
+    if (typeof tokens.access_token !== "string" || !/^[A-Za-z0-9._~+\/-]+=*$/.test(tokens.access_token) || /[\r\n]/.test(tokens.access_token)
       || typeof tokens.expires_in !== "number" || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0) throw new Error();
     return { accessToken: tokens.access_token, expiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString() };
   } catch { throw new Error("Service account token exchange failed"); }

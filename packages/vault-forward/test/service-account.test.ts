@@ -78,6 +78,17 @@ describe("service account JWT bearer", () => {
   it.each([{}, { access_token: "secret", expires_in: -1 }, { access_token: "secret", expires_in: "3600" }, { access_token: "bad\r\ntoken", expires_in: 3600 }])("sanitizes invalid token replies", async (body) => {
     await expect(mintServiceAccountToken(auth, async () => Response.json(body))).rejects.toThrow("Service account token exchange failed");
   });
+  it.each(["invalid\0token", "invalid\ttoken", "invalid\u001ftoken", "invalid\u007ftoken", "invalid\u0100token", "invalid token"])("rejects unsafe bearer characters before persisting a minted token (%#)", async (accessToken) => {
+    const { store, record } = await setup();
+    const replace = vi.spyOn(store, "replace");
+    await expect(getServiceAccountToken(store, "workspace", record, {
+      fetch: async () => Response.json({ access_token: accessToken, expires_in: 3600 }),
+    })).rejects.toThrow(/^Service account token exchange failed$/);
+    expect(replace).not.toHaveBeenCalled();
+    const saved = await store.find({ workspaceId: "workspace", vaultId: "vault", credentialId: "sa" });
+    expect(saved?.revision).toBe(record.revision);
+    expect(saved?.credential.auth).not.toHaveProperty("accessToken");
+  });
   it("aborts a hanging token exchange at the bound and releases single-flight for retry", async () => {
     const { store, record } = await setup();
     const timeout = vi.spyOn(AbortSignal, "timeout");
