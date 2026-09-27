@@ -66,6 +66,12 @@ export type CredentialAuthInput =
       refresh?: CredentialOAuthRefreshInput | null;
     }
   | {
+      type: "static_basic";
+      username: string;
+      token: string;
+      mcpServerUrl: string;
+    }
+  | {
       type: "static_bearer";
       token: string;
       mcpServerUrl: string;
@@ -88,6 +94,7 @@ export type CredentialAuthView =
       expiresAt?: string | null;
       refresh?: CredentialOAuthRefreshView | null;
     }
+  | { type: "static_basic"; username: string; mcpServerUrl: string }
   | { type: "static_bearer"; mcpServerUrl: string; handle?: string }
   | {
       type: "environment_variable";
@@ -105,6 +112,7 @@ export type CredentialAuthUpdate =
       expiresAt?: string | null;
       refresh?: CredentialOAuthRefreshUpdate | null;
     }
+  | { type: "static_basic"; token?: string | null; username?: string }
   | { type: "static_bearer"; token?: string | null; handle?: string | null }
   | {
       type: "environment_variable";

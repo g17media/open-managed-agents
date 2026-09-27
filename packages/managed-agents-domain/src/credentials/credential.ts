@@ -50,6 +50,12 @@ export type CredentialAuth =
       refresh?: CredentialOAuthRefresh | null;
     }
   | {
+      type: "static_basic";
+      username: string;
+      token: string | null;
+      mcpServerUrl: string;
+    }
+  | {
       type: "static_bearer";
       token: string | null;
       mcpServerUrl: string;

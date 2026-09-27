@@ -38,8 +38,33 @@ export interface OauthRefreshMetadata {
  * exec_helper mode — its outbound path goes through cap.handleHttp,
  * not a simple header inject).
  */
+/** HTTP Basic uses UTF-8 before base64, consistently in Node and Workers. */
+export function basicAuthorization(username: string, password: string): string {
+  const bytes = new TextEncoder().encode(`${username}:${password}`);
+  return `Basic ${btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""))}`;
+}
+
+/** Exact handles win. Basic callers prefer Basic; other callers prefer host-only bearer. */
+export function credentialMatchRank(type: string, handle: string | undefined, selector: string | undefined, incomingBasic: boolean): number {
+  if (handle && handle === selector) return 0;
+  if (type === "static_basic") return incomingBasic ? 1 : 2;
+  return handle ? 3 : incomingBasic ? 2 : 1;
+}
+
+export function basicAuthSelector(header: string | null): string | undefined {
+  if (!header || !/^basic /i.test(header)) return undefined;
+  try {
+    const decoded = new TextDecoder().decode(Uint8Array.from(atob(header.slice(6).trim()), (c) => c.charCodeAt(0)));
+    const colon = decoded.indexOf(":");
+    return colon > 0 ? decoded.slice(0, colon) : undefined;
+  } catch { return undefined; }
+}
+
 export function buildAuthHeader(auth: CredentialAuth): AuthHeader | null {
   switch (auth.type) {
+    case "static_basic":
+      return typeof auth.username === "string" && typeof auth.token === "string" && auth.token.length > 0
+        ? { name: "authorization", value: basicAuthorization(auth.username, auth.token) } : null;
     case "static_bearer":
       if (typeof auth.token === "string" && auth.token.length > 0) {
         return { name: "authorization", value: `Bearer ${auth.token}` };
@@ -188,6 +213,8 @@ export interface ForwardOpts {
   /** Active access token from the credential (or `auth.token`). Used as
    *  the first attempt. */
   accessToken: string;
+  /** Static Basic username; accessToken holds its password. Never refreshed. */
+  basicUsername?: string;
   /** When set, a 401 triggers refresh + retry once. Caller persists the
    *  rotated tokens via `onRefreshed`. */
   refresh?: OauthRefreshMetadata;
@@ -238,6 +265,7 @@ export async function forwardWithRefresh(opts: ForwardOpts): Promise<Response> {
 
   const send = async (token: string): Promise<Response> => {
     const headers = buildUpstreamHeaders(opts.inboundHeaders, token, scrub);
+    if (opts.basicUsername !== undefined) headers.set("authorization", basicAuthorization(opts.basicUsername, token));
     const isGetHead = ["GET", "HEAD"].includes(opts.method.toUpperCase());
     const init: RequestInit = {
       method: opts.method,
@@ -252,7 +280,7 @@ export async function forwardWithRefresh(opts: ForwardOpts): Promise<Response> {
   };
 
   const first = await send(opts.accessToken);
-  if (first.status !== 401 || !opts.refresh) return first;
+  if (first.status !== 401 || opts.basicUsername !== undefined || !opts.refresh) return first;
 
   // Drain the body so we can return a fresh Response without two
   // outstanding streams.

@@ -59,11 +59,14 @@ import { SqlCredentialStore } from "@open-managed-agents/credential-store-sql";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-node";
 import { SqlSessionExecutionContextSource } from "@open-managed-agents/session-runtime-sql";
 import {
+  credentialAuthorization,
   credentialBearer,
   listManagedVaultCredentials,
   matchManagedCredential,
   refreshManagedCliCredential,
 } from "@open-managed-agents/vault-forward/managed";
+
+import { buildAuthHeader, credentialMatchRank } from "@open-managed-agents/vault-forward";
 
 const logger: Logger = await createNodeLogger({ bindings: { service: "oma-vault" } });
 setRootLogger(logger);
@@ -287,6 +290,7 @@ async function findCredentialForUrl(
   url: string,
   attr: VaultProxyAttribution,
   selector?: string,
+  incomingBasic = selector !== undefined,
 ): Promise<MatchedCred | null> {
   let host: string;
   let hostname: string;
@@ -327,7 +331,7 @@ async function findCredentialForUrl(
       }
       const records = await listManagedVaultCredentials(managedCredentials, attr.tenantId, activeVaults);
       const credentials = records.map((record) => record.credential);
-      const primary = matchManagedCredential(credentials, url, selector);
+      const primary = matchManagedCredential(credentials, url, selector, incomingBasic);
       const door = matchManagedCapCredential(credentials, hostname);
       const credential = primary ?? door;
       if (!credential) return null;
@@ -380,7 +384,7 @@ async function findCredentialForUrl(
       .bind(row.tenant_id, ...vaultIds)
       .all<Row>();
     const rows = result.results ?? [];
-    return matchRowsByHost(rows, host, selector) ?? matchRowsByCapSpec(rows, hostname);
+    return matchRowsByHost(rows, host, selector, incomingBasic) ?? matchRowsByCapSpec(rows, hostname);
   }
 
   // Legacy host-wide lookup. When OMA_TENANT="*" we accept any tenant;
@@ -398,7 +402,7 @@ async function findCredentialForUrl(
     .bind(scopeTenantId, scopeTenantId)
     .all<Row>();
   const rows = result.results ?? [];
-  return matchRowsByHost(rows, host, selector) ?? matchRowsByCapSpec(rows, hostname);
+  return matchRowsByHost(rows, host, selector, incomingBasic) ?? matchRowsByCapSpec(rows, hostname);
 }
 
 type Row = {
@@ -440,7 +444,7 @@ function toManagedMatched(
   const deviceFlow = credential.auth.type === "cap_cli" && credential.auth.extras?.refresh_token
     ? capRegistry.byCliId(credential.auth.cliId)?.oauth?.device_flow : undefined;
   return { credentialId: credential.id, vaultId: credential.vaultId,
-    injectHeader: { name: "authorization", value: `Bearer ${token}` },
+    injectHeader: { name: "authorization", value: credentialAuthorization(credential.auth)! },
     apiKeyCapable: credential.auth.type === "static_bearer",
     ...((credential.auth.type === "static_bearer" || credential.auth.type === "cap_cli") && {
       gitBasicHeader: `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
@@ -482,11 +486,11 @@ function matchRowsByCapSpec(rows: Row[], hostname: string): MatchedCred | null {
  * password is a token, so it is a free selector field. The placeholder
  * password is discarded with the rest of the inbound Authorization header.
  *
- * Priority: handle match > host-only credential (no handle) > any handled
- * credential for the host (so tools that send other usernames, e.g. `gh`,
- * still work in a session whose only GitHub credential has a handle).
+ * Priority: exact handle, then static_basic for Basic callers (host-only bearer
+ * otherwise), then the other unhandled kind, then unmatched handled credentials.
+ * Existing git selectors retain priority over static_basic on the same host.
  */
-function matchRowsByHost(rows: Row[], host: string, selector?: string): MatchedCred | null {
+function matchRowsByHost(rows: Row[], host: string, selector?: string, incomingBasic = selector !== undefined): MatchedCred | null {
   let best: { rank: number; match: MatchedCred } | null = null;
   for (const row of rows) {
     let auth: CredentialAuth;
@@ -498,7 +502,7 @@ function matchRowsByHost(rows: Row[], host: string, selector?: string): MatchedC
     const headerSpec = authToHeader(auth);
     if (!headerSpec) continue;
     const handle = typeof auth.handle === "string" && auth.handle.length > 0 ? auth.handle : undefined;
-    const rank = handle !== undefined && selector !== undefined && handle === selector ? 0 : handle === undefined ? 1 : 2;
+    const rank = credentialMatchRank(auth.type, handle, selector, incomingBasic);
     if (best !== null && rank >= best.rank) continue;
     best = { rank, match: toMatchedCred(row, auth, headerSpec) };
     if (rank === 0) break;
@@ -572,6 +576,8 @@ function apiKeyHeaderFor(
 
 function authToHeader(auth: CredentialAuth): { name: string; value: string } | null {
   switch (auth.type) {
+    case "static_basic":
+      return buildAuthHeader(auth);
     case "static_bearer":
       return { name: "authorization", value: `Bearer ${auth.token}` };
     case "cap_cli":
@@ -716,7 +722,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   // username is read first: it lets the sandbox name which credential it
   // wants when several match the host (see matchRowsByHost).
   const selector = basicAuthUsername(req.headers["authorization"]);
-  const matched: MatchedCred | null = forged ? null : await findCredentialForUrl(url, attr, selector);
+  const matched: MatchedCred | null = forged ? null : await findCredentialForUrl(url, attr, selector, /^basic /i.test(String(req.headers["authorization"] ?? "")));
 
   // Strip any incoming Authorization headers — the agent must not be able
   // to override the injected value or smuggle a stolen token. Mirrors the

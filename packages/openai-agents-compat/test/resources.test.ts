@@ -202,3 +202,12 @@ describe("OpenAI resource compatibility using real application services", () => 
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 });
+
+it("keeps native Basic credentials out of the upstream SDK credential union", async () => {
+  const f = fixture();
+  const vault = await f.run("vaults.create");
+  const created = await f.credentials.createCredential({ vaultId: vault.id, auth: { type: "static_basic", username: "public", token: "password", mcpServerUrl: "https://langfuse.test" } });
+  if (created.type !== "created") throw new Error("Credential creation failed");
+  expect(await f.run("vaults.credentials.list", {}, { vault_id: vault.id })).toMatchObject({ data: [] });
+  await expect(f.run("vaults.credentials.retrieve", {}, { vault_id: vault.id, credential_id: created.credential.id })).rejects.toThrow("Credential not found");
+});

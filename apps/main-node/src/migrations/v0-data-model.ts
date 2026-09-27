@@ -127,7 +127,7 @@ export function agent(row: Legacy, config: Legacy, resolveSkill: (binding: Legac
 }
 
 export function credentialAuth(raw: Legacy): CredentialAuth {
-  if (raw.type === "static_bearer" || raw.type === "container_registry" || raw.type === "cap_cli") return camel(raw);
+  if (raw.type === "static_basic" || raw.type === "static_bearer" || raw.type === "container_registry" || raw.type === "cap_cli") return camel(raw);
   if (raw.type === "mcp_oauth") {
     const refresh = raw.refresh ?? (raw.token_endpoint && raw.client_id ? {
       client_id: raw.client_id, token_endpoint: raw.token_endpoint, refresh_token: raw.refresh_token ?? null,

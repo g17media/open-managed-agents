@@ -39,6 +39,7 @@ import { useI18n } from "../i18n";
 type Vault = BetaManagedAgentsVault;
 type Credential = Omit<BetaManagedAgentsCredential, "auth"> & {
   auth: { handle?: string } & (BetaManagedAgentsCredential["auth"]
+    | { type: "static_basic"; username: string; mcp_server_url: string }
     | { type: "container_registry"; registry?: string }
     | { type: "cap_cli"; cli_id: string; mcp_server_url?: string });
 };
@@ -55,6 +56,8 @@ function credentialTypeView(credential: Credential): {
         className: "bg-info-subtle text-info",
         target: ("mcp_server_url" in credential.auth ? credential.auth.mcp_server_url : ""),
       };
+    case "static_basic":
+      return { label: "HTTP Basic", className: "bg-success-subtle text-success", target: credential.auth.mcp_server_url };
     case "static_bearer":
       return {
         label: "Bearer",
@@ -587,7 +590,8 @@ function EditCredentialModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const canRotateToken = credential.auth.type === "static_bearer";
+  const { api } = useApi();
+  const canRotateToken = credential.auth.type === "static_bearer" || credential.auth.type === "static_basic";
 
   const save = async () => {
     const trimmed = displayName.trim();
@@ -605,7 +609,11 @@ function EditCredentialModal({
       if (credential.auth.type === "static_bearer" && token.trim()) {
         body.auth = { type: "static_bearer", token: token.trim() };
       }
-      await managedApi.vaults.credentials.update(credential.id, body);
+      if (credential.auth.type === "static_basic") {
+        await api(`/v1/vaults/${vault.id}/credentials/${credential.id}`, { method: "POST", body: JSON.stringify({ display_name: trimmed, ...(token !== "" && { auth: { type: "static_basic", token } }) }) });
+      } else {
+        await managedApi.vaults.credentials.update(credential.id, body);
+      }
       onSaved();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update credential");
@@ -668,17 +676,20 @@ function EditCredentialModal({
             </>
           )}
         </div>
+        {credential.auth.type === "static_basic" && (
+          <div className="text-sm text-fg-muted">Username: <span>{credential.auth.username}</span><br />Password: <span>••••••••</span></div>
+        )}
         {canRotateToken && (
           <div>
             <Label htmlFor="cred-edit-token" className="text-sm text-fg-muted block mb-1">
-              {t.vaults.newTokenOptional}
+              {credential.auth.type === "static_basic" ? "New password (optional)" : t.vaults.newTokenOptional}
             </Label>
             <SecretInput
               id="cred-edit-token"
               value={token}
               onChange={(e) => setToken(e.target.value)}
               className={inputCls}
-              placeholder={t.vaults.leaveBlankKeepToken}
+              placeholder={credential.auth.type === "static_basic" ? "Leave blank to keep current password" : t.vaults.leaveBlankKeepToken}
             />
           </div>
         )}
@@ -714,7 +725,8 @@ function AddCredentialModal({
   // token is filled (RFC 6749 §6: refresh_token requires access_token).
   const [customForm, setCustomForm] = useState({
     name: "",
-    type: "oauth" as "oauth" | "bearer",
+    type: "oauth" as "oauth" | "bearer" | "basic",
+    username: "",
     url: "",
     pickedName: "",
     pickedIcon: "",
@@ -867,6 +879,14 @@ function AddCredentialModal({
   const createBearerCred = async () => {
     setConnecting("custom");
     try {
+      if (customForm.type === "basic") {
+        await api(`/v1/vaults/${vault.id}/credentials`, { method: "POST", body: JSON.stringify({
+          display_name: customForm.name || customForm.pickedName || "HTTP Basic",
+          auth: { type: "static_basic", mcp_server_url: customForm.url, username: customForm.username, token: customForm.token },
+        }) });
+        onCreated();
+        return;
+      }
       // OAuth-standard credential auth shape:
       //   - access_token + refresh_token + token_endpoint → mcp_oauth
       //     (server can refresh on 401 via vault-forward.refreshMcpOAuth).
@@ -919,7 +939,7 @@ function AddCredentialModal({
     //     "Connect". Picking a registry row only fills the MCP Server
     //     field, never auto-connects.
     if (!customForm.url) return;
-    if (customForm.type === "bearer" || customForm.token) {
+    if (customForm.type === "basic" || customForm.type === "bearer" || customForm.token) {
       void createBearerCred();
     } else {
       connectMcp(
@@ -1127,11 +1147,12 @@ function AddCredentialModal({
               disabled={
                 !customForm.url ||
                 !!connecting ||
-                !handleValid ||
-                (customForm.type === "bearer" && !customForm.token)
+                (customForm.type === "bearer" && !handleValid) ||
+                (customForm.type === "basic" && (!customForm.username || /[:\x00-\x1f\x7f]/.test(customForm.username))) ||
+                ((customForm.type === "bearer" || customForm.type === "basic") && !customForm.token)
               }
             >
-              {customForm.token || customForm.type === "bearer"
+              {customForm.token || customForm.type === "bearer" || customForm.type === "basic"
                 ? "Add credential"
                 : "Connect"}
             </Button>
@@ -1152,7 +1173,7 @@ function AddCredentialModal({
 
         <TabsContent value="mcp" className="space-y-4">
           <div className="text-sm text-fg-muted">
-            Authorize an MCP server for delegated user authentication.
+            Authorize an HTTP API or MCP server with vault credentials.
           </div>
 
           <div>
@@ -1177,14 +1198,14 @@ function AddCredentialModal({
           <div>
             <Label className="text-sm font-medium text-fg block mb-1">Type</Label>
             <div className="inline-flex rounded-md border border-border p-0.5">
-              {(["oauth", "bearer"] as const).map((t) => (
+              {(["oauth", "bearer", "basic"] as const).map((t) => (
                 <Button variant="ghost"
                   key={t}
                   type="button"
                   onClick={() => setCustomForm({ ...customForm, type: t })}
                   className={`inline-flex items-center justify-center px-3 py-1 min-h-11 sm:min-h-0 text-sm rounded ${customForm.type === t ? "bg-bg-surface text-fg font-medium" : "text-fg-muted"}`}
                 >
-                  {t === "oauth" ? "OAuth" : "Bearer token"}
+                  {t === "oauth" ? "OAuth" : t === "basic" ? "HTTP Basic" : "Bearer token"}
                 </Button>
               ))}
             </div>
@@ -1192,7 +1213,7 @@ function AddCredentialModal({
 
           <div>
             <Label className="text-sm font-medium text-fg block mb-1">
-              MCP Server
+              {customForm.type === "basic" ? "Server URL" : "MCP Server"}
             </Label>
             {/* Combobox: input filters the registry as you type. Pick a
                 row to fill the URL + show the favicon as a left-side
@@ -1306,7 +1327,12 @@ function AddCredentialModal({
             </div>
           )}
 
-          <Disclosure
+          {customForm.type === "basic" ? (
+            <div className="space-y-3">
+              <div><Label htmlFor="vault-basic-username">Username</Label><Input id="vault-basic-username" value={customForm.username} onChange={(e) => setCustomForm({ ...customForm, username: e.target.value })} /></div>
+              <div><Label htmlFor="vault-basic-password">Password</Label><SecretInput id="vault-basic-password" value={customForm.token} onChange={(e) => setCustomForm({ ...customForm, token: e.target.value })} /></div>
+            </div>
+          ) : <Disclosure
             title="Access token"
             meta={
               <span className="px-1.5 py-0.5 rounded bg-bg-surface">
@@ -1330,11 +1356,11 @@ function AddCredentialModal({
               If filled, the credential is stored as a static bearer token (no
               OAuth handshake).
             </div>
-          </Disclosure>
+          </Disclosure>}
 
           {/* Refresh token block (Optional) — only meaningful when an
               Access token is also set (RFC 6749 §6 refresh_token grant). */}
-          {customForm.token && (
+          {customForm.type !== "basic" && customForm.token && (
             <Disclosure
               title="Refresh token"
               meta={

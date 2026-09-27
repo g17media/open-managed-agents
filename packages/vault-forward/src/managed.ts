@@ -1,3 +1,4 @@
+import { basicAuthorization, basicAuthSelector, credentialMatchRank } from "./index";
 import type { Credential, CredentialAuth } from "@open-managed-agents/domain/credentials";
 import type { Session } from "@open-managed-agents/domain/sessions";
 import type { CredentialStore, StoredCredential } from "@open-managed-agents/credential-store";
@@ -26,6 +27,13 @@ export function credentialBearer(auth: CredentialAuth): string | null {
   return auth.type === "mcp_oauth" ? auth.accessToken : null;
 }
 
+/** Full header; Basic passwords must never be consumed as bearer tokens. */
+export function credentialAuthorization(auth: CredentialAuth): string | null {
+  if (auth.type === "static_basic") return auth.token ? basicAuthorization(auth.username, auth.token) : null;
+  const token = credentialBearer(auth);
+  return token ? `Bearer ${token}` : null;
+}
+
 /** Resource credentials authorize the declared repository, including GitHub's repository API. */
 export function matchManagedRepositoryResource(session: Session, url: string) {
   const request = new URL(url);
@@ -43,16 +51,16 @@ export function matchManagedRepositoryResource(session: Session, url: string) {
 }
 
 export function matchManagedCredential(
-  credentials: Credential[], url: string, selector?: string,
+  credentials: Credential[], url: string, selector?: string, incomingBasic = selector !== undefined,
 ): Credential | null {
   const host = new URL(url).host;
   let best: { rank: number; credential: Credential } | undefined;
   for (const credential of credentials) {
     const auth = credential.auth;
-    if (credential.archivedAt || !("mcpServerUrl" in auth) || !auth.mcpServerUrl || !credentialBearer(auth)) continue;
+    if (credential.archivedAt || !("mcpServerUrl" in auth) || !auth.mcpServerUrl || !credentialAuthorization(auth)) continue;
     try { if (new URL(auth.mcpServerUrl).host !== host) continue; } catch { continue; }
     const handle = "handle" in auth ? auth.handle : undefined;
-    const rank = handle && handle === selector ? 0 : handle ? 2 : 1;
+    const rank = credentialMatchRank(auth.type, handle, selector, incomingBasic);
     if (best === undefined || rank < best.rank) best = { rank, credential };
   }
   return best?.credential ?? null;
@@ -143,14 +151,14 @@ export async function forwardManagedMcpRequest(input: {
   // A stdio server has no URL to forward to — not proxyable over HTTP.
   if (input.session.archivedAt || !server || !("url" in server)) return new Response("Forbidden", { status: 403 });
   const credentials = await listManagedVaultCredentials(input.credentials, input.workspaceId, input.session.vaultIds);
-  let record = credentials.find(({ credential }) => "mcpServerUrl" in credential.auth && credential.auth.mcpServerUrl === server.url && credentialBearer(credential.auth));
+  let record = credentials.find(({ credential }) => "mcpServerUrl" in credential.auth && credential.auth.mcpServerUrl === server.url && credentialAuthorization(credential.auth));
   const headers = new Headers(input.request.headers);
   for (const key of ["x-oma-tenant", "x-oma-session", "x-oma-mcp-server", "host", "authorization", "proxy-authorization", "cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-forwarded-proto", "x-real-ip"]) headers.delete(key);
   const body = ["GET", "HEAD"].includes(input.request.method) ? undefined : await input.request.arrayBuffer();
   const request = input.fetch ?? fetch;
   const forward = () => {
-    const token = record && credentialBearer(record.credential.auth);
-    if (token) headers.set("authorization", `Bearer ${token}`);
+    const authorization = record && credentialAuthorization(record.credential.auth);
+    if (authorization) headers.set("authorization", authorization);
     return request(server.url, { method: input.request.method, headers, body, redirect: "manual" });
   };
   const first = await forward();
@@ -165,15 +173,16 @@ export async function forwardManagedOutboundRequest(input: {
 }): Promise<Response> {
   if (input.session.archivedAt) return new Response("Forbidden", { status: 403 });
   const records = await listManagedVaultCredentials(input.credentials, input.workspaceId, input.session.vaultIds);
-  const matched = matchManagedCredential(records.map((record) => record.credential), input.request.url);
+  const inboundAuth = input.request.headers.get("authorization");
+  const matched = matchManagedCredential(records.map((record) => record.credential), input.request.url, basicAuthSelector(inboundAuth), /^basic /i.test(inboundAuth ?? ""));
   let record = records.find((record) => record.credential.id === matched?.id && record.credential.vaultId === matched?.vaultId);
   const headers = new Headers(input.request.headers);
   for (const key of ["host", "proxy-authorization", "x-oma-tenant", "x-oma-session", "x-oma-mcp-server", "cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-forwarded-proto", "x-real-ip"]) headers.delete(key);
   const body = ["GET", "HEAD"].includes(input.request.method) ? undefined : await input.request.arrayBuffer();
   const request = input.fetch ?? fetch;
   const forward = () => {
-    const token = record && credentialBearer(record.credential.auth);
-    if (token) headers.set("authorization", `Bearer ${token}`);
+    const authorization = record && credentialAuthorization(record.credential.auth);
+    if (authorization) headers.set("authorization", authorization);
     return request(input.request.url, { method: input.request.method, headers, body, redirect: "manual" });
   };
   const first = await forward();

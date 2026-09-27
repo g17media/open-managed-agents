@@ -234,3 +234,8 @@ describe("SQLite v0 to v1 migration", () => {
     expect(warnings).toEqual(["Agent agent-1: dropped disabled tool browser, which has no v1 equivalent."]);
   });
 });
+
+it("preserves Basic username and password when converting a legacy credential document", async () => {
+  const { credentialAuth } = await import("../src/migrations/v0-data-model");
+  expect(credentialAuth({ type: "static_basic", mcp_server_url: "https://langfuse.test", username: "public", token: " test:password " })).toEqual({ type: "static_basic", mcpServerUrl: "https://langfuse.test", username: "public", token: " test:password " });
+});

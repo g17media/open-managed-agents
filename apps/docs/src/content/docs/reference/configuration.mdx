@@ -145,15 +145,46 @@ interface Vault {
   archived_at?: string;
 }
 
-// Credentials live in a separate table; each is one of three types
+// Credentials live in a separate table
 type CredentialAuth =
+  | { type: 'static_basic'; username: string; token: string; mcp_server_url: string }
   | { type: 'static_bearer'; token: string; mcp_server_url: string }
   | { type: 'mcp_oauth'; access_token: string; refresh_token?: string;
       token_endpoint?: string; expires_at?: string; mcp_server_url: string }
   | { type: 'cap_cli'; cli_id: string; token: string };  // e.g. cli_id: "gh", "glab", "aws"
 ```
 
-Binding to a host happens via the credential, not the vault: a `static_bearer` / `mcp_oauth` credential matches by parsing the request hostname against `mcp_server_url`; a `cap_cli` credential matches by `cli_id` lookup in the cap spec registry. Up to 20 credentials per vault. Tokens are AES-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` and never returned via the API once written.
+Binding to a host happens via the credential, not the vault: a `static_basic` / `static_bearer` / `mcp_oauth` credential matches by parsing the request hostname against `mcp_server_url`; a `cap_cli` credential matches by `cli_id` lookup in the cap spec registry. Up to 20 credentials per vault. Tokens are AES-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` and never returned via the API once written.
+
+### HTTP Basic credentials
+
+Create `static_basic` through `POST /v1/vaults/:id/credentials` with
+`auth: { type: "static_basic", mcp_server_url: "https://langfuse.example.com",
+username: "YOUR_PUBLIC_KEY", token: "YOUR_SECRET_KEY" }`.
+The `token` field stores the password; `username` must be nonempty and contain
+no colon or control characters. The URL must use HTTP or HTTPS. Password bytes,
+including whitespace and colons, are preserved and encoded as UTF-8.
+
+Self-host `oma-vault` matches the URL's host (including a nondefault port) and
+replaces the client's Authorization header with `Basic base64(username:token)`
+on every path, including REST and OTLP ingestion. An exact Basic-username
+`handle` match on a bearer/CLI credential wins. Otherwise, incoming Basic auth
+prefers `static_basic` over an unhandled bearer; other requests prefer the
+unhandled bearer. Unmatched handled credentials are the last fallback. Ties
+within a rank retain the existing first-match behavior. A sole Basic credential
+also applies to requests with no Authorization header.
+
+List/get responses include the username and URL but omit `token`. Rotate with
+`POST /v1/vaults/:id/credentials/:credential_id` and
+`{"auth":{"type":"static_basic","token":"NEW_SECRET_KEY"}}`; delete through
+the same resource with `DELETE`. A null token disables injection until rotated.
+Basic credentials never refresh on 401. The console offers **HTTP Basic** with
+username/password inputs and password rotation.
+
+Use the native credentials API for this OMA extension. The upstream OpenAI SDK
+contract does not include it, so OpenAI credential lists omit it. Shared MCP
+forwarders support Basic, but Cloudflare's bearer-only outbound credential lookup
+explicitly rejects it. See the [self-host Langfuse example](/self-host/node-docker/#langfuse-with-http-basic).
 
 ### Codex / ChatGPT subscription credentials
 

@@ -222,3 +222,9 @@ describe("resolveOutboundCredentialByHost — cap_cli", () => {
     expect(target!.refresh).toBeDefined();
   });
 });
+
+it("explicitly rejects Basic on the bearer-only Cloudflare outbound lookup", async () => {
+  const { services } = makeServices({ vaultIds: [VAULT] });
+  services.credentials.listByVaults = async () => [{ vault_id: VAULT, credentials: [{ id: "basic", auth: { type: "static_basic", mcp_server_url: "https://langfuse.test", username: "public", token: "password" } }] }];
+  await expect(resolveOutboundCredentialByHost({}, services, TENANT, SESSION, "langfuse.test")).rejects.toThrow("static_basic is not supported by Cloudflare outbound credential lookup");
+});

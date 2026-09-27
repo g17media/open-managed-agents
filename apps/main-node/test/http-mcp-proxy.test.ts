@@ -135,3 +135,20 @@ describe("Node HTTP MCP proxy", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 });
+
+it("passes the Basic username through the Node binding and HTTP route", async () => {
+  const dependencies = {
+    resolveTarget: async () => ({ upstreamUrl: "https://example.test", accessToken: "password", basicUsername: "public" }),
+    fetcher: vi.fn<typeof fetch>(async (_url, init) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Basic cHVibGljOnBhc3N3b3Jk");
+      return new Response(null, { status: 204 });
+    }),
+  };
+  const binding = createNodeMcpProxyBinding(dependencies);
+  expect((await binding.fetch(new Request("https://example.test", { headers: { "x-oma-tenant": "tenant", "x-oma-session": "session", "x-oma-mcp-server": "server" } }))).status).toBe(204);
+  const app = new Hono<{ Variables: { tenant_id: string } }>();
+  app.use("*", async (c, next) => { c.set("tenant_id", "tenant"); await next(); });
+  app.route("/proxy", buildNodeHttpMcpProxyRoutes(dependencies));
+  expect((await app.request("/proxy/session/server", { headers: { authorization: "Bearer operator" } })).status).toBe(204);
+  expect(dependencies.fetcher).toHaveBeenCalledTimes(2);
+});
