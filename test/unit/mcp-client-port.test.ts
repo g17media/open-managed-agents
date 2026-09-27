@@ -144,6 +144,13 @@ describe("OpenMA MCP client port", () => {
       structuredContent: { echoed: "managed" },
     }));
 
+    const oversized = await echo.execute({ value: "x".repeat(300_000) }, {
+      toolCallId: "tool-large", messages: [],
+    });
+    expect(oversized.content[0].text).toBe("echo:" + "x".repeat(49_995) + "\n...(truncated, total 300005 chars)");
+    expect(oversized.structuredContent).toBeUndefined();
+    expect(JSON.stringify(oversized).length).toBeLessThan(50_150);
+
     expect(fake.state.requests.every((request) => request.headers.get("x-oma-tenant") === "tenant-1")).toBe(true);
     expect(fake.state.requests.every((request) => request.headers.get("x-oma-session") === "session-1")).toBe(true);
     expect(fake.state.requests.every((request) => request.headers.get("x-oma-mcp-server") === "demo")).toBe(true);

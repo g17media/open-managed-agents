@@ -15,6 +15,7 @@
     "./harness/registry": "./src/harness/registry.ts",
     "./harness/provider": "./src/harness/provider.ts",
     "./harness/pi-provider": "./src/harness/pi-provider.ts",
+    "./harness/model-card-credentials": "./src/harness/model-card-credentials.ts",
     "./harness/pi-loop": "./src/harness/pi-loop.ts",
     "./harness/pi-compaction": "./src/harness/pi-compaction.ts",
     "./harness/acp-sandbox": "./src/harness/acp-sandbox-loop.ts",

@@ -4,6 +4,42 @@ import { describe, expect, it } from "vitest";
 import { buildAcpSemanticRecoveryPrompt } from "../src/harness/acp-recovery";
 
 describe("ACP semantic recovery prompt", () => {
+  it.each([false, true])("honors structural elisions with an earlier summary: %s", (withSummary) => {
+    const current = user("continue", "current");
+    const events: SessionEvent[] = [
+      ...(withSummary ? [{
+        type: "agent.thread_context_compacted" as const,
+        original_message_count: 12,
+        compacted_message_count: 1,
+        summary: [{ type: "text" as const, text: "Earlier work" }],
+      }] : []),
+      user("Inspect results"),
+      { type: "agent.tool_use", id: "read", name: "read", input: {} },
+      { type: "agent.tool_result", tool_use_id: "read", content: "elided file body" },
+      { type: "agent.mcp_tool_use", id: "doc", name: "get", mcp_server_name: "docs", input: {} },
+      { type: "agent.mcp_tool_result", mcp_tool_use_id: "doc", content: "elided document body" },
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 5,
+        compacted_message_count: 5,
+        metadata: { tool_result_elisions: [
+          { tool_call_id: "read", chars: 16 },
+          { tool_call_id: "doc", chars: 20 },
+        ] },
+      },
+      current,
+    ];
+    const original = JSON.stringify(events);
+    const prompt = buildAcpSemanticRecoveryPrompt(events, current, { reason: "native-state-missing" });
+    expect(prompt).toContain("Completed tool read: [tool result elided during compaction: 16 chars; re-run the tool if needed]");
+    expect(prompt).toContain("Completed tool docs/get: [tool result elided during compaction: 20 chars; re-run the tool if needed]");
+    expect(prompt).not.toContain("elided file body");
+    expect(prompt).not.toContain("elided document body");
+    expect(prompt).toContain("User: Inspect results");
+    expect(prompt.match(/continue/g)).toHaveLength(1);
+    expect(JSON.stringify(events)).toBe(original);
+  });
+
   it("honors the last compaction boundary and emits the current request once", () => {
     const current = user("continue", "current");
     const events: SessionEvent[] = [

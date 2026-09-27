@@ -132,6 +132,80 @@ describe("PiHarness", () => {
     expect(events.some(event => event.type === "agent.tool_result" || event.type === "agent.mcp_tool_result")).toBe(false);
   });
 
+  it.each([false, true])("bounds live Pi MCP results and errors: %s", async throws => {
+    const name = "mcp__docs__get";
+    const { ctx, events, faux } = makeContext([]);
+    let served: unknown;
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall(name, {}, { id: "large" }), { stopReason: "toolUse" }),
+      context => {
+        served = context.messages.find(message => message.role === "toolResult");
+        return fauxAssistantMessage("Done");
+      },
+    ]);
+    ctx.tools = { [name]: { inputSchema: z.object({}), execute: async () => {
+      if (throws) throw new Error("x".repeat(313_478));
+      return { content: [
+        { type: "text", text: "x".repeat(313_478) },
+        { type: "image", mimeType: "image/png", data: "abcd" },
+      ] };
+    } } };
+    await new PiHarness().run(ctx);
+    expect(JSON.stringify(served).length).toBeLessThan(50_500);
+    expect(JSON.stringify(served)).toContain("...(truncated, total 313478 chars)");
+    if (!throws) expect(served).toMatchObject({ content: [expect.anything(), { type: "image", mimeType: "image/png", data: "abcd" }] });
+    const event = events.find(event => event.type === "agent.mcp_tool_result");
+    expect(JSON.stringify(event).length).toBeLessThan(50_500);
+    expect(JSON.stringify(event)).toContain("...(truncated, total 313478 chars)");
+  });
+
+  it("bounds text produced when unsupported binary blocks become notices", async () => {
+    const name = "mcp__docs__get";
+    const { ctx, faux } = makeContext([]);
+    let served: unknown;
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall(name, {}, { id: "many" }), { stopReason: "toolUse" }),
+      context => { served = context.messages.find(message => message.role === "toolResult"); return fauxAssistantMessage("Done"); },
+    ]);
+    ctx.tools = { [name]: { inputSchema: z.object({}), execute: async () => ({ content: Array.from({ length: 1_000 }, () => ({ type: "audio", mimeType: "audio/wav", data: "abcd" })) }) } };
+    await new PiHarness().run(ctx);
+    const text = (served as { content: Array<{ text: string }> }).content.map(part => part.text).join("");
+    expect(text.length).toBeLessThanOrEqual(50_050);
+    expect(text).toContain("binary tool result omitted");
+    expect(text).toContain("...(truncated, total");
+  });
+
+  it("does not expand replayed document blobs into oversized Pi JSON text", async () => {
+    const { ctx, events, faux } = makeContext([]);
+    events.push(
+      { type: "agent.mcp_tool_use", id: "docs", name: "mcp__docs__get", mcp_server_name: "docs", input: {} },
+      { type: "agent.mcp_tool_result", mcp_tool_use_id: "docs", content: [
+        { type: "document", source: { type: "base64", media_type: "application/pdf", data: "a".repeat(800_000) } },
+        { type: "document", source: { type: "base64", media_type: "application/pdf", data: "b".repeat(800_000) } },
+      ] },
+    );
+    let served: unknown;
+    faux.setResponses([context => { served = context.messages.find(message => message.role === "toolResult"); return fauxAssistantMessage("Done"); }]);
+    // Isolate replay conversion from Pi's unrelated pre-turn summarizer.
+    await new PiHarness({ compaction: { name: "replay-only", shouldCompact: () => false, compact: async () => null } }).run(ctx);
+    expect(JSON.stringify(served).length).toBeLessThan(1_000);
+    expect(JSON.stringify(served)).toContain("binary tool result omitted");
+    expect(JSON.stringify(served)).not.toContain("a".repeat(100));
+  });
+
+  it("preserves live read images within the binary budget", async () => {
+    const { ctx, faux } = makeContext([]);
+    let served: unknown;
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("read", {}, { id: "image" }), { stopReason: "toolUse" }),
+      context => { served = context.messages.find(message => message.role === "toolResult"); return fauxAssistantMessage("Done"); },
+    ]);
+    const data = "a".repeat(100_000);
+    ctx.tools = { read: { inputSchema: z.object({}), execute: async () => ({ type: "image", source: { type: "base64", media_type: "image/png", data } }) } };
+    await new PiHarness().run(ctx);
+    expect(served).toMatchObject({ content: [{ type: "image", mimeType: "image/png", data }] });
+  });
+
   it("replays a denied call as an error result to the model", async () => {
     const { ctx, events, faux } = makeContext([]);
     events.push(

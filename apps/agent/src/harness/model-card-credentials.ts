@@ -7,6 +7,7 @@ export interface ResolvedModelCardCredentials {
   provider?: string;
   customHeaders?: Record<string, string>;
   piConfig?: PiModelConfig;
+  maxInputTokens?: number;
 }
 
 export interface StoredModelCardProviderConfig {
@@ -15,6 +16,7 @@ export interface StoredModelCardProviderConfig {
   base_url: string | null;
   custom_headers: Record<string, string> | null;
   pi_config: Record<string, unknown> | null;
+  max_input_tokens?: number | null;
 }
 
 /**
@@ -30,10 +32,19 @@ export function bindStoredModelCardCredentials(
 ): ResolvedModelCardCredentials {
   return {
     model: card.model,
+    ...(modelCardMaxInputTokens(card) !== undefined ? { maxInputTokens: modelCardMaxInputTokens(card) } : {}),
     apiKey,
     baseURL: card.base_url ?? undefined,
     provider: card.provider,
     customHeaders: card.custom_headers ?? undefined,
     piConfig: (card.pi_config as PiModelConfig | null) ?? undefined,
   };
+}
+
+/** /v1/models exposes Pi contextWindow as max_input_tokens. Stored cards
+ * use pi_config; accept explicit max_input_tokens from catalog adapters too.
+ */
+export function modelCardMaxInputTokens(card: { max_input_tokens?: number | null; pi_config: Record<string, unknown> | null }): number | undefined {
+  const limit = card.max_input_tokens ?? card.pi_config?.contextWindow;
+  return typeof limit === "number" && Number.isFinite(limit) && limit > 0 ? limit : undefined;
 }

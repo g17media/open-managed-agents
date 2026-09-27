@@ -1,7 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { bindStoredModelCardCredentials } from "../src/harness/model-card-credentials";
+import { createPiModelRuntime, toAiSdkLanguageModel } from "../src/harness/pi-provider";
+import { resolveContextWindowTokens } from "../src/harness/default-loop";
 
 describe("bindStoredModelCardCredentials", () => {
+  it("carries the card input limit through the shared runtime and SDK adapter", () => {
+    const creds = bindStoredModelCardCredentials({ model: "alias", apiKey: "test" }, {
+      model: "claude-opus-5-5", provider: "anthropic", base_url: null,
+      custom_headers: null, pi_config: null, max_input_tokens: 90_000,
+    }, "test");
+    const runtime = createPiModelRuntime(creds);
+    expect(runtime.model.contextWindow).toBe(90_000);
+    expect(resolveContextWindowTokens(toAiSdkLanguageModel(runtime))).toBe(90_000);
+  });
+  it("uses the stored Pi card budget that /v1/models exposes as max_input_tokens", () => {
+    const creds = bindStoredModelCardCredentials({ model: "alias", apiKey: "test" }, {
+      model: "claude-opus-5-5", provider: "anthropic", base_url: null,
+      custom_headers: null, pi_config: { contextWindow: 70_000 },
+    }, "test");
+    expect(resolveContextWindowTokens(toAiSdkLanguageModel(createPiModelRuntime(creds)))).toBe(70_000);
+  });
   it("does not leak the Anthropic environment endpoint into an official provider card", () => {
     expect(bindStoredModelCardCredentials(
       {
