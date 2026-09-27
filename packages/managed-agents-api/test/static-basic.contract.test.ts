@@ -73,3 +73,106 @@ describe("static Basic credentials API and application", () => {
     expect((await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" }))?.credential.auth).toMatchObject({ token: auth.token });
   });
 });
+
+
+describe("credential metadata editing", () => {
+  it.each(["static_basic", "static_bearer", "cap_cli"])("rejects empty %s tokens atomically and preserves exact secret bytes", async (type) => {
+    const { request, store } = setup();
+    const token = " exact:synthetic-token\t ";
+    const original = { type, token, mcp_server_url: "https://before.example.test", ...(type === "static_basic" ? { username: "user" } : { handle: "before" }), ...(type === "cap_cli" && { cli_id: "git" }) };
+    expect((await request("", "POST", { auth: original, display_name: "Before" })).status).toBe(201);
+    const rejected = await request("/vcrd_basic", "POST", { display_name: "Invalid", auth: { type, token: "", mcp_server_url: "https://invalid.example.test" } });
+    expect(rejected.status).toBe(400);
+    const unchanged = await (await request("/vcrd_basic")).json();
+    expect(unchanged.display_name).toBe("Before");
+    expect(unchanged.auth.mcp_server_url).toBe(original.mcp_server_url);
+    const updated = await request("/vcrd_basic", "POST", { auth: { type, mcp_server_url: "https://after.example.test" } });
+    expect(updated.status).toBe(200);
+    const publicAuth = (await updated.json()).auth;
+    expect(publicAuth).not.toHaveProperty("token");
+    expect(publicAuth).not.toHaveProperty("password");
+    const saved = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect("token" in saved!.credential.auth && saved!.credential.auth.token === token).toBe(true);
+    expect((await setup().request("", "POST", { auth: { ...original, token: "" } })).status).toBe(400);
+    // Tightening empty-string validation must not remove explicit disable/rotation support.
+    const disabled = await request("/vcrd_basic", "POST", { auth: { type, token: null } });
+    expect(disabled.status).toBe(200);
+    expect((await disabled.json()).auth).not.toHaveProperty("token");
+    const disabledRecord = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect(disabledRecord?.credential.auth).toHaveProperty("token", null);
+    expect((await request("/vcrd_basic", "POST", { auth: { type, token } })).status).toBe(200);
+    const rotated = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect("token" in rotated!.credential.auth && rotated!.credential.auth.token === token).toBe(true);
+  });
+
+  it.each([
+    { type: "static_basic", username: "public" },
+    { type: "static_bearer", handle: "before" },
+    { type: "cap_cli", cli_id: "git", handle: "before" },
+  ])("updates $type metadata while preserving omitted secrets", async (kind) => {
+    const { request, store } = setup();
+    const original = { ...kind, token: "keep-this-secret", mcp_server_url: "https://before.example.test" };
+    expect((await request("", "POST", { auth: original, display_name: "Before" })).status).toBe(201);
+    const patch = kind.type === "static_basic" ? { username: "after" } : { handle: "after" };
+    const updated = await request("/vcrd_basic", "POST", {
+      display_name: "After", auth: { type: kind.type, mcp_server_url: "https://after.example.test", ...patch },
+    });
+    expect(updated.status).toBe(200);
+    const expected = { ...kind, ...patch, mcp_server_url: "https://after.example.test" };
+    expect(await updated.json()).toMatchObject({ display_name: "After", auth: expected });
+    const retrieved = await (await request("/vcrd_basic")).json();
+    expect(retrieved.auth).toEqual(expected);
+    expect((await (await request()).json()).data[0].auth).toEqual(expected);
+    expect((await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" }))?.credential.auth).toMatchObject({ token: "keep-this-secret", mcpServerUrl: "https://after.example.test" });
+    if (kind.type !== "static_basic") {
+      const cleared = await request("/vcrd_basic", "POST", { display_name: null, auth: { type: kind.type, handle: null } });
+      expect(cleared.status).toBe(200);
+      const body = await cleared.json();
+      expect(body.display_name).toBeNull();
+      expect(body.auth).not.toHaveProperty("handle");
+      expect(body.auth.mcp_server_url).toBe("https://after.example.test");
+    }
+  });
+
+  it.each(["static_basic", "static_bearer", "cap_cli"])("validates %s create and update URLs identically", async (type) => {
+    const { request } = setup();
+    const original = { type, token: "secret", mcp_server_url: "https://valid.example.test", ...(type === "static_basic" && { username: "user" }), ...(type === "cap_cli" && { cli_id: "git" }) };
+    expect((await request("", "POST", { auth: original })).status).toBe(201);
+    for (const mcp_server_url of ["", "not-a-url", "file:///tmp/secret", null]) {
+      expect((await setup().request("", "POST", { auth: { ...original, mcp_server_url } })).status).toBe(400);
+      expect((await request("/vcrd_basic", "POST", { auth: { type, mcp_server_url } })).status).toBe(400);
+    }
+  });
+
+  it.each(["static_bearer", "cap_cli"])("validates %s handles without overwriting saved metadata", async (type) => {
+    const { request } = setup();
+    const original = { type, token: "secret", handle: "valid.handle-1", mcp_server_url: "https://valid.example.test", ...(type === "cap_cli" && { cli_id: "git" }) };
+    expect((await request("", "POST", { auth: original })).status).toBe(201);
+    for (const handle of ["", "space here", "bad:handle", "a".repeat(129)]) {
+      expect((await request("", "POST", { auth: { ...original, handle } })).status).toBe(400);
+      expect((await request("/vcrd_basic", "POST", { auth: { type, handle } })).status).toBe(400);
+    }
+    expect((await (await request("/vcrd_basic")).json()).auth.handle).toBe("valid.handle-1");
+  });
+
+  it("returns configured registry usernames without passwords or tokens", async () => {
+    const { request } = setup();
+    const created = await request("", "POST", { auth: { type: "container_registry", registry: "ghcr.io", username: "robot", password: "private-password", token: "private-token" } });
+    expect(created.status).toBe(201);
+    const expected = { type: "container_registry", registry: "ghcr.io", username: "robot" };
+    expect((await created.json()).auth).toEqual(expected);
+    expect((await (await request("/vcrd_basic")).json()).auth).toEqual(expected);
+    expect((await (await request()).json()).data[0].auth).toEqual(expected);
+  });
+
+  it("keeps OAuth endpoint and auth type immutable", async () => {
+    const { request, store } = setup();
+    expect((await request("", "POST", { auth: { type: "mcp_oauth", access_token: "secret", mcp_server_url: "https://oauth.example.test" } })).status).toBe(201);
+    const before = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect((await request("/vcrd_basic", "POST", { auth: { type: "mcp_oauth", mcp_server_url: "https://changed.example.test" } })).status).toBe(400);
+    expect((await request("/vcrd_basic", "POST", { auth: { type: "static_bearer", handle: "changed" } })).status).toBe(400);
+    const after = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+    expect((await (await request("/vcrd_basic")).json()).auth).toEqual({ type: "mcp_oauth", mcp_server_url: "https://oauth.example.test" });
+  });
+});

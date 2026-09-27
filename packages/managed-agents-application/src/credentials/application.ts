@@ -115,7 +115,8 @@ function resolveCreateAuth(input: CredentialAuthInput): CredentialAuth {
 
 function toAuthView(auth: CredentialAuth): CredentialAuthView {
   if (auth.type === "container_registry") {
-    return { type: auth.type, ...(auth.registry !== undefined && { registry: auth.registry }) };
+    return { type: auth.type, ...(auth.registry !== undefined && { registry: auth.registry }),
+      ...(auth.username !== undefined && { username: auth.username }) };
   }
   if (auth.type === "cap_cli") {
     return { type: auth.type, cliId: auth.cliId,
@@ -241,7 +242,9 @@ function patchAuth(
     return { ...current, ...update };
   }
   if (current.type === "static_bearer" && update.type === "static_bearer") {
-    const next = { ...current, ...(update.token !== undefined && { token: update.token }) };
+    const next = { ...current,
+      ...(update.token !== undefined && { token: update.token }),
+      ...(update.mcpServerUrl !== undefined && { mcpServerUrl: update.mcpServerUrl }) };
     if (update.handle === null) delete next.handle;
     else if (update.handle !== undefined) next.handle = update.handle;
     return next;
