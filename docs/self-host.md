@@ -593,6 +593,10 @@ curl -s -X POST localhost:8787/v1/vaults/$VID/credentials \
 #    the credential injected; the model never sees the raw token.
 ```
 
+For several credentials on the same host, see
+[Handles: several credentials for one host](../apps/docs/src/content/docs/build/vault-and-mcp.mdx#handles-several-credentials-for-one-host)
+for matching a credential's handle to the Basic username configured in the sandbox.
+
 ### Langfuse with HTTP Basic
 
 Create the credential from an operator context, using the Langfuse **public key**

@@ -36,6 +36,31 @@ Mirrors the [Claude Managed Agents](https://www.anthropic.com/engineering/manage
 | Cloud agent DO | `(tenantId, sid, server)` | `env.MAIN_MCP.mcpForward(...)` via service-binding RPC (binding scope = auth) |
 | Sandbox container | full upstream URL | `env.MAIN_MCP.outboundForward(...)` via the agent worker's outbound interceptor |
 
+For host-bound credentials of every kind, the wire field `mcp_server_url` is a compatibility name: it identifies the target host for credential matching, including ordinary API and git hosts, not just MCP servers.
+
+## Handles: several credentials for one host
+
+On self-host `oma-vault`, a **handle** lets a sandbox select a bearer or CLI
+credential when several credentials match the same host. Set `auth.handle` on
+the credential to the HTTP Basic username the sandbox sends. For example, a
+git remote can use:
+
+```text
+https://<handle>:placeholder@github.com/org/repo.git
+```
+
+Replace `<handle>` with the exact value configured by your sandbox image or
+environment, and copy that same value into the credential's **Handle** field.
+The sandbox configuration chooses and sends this username; the vault does not
+choose it or configure the sandbox for you. The password is a placeholder:
+`oma-vault` selects the matching credential and replaces the outgoing
+Authorization header with the real authentication. For git smart-HTTP requests,
+it injects Basic auth with the stored token as the password.
+
+A handle is optional when only one credential matches the host. For selection
+when credentials share a host, see the existing
+[credential precedence rules](/reference/configuration/#http-basic-credentials).
+
 ## HTTP Basic (self-host)
 
 Use `static_basic` for username/password APIs such as Langfuse. Store the public
