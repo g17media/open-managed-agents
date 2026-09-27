@@ -597,6 +597,62 @@ For several credentials on the same host, see
 [Handles: several credentials for one host](../apps/docs/src/content/docs/build/vault-and-mcp.mdx#handles-several-credentials-for-one-host)
 for matching a credential's handle to the Basic username configured in the sandbox.
 
+### Google Drive and Docs with a service account
+
+Use `service_account_jwt` for a bot identity independent of a user's OAuth
+refresh token. Enable the Drive and Docs APIs in the service account's GCP
+project, create a JSON key, and share the target shared drive with its
+`client_email` as **Content manager** (or share an existing My Drive folder as
+**Editor**). Service accounts cannot own files; use a shared drive for creation.
+
+In **Vault → Add credential → Service account**, paste the JSON key, set the
+host to `https://www.googleapis.com/`, and enter these space-separated scopes:
+
+```text
+https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents
+```
+
+The equivalent native API auth object is:
+
+```json
+{
+  "type": "service_account_jwt",
+  "mcp_server_url": "https://www.googleapis.com/",
+  "key_json": { "client_email": "research-bot@PROJECT.iam.gserviceaccount.com", "private_key": "PEM_FROM_DOWNLOADED_JSON", "private_key_id": "KEY_ID", "token_uri": "https://oauth2.googleapis.com/token" },
+  "scopes": "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents"
+}
+```
+
+Send it as `auth` to `POST /v1/vaults/VAULT_ID/credentials`. `key_json` can also
+be the complete downloaded JSON string. Attach the vault to the session and
+use a placeholder from the sandbox:
+
+```bash
+curl -H 'Authorization: Bearer placeholder' \
+  'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&includeItemsFromAllDrives=true'
+```
+
+For Docs' `https://docs.googleapis.com/v1/documents/DOCUMENT_ID` endpoint,
+create another credential bound to `https://docs.googleapis.com/` with the same
+key and scopes. The [full recipe](../apps/docs/src/content/docs/build/vault-and-mcp.mdx#google-drive-and-docs-with-a-service-account)
+includes an operator-side script and Google setup references.
+
+`subject` is optional and requires administrator-authorized domain-wide
+delegation. The default HTTPS token endpoint is
+`https://oauth2.googleapis.com/token`; `audience` defaults to that URL.
+`oma-vault` must reach this endpoint and have an accurate clock. It mints and
+persists encrypted access tokens, renews within five minutes of expiry, and
+re-mints/retries only once on 401. In-process single-flight is per credential
+revision; multiple vault processes may mint concurrently. Cloudflare forwarding
+rejects this kind explicitly.
+
+Rotate by posting `{"auth":{"type":"service_account_jwt","key_json":NEW_KEY_OBJECT}}`
+to the credential resource, or use the console. Edit scopes, subject, and host
+on that resource; these edits invalidate the cached token. List/get omit the
+private key and minted token. Delete with `DELETE` on the credential resource.
+Exact bearer handle matches still win; this kind ties with a handle-less
+`static_bearer` on the same host and the first store/vault match wins.
+
 ### Langfuse with HTTP Basic
 
 Create the credential from an operator context, using the Langfuse **public key**

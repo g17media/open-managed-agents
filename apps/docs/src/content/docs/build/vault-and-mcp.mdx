@@ -70,6 +70,84 @@ responses and can be rotated without restarting the session. Basic credentials
 never trigger OAuth refresh. See the [Langfuse setup](/self-host/node-docker/#langfuse-with-http-basic)
 and [credential reference](/reference/configuration/#http-basic-credentials).
 
+## Google Drive and Docs with a service account
+
+1. In your Google Cloud project, enable the **Google Drive API** and **Google
+   Docs API**, then create a service account. Create and download a JSON key
+   from its **Keys** tab. See [Google's service-account setup](https://developers.google.com/identity/protocols/oauth2/service-account).
+2. Share the target shared drive with the key's `client_email` as **Content
+   manager**. An ordinary My Drive folder can be shared as **Editor** to work
+   with existing files. Google service accounts have no storage quota and
+   cannot own files; use a shared drive when the bot needs to create files.
+   See [shared drives](https://developers.google.com/workspace/drive/api/guides/about-shareddrives)
+   and [permission roles](https://developers.google.com/workspace/drive/api/guides/ref-roles).
+3. From your operator machine, create the vault credential. Keep the downloaded
+   key on that machine; do not copy it into the sandbox. The API accepts the
+   full Google JSON object or its JSON string in `key_json`:
+
+```python
+import json
+import os
+import urllib.request
+
+with open("service-account.json") as key_file:
+    key = json.load(key_file)
+payload = {
+    "display_name": "Research Bot Google",
+    "auth": {
+        "type": "service_account_jwt",
+        "mcp_server_url": "https://www.googleapis.com/",
+        "key_json": key,
+        "scopes": "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents",
+    },
+}
+request = urllib.request.Request(
+    os.environ["BASE"] + "/v1/vaults/" + os.environ["VAULT_ID"] + "/credentials",
+    data=json.dumps(payload).encode(),
+    headers={"Content-Type": "application/json", "x-api-key": os.environ["KEY"]},
+    method="POST",
+)
+with urllib.request.urlopen(request) as response:
+    credential = json.load(response)  # Response omits the private key.
+```
+
+4. Attach the vault to the session's `vault_ids`. In a sandbox routed through
+   self-host `oma-vault`, call Drive with any placeholder bearer:
+
+```bash
+curl -H 'Authorization: Bearer placeholder' \
+  'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&includeItemsFromAllDrives=true'
+```
+
+The [Docs REST API](https://developers.google.com/workspace/docs/api/reference/rest/v1/documents/get)
+uses `docs.googleapis.com`. Create a second credential with the same key and
+scopes but `mcp_server_url: "https://docs.googleapis.com/"` for that host:
+
+```bash
+curl -H 'Authorization: Bearer placeholder' \
+  'https://docs.googleapis.com/v1/documents/DOCUMENT_ID'
+```
+
+Leave `subject` unset for access through direct sharing. For domain-wide
+delegation, a Workspace administrator must authorize the service account's
+client ID and scopes first; then set `subject` to the user being impersonated.
+Scopes alone do not grant access to unshared files.
+
+The vault signs a one-hour JWT (`iss`, `scope`, `aud`, `iat`, `exp`, optional
+`sub` and header `kid`), exchanges it at the HTTPS `token_uri`, and injects the
+returned access token. It renews within five minutes of expiry and retries
+once after an upstream 401. Key material, assertions and tokens stay outside
+the sandbox. Minted tokens are encrypted in the credential store with a
+revision check; an in-process cache and single-flight prevent duplicate mints
+within that process. Separate processes may mint concurrently.
+
+Rotate from the credential's console detail or update `auth.key_json` through
+the API. Metadata edits such as scopes, subject or host invalidate old cached
+tokens. List/get never return the private key or token. Cloudflare forwarding
+rejects this kind explicitly. A same-host `static_bearer` has equal rank and
+the first match wins; use unambiguous host bindings. See the
+[credential reference](/reference/configuration/#service-account-jwt-credentials).
+
 ## OAuth refresh
 
 For credentials of type `mcp_oauth`, the proxy automatically handles 401:
