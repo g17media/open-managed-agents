@@ -180,6 +180,30 @@ describe("real oma-vault Basic injection", () => {
     await apiRequest("/credential-1", "POST", { auth: { type: "static_basic", token: "password" } });
     expectedAuth = authorization;
   });
+  it.each(["static_bearer", "cap_cli"])("uses an edited %s host and handle on the next request", async (type) => {
+    const created = await apiRequest("", "POST", { auth: { type, token: "editable-pat", handle: "before", mcp_server_url: upstreamUrl, ...(type === "cap_cli" && { cli_id: "git" }) } });
+    expect(created.status).toBe(201);
+    const { id } = await created.json();
+    const selector = (handle: string) => `Basic ${Buffer.from(`${handle}:placeholder`).toString("base64")}`;
+    const path = "/repo.git/info/refs?service=git-upload-pack";
+    expectedAuth = `Basic ${Buffer.from("x-access-token:editable-pat").toString("base64")}`;
+    const editedUrl = new URL(upstreamUrl); editedUrl.hostname = "127.0.0.1";
+    const fallback = await apiRequest("", "POST", { auth: { type: "static_bearer", token: "fallback-pat", mcp_server_url: editedUrl.href } });
+    const { id: fallbackId } = await fallback.json();
+    try {
+      expect(await callProxy(true, selector("before"), path)).toBe(204);
+      const edited = await apiRequest(`/${id}`, "POST", { auth: { type, handle: "after", mcp_server_url: editedUrl.href } });
+      expect(edited.status).toBe(200);
+      expectStripped = true;
+      expect(await callProxy(true, selector("after"), path, true)).toBe(204);
+      expect(await callProxy(true, selector("before"), path, true)).toBe(401);
+      expect(await callProxy(true, selector("after"), path)).toBe(401);
+    } finally {
+      await apiRequest(`/${id}`, "DELETE");
+      await apiRequest(`/${fallbackId}`, "DELETE");
+      expectedAuth = authorization; expectStripped = false;
+    }
+  });
   it.each([false, true])("preserves exact bearer handles and selects by incoming scheme; managed=%s", async (managed) => {
     for (const [id, handle] of [["bearer", undefined], ["handled", "brain"]] as const) {
       const auth = { type: "static_bearer", token: handle ? "handled-pat" : "pat", mcp_server_url: upstreamUrl, ...(handle && { handle }) };

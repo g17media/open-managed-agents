@@ -109,7 +109,7 @@ const oauthRefreshResponseSchema = z
 
 const handleSchema = z.string().regex(/^[A-Za-z0-9._-]+$/u).max(128);
 const basicUsernameSchema = z.string().min(1).regex(/^[^:\x00-\x1f\x7f]+$/u);
-const basicUrlSchema = z.url({ protocol: /^https?$/ });
+const credentialUrlSchema = z.url({ protocol: /^https?$/ });
 const registryAuthSchema = z.object({
   type: z.literal("container_registry"),
   registry: z.string().min(1).optional(),
@@ -118,12 +118,12 @@ const registryAuthSchema = z.object({
   token: z.string().nullable().optional(),
 }).strict();
 const credentialCreateAuthSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("static_basic"), username: basicUsernameSchema, token: z.string().min(1), mcp_server_url: basicUrlSchema }).strict(),
+  z.object({ type: z.literal("static_basic"), username: basicUsernameSchema, token: z.string().min(1), mcp_server_url: credentialUrlSchema }).strict(),
   registryAuthSchema.refine((auth) => !!auth.token || (!!auth.username && !!auth.password), {
     message: "Provide a registry token or both username and password",
   }),
   z.object({ type: z.literal("cap_cli"), cli_id: z.string().min(1), token: z.string(),
-    mcp_server_url: z.string().optional(), handle: handleSchema.optional(),
+    mcp_server_url: credentialUrlSchema.optional(), handle: handleSchema.optional(),
     extras: z.record(z.string(), z.string()).optional() }).strict(),
   z
     .object({
@@ -139,7 +139,7 @@ const credentialCreateAuthSchema = z.discriminatedUnion("type", [
       type: z.literal("static_bearer"),
       handle: handleSchema.optional(),
       token: z.string(),
-      mcp_server_url: z.string(),
+      mcp_server_url: credentialUrlSchema,
     })
     .strict(),
   z
@@ -154,10 +154,10 @@ const credentialCreateAuthSchema = z.discriminatedUnion("type", [
 ]);
 
 const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("static_basic"), username: basicUsernameSchema.optional(), token: z.string().min(1).nullable().optional() }).strict(),
+  z.object({ type: z.literal("static_basic"), username: basicUsernameSchema.optional(), mcp_server_url: credentialUrlSchema.optional(), token: z.string().min(1).nullable().optional() }).strict(),
   registryAuthSchema,
   z.object({ type: z.literal("cap_cli"), token: z.string().nullable().optional(),
-    mcp_server_url: z.string().optional(), handle: handleSchema.nullable().optional(),
+    mcp_server_url: credentialUrlSchema.optional(), handle: handleSchema.nullable().optional(),
     extras: z.record(z.string(), z.string()).optional() }).strict(),
   z
     .object({
@@ -170,6 +170,7 @@ const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("static_bearer"),
+      mcp_server_url: credentialUrlSchema.optional(),
       handle: handleSchema.nullable().optional(),
       token: z.string().nullable().optional(),
     })
@@ -186,7 +187,7 @@ const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
 
 const credentialResponseAuthSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("static_basic"), username: z.string(), mcp_server_url: z.string() }).strict(),
-  z.object({ type: z.literal("container_registry"), registry: z.string().optional() }).strict(),
+  z.object({ type: z.literal("container_registry"), registry: z.string().optional(), username: z.string().nullable().optional() }).strict(),
   z.object({ type: z.literal("cap_cli"), cli_id: z.string(), mcp_server_url: z.string().optional(),
     handle: handleSchema.optional() }).strict(),
   z

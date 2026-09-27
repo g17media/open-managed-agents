@@ -86,7 +86,7 @@ export type CredentialAuthInput =
     };
 
 export type CredentialAuthView =
-  | Pick<ContainerRegistryAuth, "type" | "registry">
+  | Pick<ContainerRegistryAuth, "type" | "registry" | "username">
   | Pick<CliCredentialAuth, "type" | "cliId" | "mcpServerUrl" | "handle">
   | {
       type: "mcp_oauth";
@@ -112,8 +112,8 @@ export type CredentialAuthUpdate =
       expiresAt?: string | null;
       refresh?: CredentialOAuthRefreshUpdate | null;
     }
-  | { type: "static_basic"; token?: string | null; username?: string }
-  | { type: "static_bearer"; token?: string | null; handle?: string | null }
+  | { type: "static_basic"; token?: string | null; username?: string; mcpServerUrl?: string }
+  | { type: "static_bearer"; token?: string | null; handle?: string | null; mcpServerUrl?: string }
   | {
       type: "environment_variable";
       injectionLocation?: CredentialInjectionLocationInput;

@@ -216,7 +216,7 @@ describe("CredentialsApplicationService", () => {
       service.updateCredential({
         vaultId: "vlt_01",
         credentialId: "vcrd_01",
-        auth: { type: "static_bearer", token: "new-secret" },
+        auth: { type: "static_bearer", token: "new-secret", mcpServerUrl: "https://new.example.com", handle: "new-handle" },
         metadata: { obsolete: null, owner: "runtime" },
       }),
     ).resolves.toMatchObject({
@@ -225,7 +225,7 @@ describe("CredentialsApplicationService", () => {
     });
     expect(
       persistence.records.get("workspace_01:vlt_01:vcrd_01")?.credential.auth,
-    ).toMatchObject({ token: "new-secret" });
+    ).toMatchObject({ token: "new-secret", mcpServerUrl: "https://new.example.com", handle: "new-handle" });
 
     await expect(
       service.updateCredential({

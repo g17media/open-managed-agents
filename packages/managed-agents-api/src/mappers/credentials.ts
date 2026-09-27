@@ -127,11 +127,15 @@ function toCredentialAuthUpdate(auth: WireUpdateAuth): CredentialAuthUpdate {
     const { mcp_server_url, ...fields } = auth;
     return { ...fields, ...(mcp_server_url !== undefined && { mcpServerUrl: mcp_server_url }) };
   }
-  if (auth.type === "static_basic") return { ...auth };
+  if (auth.type === "static_basic") {
+    const { mcp_server_url, ...fields } = auth;
+    return { ...fields, ...(mcp_server_url !== undefined && { mcpServerUrl: mcp_server_url }) };
+  }
   if (auth.type === "static_bearer") {
     return {
       type: auth.type,
       ...(auth.token !== undefined && { token: auth.token }),
+      ...(auth.mcp_server_url !== undefined && { mcpServerUrl: auth.mcp_server_url }),
       ...(auth.handle !== undefined && { handle: auth.handle }),
     };
   }
