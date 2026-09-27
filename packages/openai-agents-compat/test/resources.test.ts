@@ -211,3 +211,13 @@ it("keeps native Basic credentials out of the upstream SDK credential union", as
   expect(await f.run("vaults.credentials.list", {}, { vault_id: vault.id })).toMatchObject({ data: [] });
   await expect(f.run("vaults.credentials.retrieve", {}, { vault_id: vault.id, credential_id: created.credential.id })).rejects.toThrow("Credential not found");
 });
+
+
+it("keeps native JWT service accounts out of the upstream SDK credential union", async () => {
+  const f = fixture();
+  const vault = await f.run("vaults.create");
+  const created = await f.credentials.createCredential({ vaultId: vault.id, auth: { type: "service_account_jwt", privateKey: "key", clientEmail: "bot@example.test", mcpServerUrl: "https://www.googleapis.com", scopes: "drive", tokenUri: "https://oauth2.googleapis.com/token" } });
+  if (created.type !== "created") throw new Error("Credential creation failed");
+  expect(await f.run("vaults.credentials.list", {}, { vault_id: vault.id })).toMatchObject({ data: [] });
+  await expect(f.run("vaults.credentials.retrieve", {}, { vault_id: vault.id, credential_id: created.credential.id })).rejects.toThrow("Credential not found");
+});

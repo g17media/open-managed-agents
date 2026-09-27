@@ -80,7 +80,7 @@ function decodeCredentialCursor(
 }
 
 function resolveCreateAuth(input: CredentialAuthInput): CredentialAuth {
-  if (input.type === "static_basic" || input.type === "static_bearer" || input.type === "container_registry" || input.type === "cap_cli") return structuredClone(input);
+  if (input.type === "service_account_jwt" || input.type === "static_basic" || input.type === "static_bearer" || input.type === "container_registry" || input.type === "cap_cli") return structuredClone(input);
   if (input.type === "environment_variable") {
     return {
       type: input.type,
@@ -114,6 +114,13 @@ function resolveCreateAuth(input: CredentialAuthInput): CredentialAuth {
 }
 
 function toAuthView(auth: CredentialAuth): CredentialAuthView {
+  if (auth.type === "service_account_jwt") {
+    return { type: auth.type, mcpServerUrl: auth.mcpServerUrl, clientEmail: auth.clientEmail,
+      tokenUri: auth.tokenUri, scopes: auth.scopes,
+      ...(auth.privateKeyId !== undefined && { privateKeyId: auth.privateKeyId }),
+      ...(auth.subject !== undefined && { subject: auth.subject }),
+      ...(auth.audience !== undefined && { audience: auth.audience }) };
+  }
   if (auth.type === "container_registry") {
     return { type: auth.type, ...(auth.registry !== undefined && { registry: auth.registry }),
       ...(auth.username !== undefined && { username: auth.username }) };
@@ -228,6 +235,18 @@ function patchAuth(
   update: CredentialAuthUpdate,
 ): CredentialAuth | null {
   if (current.type !== update.type) return null;
+  if (current.type === "service_account_jwt" && update.type === "service_account_jwt") {
+    const { privateKeyId, subject, audience, ...patch } = update;
+    const next = { ...current, ...patch };
+    for (const [field, value] of [["privateKeyId", privateKeyId], ["subject", subject], ["audience", audience]] as const) {
+      if (value === null) delete next[field];
+      else if (value !== undefined) next[field] = value;
+    }
+    // All auth edits invalidate a previously minted token, including scope and subject edits.
+    delete next.accessToken;
+    delete next.expiresAt;
+    return next;
+  }
   if (current.type === "container_registry" && update.type === "container_registry") {
     return { ...current, ...update };
   }

@@ -60,6 +60,13 @@ function toTokenEndpointAuthUpdate(
 }
 
 function toCredentialAuthInput(auth: WireCreateAuth): CredentialAuthInput {
+  if (auth.type === "service_account_jwt") {
+    return { type: auth.type, mcpServerUrl: auth.mcp_server_url, clientEmail: auth.client_email,
+      privateKey: auth.private_key, tokenUri: auth.token_uri, scopes: auth.scopes,
+      ...(auth.private_key_id !== undefined && { privateKeyId: auth.private_key_id }),
+      ...(auth.subject !== undefined && { subject: auth.subject }),
+      ...(auth.audience !== undefined && { audience: auth.audience }) };
+  }
   if (auth.type === "container_registry") return { ...auth };
   if (auth.type === "cap_cli") {
     const { cli_id, mcp_server_url, ...fields } = auth;
@@ -122,6 +129,17 @@ function toCredentialAuthInput(auth: WireCreateAuth): CredentialAuthInput {
 }
 
 function toCredentialAuthUpdate(auth: WireUpdateAuth): CredentialAuthUpdate {
+  if (auth.type === "service_account_jwt") {
+    return { type: auth.type,
+      ...(auth.mcp_server_url !== undefined && { mcpServerUrl: auth.mcp_server_url }),
+      ...(auth.client_email !== undefined && { clientEmail: auth.client_email }),
+      ...(auth.private_key !== undefined && { privateKey: auth.private_key }),
+      ...(auth.private_key_id !== undefined && { privateKeyId: auth.private_key_id }),
+      ...(auth.token_uri !== undefined && { tokenUri: auth.token_uri }),
+      ...(auth.scopes !== undefined && { scopes: auth.scopes }),
+      ...(auth.subject !== undefined && { subject: auth.subject }),
+      ...(auth.audience !== undefined && { audience: auth.audience }) };
+  }
   if (auth.type === "container_registry") return { ...auth };
   if (auth.type === "cap_cli") {
     const { mcp_server_url, ...fields } = auth;
@@ -261,6 +279,13 @@ export function toValidateCredentialCommand(
 }
 
 function fromCredentialAuth(auth: CredentialAuthView): object {
+  if (auth.type === "service_account_jwt") {
+    return { type: auth.type, mcp_server_url: auth.mcpServerUrl, client_email: auth.clientEmail,
+      token_uri: auth.tokenUri, scopes: auth.scopes,
+      ...(auth.privateKeyId !== undefined && { private_key_id: auth.privateKeyId }),
+      ...(auth.subject !== undefined && { subject: auth.subject }),
+      ...(auth.audience !== undefined && { audience: auth.audience }) };
+  }
   if (auth.type === "container_registry") return { ...auth };
   if (auth.type === "cap_cli") {
     const { cliId, mcpServerUrl, ...fields } = auth;

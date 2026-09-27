@@ -47,7 +47,7 @@ export function buildCredentialRoutes(
     } catch {
       return c.json(invalidRequest("Request body must be valid JSON"), 400);
     }
-    const parsed = credentialCreateBodySchema.safeParse(body);
+    const parsed = await credentialCreateBodySchema.safeParseAsync(body);
     if (!parsed.success) return c.json(invalidField(parsed.error), 400);
 
     const result = await resolveApplicationPort(source, c).createCredential(
@@ -124,7 +124,7 @@ export function buildCredentialRoutes(
     } catch {
       return c.json(invalidRequest("Request body must be valid JSON"), 400);
     }
-    const parsed = credentialUpdateBodySchema.safeParse(body);
+    const parsed = await credentialUpdateBodySchema.safeParseAsync(body);
     if (!parsed.success) return c.json(invalidField(parsed.error), 400);
 
     const result = await resolveApplicationPort(source, c).updateCredential(

@@ -59,6 +59,21 @@ describe("SqlCredentialStore", () => {
     await client.exec(SCHEMA_SQL);
   });
 
+  it("passes the service account key and cached token through the document cipher", async () => {
+    const store = new SqlCredentialStore(client, new TestCipher());
+    const value: Credential = { ...credential("vcrd_sa", "2026-08-26T10:00:00.000Z"), auth: {
+      type: "service_account_jwt", mcpServerUrl: "https://www.googleapis.com", clientEmail: "bot@example.test",
+      privateKey: "synthetic-private-key", privateKeyId: "kid", scopes: "drive", tokenUri: "https://oauth2.googleapis.com/token",
+      accessToken: "synthetic-access-token", expiresAt: "2026-08-26T11:00:00.000Z",
+    } };
+    await store.insert({ workspaceId: "workspace_01", credential: value });
+    const raw = await client.prepare("SELECT sealed_document FROM managed_credentials WHERE id = ?").bind(value.id).first<{ sealed_document: string }>();
+    expect(raw?.sealed_document).toMatch(/^sealed:/);
+    expect(raw?.sealed_document).not.toContain("synthetic-private-key");
+    expect(raw?.sealed_document).not.toContain("synthetic-access-token");
+    expect(await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: value.id })).toEqual({ revision: 1, credential: value });
+  });
+
   it("seals the complete aggregate and preserves scoped CAS/list behavior", async () => {
     const store = new SqlCredentialStore(client, new TestCipher());
     const first = credential("vcrd_01", "2026-08-26T10:00:00.000Z");

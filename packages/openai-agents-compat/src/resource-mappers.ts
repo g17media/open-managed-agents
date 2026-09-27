@@ -197,7 +197,7 @@ export function nativeTemplateInputs(environment: EnvironmentView, fields: Resou
 }
 
 export function toCredentialAuth(auth: ResourceObject): CredentialAuthInput {
-  if (auth.type === "static_basic") throw new Error("static_basic requires the native /v1/vaults API");
+  if (auth.type === "static_basic" || auth.type === "service_account_jwt") throw new Error(`${auth.type} requires the native /v1/vaults API`);
   if (auth.type === "static_bearer") return { type: auth.type, token: auth.token, mcpServerUrl: auth.mcp_server_url };
   return {
     type: "mcp_oauth", accessToken: auth.access_token, mcpServerUrl: auth.mcp_server_url,
@@ -211,7 +211,7 @@ export function toCredentialAuth(auth: ResourceObject): CredentialAuthInput {
 }
 
 export function toCredentialRotation(auth: ResourceObject): CredentialAuthUpdate {
-  if (auth.type === "static_basic") throw new Error("static_basic requires the native /v1/vaults API");
+  if (auth.type === "static_basic" || auth.type === "service_account_jwt") throw new Error(`${auth.type} requires the native /v1/vaults API`);
   if (auth.type === "static_bearer") return { type: auth.type, token: auth.token };
   return {
     type: "mcp_oauth", ...(auth.access_token !== undefined && { accessToken: auth.access_token }),
@@ -234,6 +234,7 @@ export function credentialResource(credential: CredentialView, name?: string): R
   // expiresAt/refresh. container_registry carries no MCP server at all, and
   // cap_cli has a URL but no OAuth refresh — mapping either as mcp_oauth
   // would read properties that do not exist on them.
+  if (auth.type === "service_account_jwt") throw new Error("service_account_jwt requires the native /v1/vaults API");
   if (auth.type === "static_basic") throw new Error("HTTP Basic credentials require the native /v1/vaults API; the OpenAI SDK contract does not support static_basic");
   if (auth.type === "container_registry") throw new Error("Container registry credentials are not MCP credentials");
   if (auth.type === "cap_cli") {
