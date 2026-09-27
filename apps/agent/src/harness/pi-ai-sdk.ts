@@ -218,6 +218,26 @@ function toPiUserContent(
   return [{ type: "image", data: part.data, mimeType: part.mediaType }];
 }
 
+/**
+ * Tool-result media in any AI SDK shape (`image-data`, `file-data`, or the LanguageModelV3
+ * `file` part whose `data` is `{ type: "data", data }`): images become pi image content so the
+ * model can see what the `read` tool or an MCP server returned; other media becomes a note.
+ */
+function toPiToolMedia(item: { type?: string; data?: unknown; mediaType?: string }): ImageContent | TextContent | null {
+  if (item.type !== "image-data" && item.type !== "file-data" && item.type !== "file") return null;
+  const mediaType = typeof item.mediaType === "string" ? item.mediaType : "";
+  const raw = item.data as unknown;
+  const data = typeof raw === "string"
+    ? raw
+    : raw instanceof Uint8Array
+      ? bytesToBase64(raw)
+      : raw && typeof raw === "object" && (raw as { type?: string }).type === "data" && typeof (raw as { data?: unknown }).data === "string"
+        ? (raw as { data: string }).data
+        : null;
+  if (mediaType.startsWith("image/") && data !== null) return { type: "image", data, mimeType: mediaType };
+  return { type: "text", text: `[${mediaType || item.type} tool output omitted]` };
+}
+
 function toPiToolResult(
   part: Extract<LanguageModelV3CallOptions["prompt"][number], { role: "tool" }>["content"][number] & { type: "tool-result" },
   timestamp: number,
@@ -237,9 +257,8 @@ function toPiToolResult(
   } else {
     content = output.value.flatMap((item): Array<TextContent | ImageContent> => {
       if (item.type === "text") return [{ type: "text", text: item.text }];
-      if (item.type === "image-data") {
-        return [{ type: "image", data: item.data, mimeType: item.mediaType }];
-      }
+      const media = toPiToolMedia(item as { type?: string; data?: unknown; mediaType?: string });
+      if (media) return [media];
       return [{ type: "text", text: `[${item.type} tool output]` }];
     });
   }

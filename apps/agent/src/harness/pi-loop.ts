@@ -664,14 +664,18 @@ function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
       if (!part || typeof part !== "object") return valueToPiContent(part);
       const item = part as Record<string, unknown>;
       if (item.type === "text") return [{ type: "text", text: String(item.text ?? "") }];
-      if (item.type === "image-data") {
-        return [{
-          type: "image",
-          data: String(item.data ?? ""),
-          mimeType: String(item.mediaType ?? "image/png"),
-        }];
+      if (item.type === "image-data" || item.type === "file-data" || item.type === "file") {
+        const mediaType = String(item.mediaType ?? (item.type === "image-data" ? "image/png" : "document"));
+        const raw = item.data as unknown;
+        const data = typeof raw === "string"
+          ? raw
+          : raw && typeof raw === "object" && (raw as { type?: string }).type === "data" && typeof (raw as { data?: unknown }).data === "string"
+            ? (raw as { data: string }).data
+            : null;
+        if (mediaType.startsWith("image/") && data !== null) return [{ type: "image", data, mimeType: mediaType }];
+        return [{ type: "text", text: `[binary tool result omitted: Pi does not support ${mediaType}]` }];
       }
-      if (item.type === "file-data" || item.type === "file-url" || item.type === "file") {
+      if (item.type === "file-url") {
         return [{ type: "text", text: `[binary tool result omitted: Pi does not support ${item.mediaType ?? "document"}]` }];
       }
       return valueToPiContent(item);
