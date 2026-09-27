@@ -3417,6 +3417,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      undici:
+        specifier: 7.29.0
+        version: 7.29.0
     devDependencies:
       vitest:
         specifier: ^4.1.3

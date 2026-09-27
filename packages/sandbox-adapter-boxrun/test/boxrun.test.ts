@@ -183,7 +183,12 @@ describe("BoxRunSandbox", () => {
       if (init.method === "PUT") { uploaded = true; return new Response(null, { status: 204 }); }
       if (url.endsWith("/exec")) {
         expect(uploaded).toBe(true);
-        expect(JSON.parse(String(init.body)).env).toMatchObject({ HTTPS_PROXY: "http://proxy", NODE_EXTRA_CA_CERTS: "/etc/ssl/oma-vault-ca.crt" });
+        const env = JSON.parse(String(init.body)).env;
+        expect(env).toMatchObject({ NODE_EXTRA_CA_CERTS: "/etc/ssl/oma-vault-ca.crt" });
+        const proxy = new URL(env.HTTPS_PROXY);
+        expect(proxy.origin).toBe("http://proxy");
+        expect(proxy.username).toBe("metadata");
+        expect(JSON.parse(Buffer.from(decodeURIComponent(proxy.password), "base64").toString())).toEqual({ tags: ["oma-tenant:t", "oma-session:s"] });
         return json({ execution_id: "exec-1" });
       }
       return sse("event: exit\ndata: {\"exit_code\":0}\n\n");

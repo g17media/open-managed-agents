@@ -20,7 +20,8 @@
 //        ▼
 //   [cloudflare/sandbox container, runtime on :3000]
 //
-// Driver dep: zero — uses globalThis.fetch. The wire protocol is the
+// Uses globalThis.fetch with an undici Agent to bound headers and body waits.
+// The wire protocol is the
 // @cloudflare/sandbox container API, which belljar mirrors exactly.
 //
 // Operator setup (out of scope for this adapter):
@@ -60,13 +61,15 @@
 // lands on /workspace. Both values are non-secret (belljar persists create
 // env in labels).
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 import type { ProcessHandle, SandboxExecutor, SandboxExecResult, SandboxFactory, SandboxRegistryAuth } from "../ports";
 import { sessionVaultProxyUrl } from "../vault-proxy";
 import { getLogger } from "@open-managed-agents/observability";
+import { Agent } from "undici";
+import { lifecycleRequestTimeoutMs, runtimeRequestTimeoutMs } from "../runtime-timeout";
 
 const moduleLogger = getLogger("belljar-sandbox");
 
@@ -100,6 +103,8 @@ interface BelljarProcessRecord {
 }
 
 export interface BelljarSandboxOptions {
+  /** Bound provisioning/wake/startup separately from execution (default 1,350s). */
+  lifecycleTimeoutMs?: number;
   /** OMA owns initialization; Belljar calls back before releasing traffic. */
   startupManaged?: boolean;
   /** Scoped setup access supplied by Belljar's lifecycle callback. Never persisted. */
@@ -150,6 +155,9 @@ export class BelljarSandbox implements SandboxExecutor {
   get initializesWorkspace(): boolean { return this.opts.startupManaged === true; }
   private readonly sandboxId: string;
   private createPromise: Promise<void> | null = null;
+  // The runtime lazily creates named sessions. Avoid the shared `default`
+  // shell, which can still be wedged from a previous OMA process.
+  private shellSessionId = `oma-exec-${randomUUID()}`;
   private volumes: Array<{ hostPath: string; containerPath: string; readOnly: boolean }> = [];
   private envVars: Record<string, string> = {};
   private commandSecrets: Array<{ prefix: string; secrets: Record<string, string> }> = [];
@@ -170,12 +178,14 @@ export class BelljarSandbox implements SandboxExecutor {
    *  workspace) can restore it into the new sandbox. */
   private caUpload: { hostPath: string; guestPath: string } | null = null;
   private defaultTimeoutMs: number;
+  private readonly lifecycleTimeoutMs: number;
   private logger: NonNullable<BelljarSandboxOptions["logger"]>;
 
   constructor(private opts: BelljarSandboxOptions) {
     if (!opts.baseUrl) throw new Error("BelljarSandbox: baseUrl required");
     this.sandboxId = belljarSandboxId(opts.sessionId);
     this.defaultTimeoutMs = opts.defaultTimeoutMs ?? 120_000;
+    this.lifecycleTimeoutMs = lifecycleRequestTimeoutMs(opts.lifecycleTimeoutMs);
     this.logger = opts.logger ?? {
       warn: (msg, ctx) => moduleLogger.warn({ ...(ctx as Record<string, unknown> ?? {}) }, msg),
       log: (msg) => moduleLogger.info(msg),
@@ -198,13 +208,28 @@ export class BelljarSandbox implements SandboxExecutor {
     // later exec 410s with SESSION_TERMINATED. `( … )` confines exit to
     // the command — same semantics as the other adapters' `/bin/sh -c`.
     // The newline before `)` keeps trailing `# comments` from eating it.
-    const res = await this.runtimePost("/api/execute", {
-      command: `(\n${command}\n)`,
-      cwd: "/workspace",
-      env: this.buildEnv(command),
-      timeoutMs: timeout ?? this.defaultTimeoutMs,
-    });
-    return (await res.json()) as BelljarExecResult;
+    const sessionId = this.shellSessionId;
+    try {
+      const res = await this.runtimePost("/api/execute", {
+        command: `(\n${command}\n)`,
+        sessionId,
+        cwd: "/workspace",
+        env: this.buildEnv(command),
+        timeoutMs: timeout ?? this.defaultTimeoutMs,
+      });
+      return (await res.json()) as BelljarExecResult;
+    } catch (error) {
+      if (!isExecutionTimeout(error)) throw error;
+      // A concurrent failure from the old shell must not rotate a healthy one.
+      if (this.shellSessionId === sessionId) this.shellSessionId = `oma-exec-${randomUUID()}`;
+      throw new Error(
+        `${(error as Error).message}. The command MAY STILL BE RUNNING in the sandbox. ` +
+        "The shell may be stuck; subsequent execs will use a fresh shell in the same workspace. " +
+        "The timed-out request was not retried. Inspect its processes/output before retrying; " +
+        "switching shells does not kill the old command.",
+        { cause: error },
+      );
+    }
   }
 
   async startProcess(command: string): Promise<ProcessHandle | null> {
@@ -429,7 +454,7 @@ export class BelljarSandbox implements SandboxExecutor {
   }
 
   async retryStartup(): Promise<void> {
-    const res = await this.fetch(`/v1/sandboxes/${this.sandboxId}/initialization/retry`, { method: "POST" });
+    const res = await this.fetch(`/v1/sandboxes/${this.sandboxId}/initialization/retry`, { method: "POST" }, this.lifecycleTimeoutMs);
     if (!res.ok) throw new Error(`Startup retry failed: ${res.status} ${await res.text()}`);
   }
 
@@ -496,7 +521,7 @@ export class BelljarSandbox implements SandboxExecutor {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }, this.lifecycleTimeoutMs);
     if (!res.ok) {
       throw new Error(`belljar create failed: ${res.status} ${await res.text()}`);
     }
@@ -582,12 +607,14 @@ export class BelljarSandbox implements SandboxExecutor {
 
   private async runtimePost(path: string, body: Record<string, unknown>): Promise<Response> {
     await this.ensureSandbox();
-    const send = () =>
-      this.fetch(`/v1/sandboxes/${this.sandboxId}${path}`, {
+    const send = async () => {
+      await this.ensureRuntimeReady();
+      return this.fetch(`/v1/sandboxes/${this.sandboxId}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(stripUndefined(body)),
       });
+    };
     let res = await send();
     // 410 SESSION_TERMINATED: the session's shell died (crash, OOM, an
     // unwrapped exit). The runtime recreates the session on the next
@@ -623,10 +650,22 @@ export class BelljarSandbox implements SandboxExecutor {
   /** GET/DELETE on the runtime API for process-handle plumbing. */
   async runtimeFetch(path: string, init: RequestInit = {}): Promise<Response> {
     await this.ensureSandbox();
+    await this.ensureRuntimeReady();
     return this.fetch(`/v1/sandboxes/${this.sandboxId}${path}`, init);
   }
 
-  private fetch(path: string, init: RequestInit = {}): Promise<Response> {
+  private async ensureRuntimeReady(): Promise<void> {
+    // The callback runs while Belljar gates ordinary traffic on initialization.
+    // Probing readiness from inside that callback would deadlock its own boot.
+    if (this.opts.initialization) return;
+    const res = await this.fetch(`/v1/sandboxes/${this.sandboxId}/api/ping`, {}, this.lifecycleTimeoutMs);
+    // Let the actual runtime request handle SANDBOX_NOT_FOUND recreation below.
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`belljar readiness failed: ${res.status} ${await res.text()}`);
+    }
+  }
+
+  private async fetch(path: string, init: RequestInit = {}, requestTimeoutMs?: number): Promise<Response> {
     const url = `${this.opts.baseUrl.replace(/\/$/, "")}${path}`;
     const headers = new Headers(init.headers);
     if (this.opts.initialization) {
@@ -636,7 +675,29 @@ export class BelljarSandbox implements SandboxExecutor {
     if (this.opts.token && !headers.has("Authorization")) {
       headers.set("Authorization", `Bearer ${this.opts.token}`);
     }
-    return globalThis.fetch(url, { ...init, headers });
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+    const timeoutMs = requestTimeoutMs ?? runtimeRequestTimeoutMs(body);
+    // AbortSignal alone cannot raise undici's default headers timeout. Set
+    // both socket timers on the per-request dispatcher as well as a total
+    // deadline (a trickling body must not keep the request alive forever).
+    const dispatcher = new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(
+      new DOMException(`Belljar HTTP wait expired after ${timeoutMs}ms`, "TimeoutError"),
+    ), timeoutMs);
+    timer.unref();
+    const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+    try {
+      const request = { ...init, headers, dispatcher, signal };
+      const res = await globalThis.fetch(url, request);
+      // All adapter endpoints return finite JSON/text. Consume the body inside
+      // the deadline and release the Agent even when decoding or reads fail.
+      const bytes = res.body === null ? null : await res.arrayBuffer();
+      return new Response(bytes, { status: res.status, statusText: res.statusText, headers: res.headers });
+    } finally {
+      clearTimeout(timer);
+      await dispatcher.destroy();
+    }
   }
 
   private buildEnv(command: string): Record<string, string> | undefined {
@@ -646,6 +707,14 @@ export class BelljarSandbox implements SandboxExecutor {
     }
     return Object.keys(env).length > 0 ? env : undefined;
   }
+}
+
+function isExecutionTimeout(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /COMMAND_EXECUTION_ERROR|Command timeout/i.test(error.message)
+    || error.name === "TimeoutError"
+    || /UND_ERR_(HEADERS|BODY|CONNECT)_TIMEOUT/.test(String((error as Error & { code?: string }).code))
+    || isExecutionTimeout(error.cause);
 }
 
 class BelljarProcessHandle implements ProcessHandle {
@@ -736,6 +805,8 @@ export const sandboxFactory: SandboxFactory = async (ctx, env) => {
   return new BelljarSandbox({
     baseUrl,
     token: env.BELLJAR_TOKEN,
+    lifecycleTimeoutMs: env.BELLJAR_LIFECYCLE_TIMEOUT_MS === undefined
+      ? undefined : Number(env.BELLJAR_LIFECYCLE_TIMEOUT_MS),
     // NOTE: unlike other providers, the image here must be
     // `cloudflare/sandbox` or an image derived from it — the adapter
     // speaks that image's runtime API. The session's environment-level

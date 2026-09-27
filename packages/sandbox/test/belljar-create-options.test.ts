@@ -4,6 +4,7 @@
 // runtime calls).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { rmSync } from "node:fs";
 import {
   BelljarSandbox,
   sandboxFactory,
@@ -34,9 +35,12 @@ function createBody(calls: Array<{ url: string; init?: RequestInit }>) {
   return JSON.parse(String(create!.init!.body)) as Record<string, unknown>;
 }
 
+const temporaryDirectories: string[] = [];
 describe("BelljarSandbox create options", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
   });
 
   it("sends image + registryAuth on the create request", async () => {
@@ -68,6 +72,7 @@ describe("BelljarSandbox create options", () => {
     const { join } = await import("node:path");
     const { tmpdir } = await import("node:os");
     const dir = mkdtempSync(join(tmpdir(), "oma-vault-ca-"));
+    temporaryDirectories.push(dir);
     const pem = "-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n";
     writeFileSync(join(dir, "ca.crt"), pem);
     vi.stubEnv("OMA_VAULT_PROXY_URL", "http://oma-vault:14322");
