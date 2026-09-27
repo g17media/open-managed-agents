@@ -642,7 +642,7 @@ export async function buildTools(
             const src = (output as unknown as { source: { data: string; media_type: string } }).source;
             return {
               type: "content",
-              value: [{ type: "file-data", data: src.data, mediaType: src.media_type }],
+              value: [{ type: t === "image" ? "image-data" : "file-data", data: src.data, mediaType: src.media_type }],
             };
           }
         }
