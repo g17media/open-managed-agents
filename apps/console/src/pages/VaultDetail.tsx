@@ -1,5 +1,6 @@
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
@@ -40,6 +41,7 @@ type Vault = BetaManagedAgentsVault;
 type Credential = Omit<BetaManagedAgentsCredential, "auth"> & {
   auth: { handle?: string } & (BetaManagedAgentsCredential["auth"]
     | { type: "static_basic"; username: string; mcp_server_url: string }
+    | { type: "service_account_jwt"; mcp_server_url: string; client_email: string; scopes: string; token_uri: string; subject?: string | null; private_key_id?: string | null; audience?: string | null }
     | { type: "container_registry"; registry?: string; username?: string | null }
     | { type: "cap_cli"; cli_id: string; mcp_server_url?: string });
 };
@@ -56,6 +58,8 @@ function credentialTypeView(credential: Credential): {
         className: "bg-info-subtle text-info",
         target: ("mcp_server_url" in credential.auth ? credential.auth.mcp_server_url : ""),
       };
+    case "service_account_jwt":
+      return { label: "Service account", className: "bg-success-subtle text-success", target: credential.auth.mcp_server_url };
     case "static_basic":
       return { label: "HTTP Basic", className: "bg-success-subtle text-success", target: credential.auth.mcp_server_url };
     case "static_bearer":
@@ -632,18 +636,22 @@ function EditCredentialModal({ vault, credential, onClose, onSaved }: {
   const [handle, setHandle] = useState(auth.handle ?? "");
   const [username, setUsername] = useState(originalUsername);
   const [registry, setRegistry] = useState(originalRegistry);
+  const [scopes, setScopes] = useState(auth.type === "service_account_jwt" ? auth.scopes : "");
+  const [subject, setSubject] = useState(auth.type === "service_account_jwt" ? auth.subject ?? "" : "");
+  const [keyJson, setKeyJson] = useState("");
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const editableServer = auth.type === "static_bearer" || auth.type === "static_basic" || auth.type === "cap_cli";
+  const editableServer = auth.type === "static_bearer" || auth.type === "static_basic" || auth.type === "cap_cli" || auth.type === "service_account_jwt";
   const hasHandle = auth.type === "static_bearer" || auth.type === "cap_cli";
   const urlInvalid = editableServer && serverUrl !== originalUrl && !validServerUrl(serverUrl);
   const handleInvalid = hasHandle && !validHandle(handle);
   const usernameInvalid = (auth.type === "static_basic" && (!username || /[:\x00-\x1f\x7f]/.test(username)))
     || (auth.type === "container_registry" && !!originalUsername && !username);
   const registryInvalid = auth.type === "container_registry" && registry !== originalRegistry && !registry.trim();
-  const invalid = urlInvalid || handleInvalid || usernameInvalid || registryInvalid;
-  const canRotateToken = editableServer;
+  const scopesInvalid = auth.type === "service_account_jwt" && !scopes.trim();
+  const invalid = urlInvalid || handleInvalid || usernameInvalid || registryInvalid || scopesInvalid;
+  const canRotateToken = editableServer && auth.type !== "service_account_jwt";
 
   const save = async () => {
     const trimmed = displayName.trim();
@@ -660,6 +668,11 @@ function EditCredentialModal({ vault, credential, onClose, onSaved }: {
       }
       if (auth.type === "container_registry" && registry !== originalRegistry) patch.registry = registry.trim();
       if (canRotateToken && token !== "") patch.token = token;
+      if (auth.type === "service_account_jwt") {
+        if (scopes !== auth.scopes) patch.scopes = scopes.trim();
+        if (subject !== (auth.subject ?? "")) patch.subject = subject.trim() || null;
+        if (keyJson.trim()) patch.key_json = keyJson;
+      }
       await api(`/v1/vaults/${vault.id}/credentials/${credential.id}`, {
         method: "POST",
         body: JSON.stringify({
@@ -696,6 +709,16 @@ function EditCredentialModal({ vault, credential, onClose, onSaved }: {
         {auth.type === "container_registry" && <CredentialField label="Registry / host" value={registry} onChange={setRegistry} invalid={registryInvalid} help={registryInvalid ? "A configured registry cannot be cleared." : undefined} />}
         {(auth.type === "static_basic" || auth.type === "container_registry") && <CredentialField label="Username" value={username} onChange={setUsername}
           invalid={usernameInvalid} help={usernameInvalid ? (auth.type === "container_registry" ? "Keep a username for the stored registry password." : "Username is required and cannot contain colons or control characters.") : undefined} />}
+        {auth.type === "service_account_jwt" && <>
+          <CredentialField label="Client email" value={auth.client_email} />
+          <CredentialField label="Token endpoint" value={auth.token_uri} />
+          <CredentialField label="Key ID" value={auth.private_key_id ?? ""} />
+          <CredentialField label="Scopes" value={scopes} onChange={setScopes} invalid={scopesInvalid}
+            help={scopesInvalid ? "At least one scope is required." : "Space-separated OAuth scopes."} />
+          <CredentialField label="Subject" value={subject} onChange={setSubject}
+            help="Optional user email for domain-wide delegation." />
+          <CredentialField label="Audience" value={auth.audience ?? auth.token_uri} />
+        </>}
         {auth.type === "mcp_oauth" && <>
           {auth.refresh && <>
             <CredentialField label="Token endpoint" value={auth.refresh.token_endpoint} />
@@ -714,9 +737,14 @@ function EditCredentialModal({ vault, credential, onClose, onSaved }: {
           <CredentialField label="Injection locations" value={[auth.injection_location.header && "header", auth.injection_location.body && "body"].filter(Boolean).join(", ") || "none"} />
         </>}
         <div className="text-sm text-fg-muted">
-          {auth.type === "static_basic" ? "Password" : "Stored secret"}: <span aria-label="Stored secret is hidden">••••••••</span>
-          <p className="text-xs text-fg-subtle mt-1">Stored secrets are never returned. {canRotateToken ? "Enter a replacement below to rotate." : "Only public configuration is shown."}</p>
+          {auth.type === "static_basic" ? "Password" : auth.type === "service_account_jwt" ? "Private key" : "Stored secret"}: <span aria-label="Stored secret is hidden">••••••••</span>
+          <p className="text-xs text-fg-subtle mt-1">Stored secrets are never returned. {canRotateToken || auth.type === "service_account_jwt" ? "Enter a replacement below to rotate." : "Only public configuration is shown."}</p>
         </div>
+        {auth.type === "service_account_jwt" && <div>
+          <Label htmlFor="cred-edit-key" className="text-sm text-fg-muted block mb-1">New JSON key (optional)</Label>
+          <Textarea id="cred-edit-key" value={keyJson} onChange={(e) => setKeyJson(e.target.value)} className={inputCls}
+            rows={4} autoComplete="off" spellCheck={false} placeholder="Leave blank to keep the current key" />
+        </div>}
         {canRotateToken && <div>
           <Label htmlFor="cred-edit-token" className="text-sm text-fg-muted block mb-1">{auth.type === "static_basic" ? "New password (optional)" : t.vaults.newTokenOptional}</Label>
           <SecretInput id="cred-edit-token" value={token} onChange={(e) => setToken(e.target.value)} className={inputCls}
@@ -752,13 +780,16 @@ function AddCredentialModal({
   // Anthropic for the first two.
   const [addTab, setAddTab] = useState<"mcp" | "cli" | "registry">("mcp");
   const [connecting, setConnecting] = useState<string | null>(null);
+  const [createError, setCreateError] = useState("");
 
   // Custom MCP server form — single inline form (Anthropic-style). All
   // fields in one view; refresh-token block reveals only when an access
   // token is filled (RFC 6749 §6: refresh_token requires access_token).
   const [customForm, setCustomForm] = useState({
     name: "",
-    type: "oauth" as "oauth" | "bearer" | "basic",
+    type: "oauth" as "oauth" | "bearer" | "basic" | "service_account",
+    keyJson: "",
+    subject: "",
     username: "",
     url: "",
     pickedName: "",
@@ -912,7 +943,20 @@ function AddCredentialModal({
 
   const createBearerCred = async () => {
     setConnecting("custom");
+    setCreateError("");
     try {
+      if (customForm.type === "service_account") {
+        await api(`/v1/vaults/${vault.id}/credentials`, { method: "POST", body: JSON.stringify({
+          display_name: customForm.name || "Service account",
+          auth: {
+            type: "service_account_jwt", mcp_server_url: customForm.url,
+            key_json: customForm.keyJson, scopes: customForm.scopes.trim(),
+            ...(customForm.subject.trim() ? { subject: customForm.subject.trim() } : {}),
+          },
+        }) });
+        onCreated();
+        return;
+      }
       if (customForm.type === "basic") {
         await api(`/v1/vaults/${vault.id}/credentials`, { method: "POST", body: JSON.stringify({
           display_name: customForm.name || customForm.pickedName || "HTTP Basic",
@@ -959,6 +1003,8 @@ function AddCredentialModal({
         auth,
       });
       onCreated();
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : "Failed to create credential");
     } finally {
       setConnecting(null);
     }
@@ -973,7 +1019,7 @@ function AddCredentialModal({
     //     "Connect". Picking a registry row only fills the MCP Server
     //     field, never auto-connects.
     if (!customForm.url) return;
-    if (customForm.type === "basic" || customForm.type === "bearer" || customForm.token) {
+    if (customForm.type === "service_account" || customForm.type === "basic" || customForm.type === "bearer" || customForm.token) {
       void createBearerCred();
     } else {
       connectMcp(
@@ -1181,12 +1227,13 @@ function AddCredentialModal({
               disabled={
                 !validServerUrl(customForm.url) ||
                 !!connecting ||
+                (customForm.type === "service_account" && (!customForm.keyJson.trim() || !customForm.scopes.trim())) ||
                 (customForm.type === "bearer" && !handleValid) ||
                 (customForm.type === "basic" && (!customForm.username || /[:\x00-\x1f\x7f]/.test(customForm.username))) ||
                 ((customForm.type === "bearer" || customForm.type === "basic") && !customForm.token)
               }
             >
-              {customForm.token || customForm.type === "bearer" || customForm.type === "basic"
+              {customForm.token || customForm.type === "bearer" || customForm.type === "basic" || customForm.type === "service_account"
                 ? "Add credential"
                 : "Connect"}
             </Button>
@@ -1194,6 +1241,7 @@ function AddCredentialModal({
         )
       }
     >
+      {createError && <div role="alert" className="mb-3 text-sm text-danger">{createError}</div>}
       <Tabs
         value={addTab}
         onValueChange={(v) => setAddTab(v as "mcp" | "cli" | "registry")}
@@ -1230,10 +1278,11 @@ function AddCredentialModal({
           </div>
 
           <Tabs value={customForm.type} onValueChange={(type) => setCustomForm({ ...customForm, type: type as typeof customForm.type })}>
-            <TabsList aria-label="Authentication type">
+            <TabsList aria-label="Authentication type" className="h-auto flex-wrap">
               <TabsTrigger value="oauth">OAuth</TabsTrigger>
               <TabsTrigger value="bearer">Bearer token</TabsTrigger>
               <TabsTrigger value="basic">HTTP Basic</TabsTrigger>
+              <TabsTrigger value="service_account">Service account</TabsTrigger>
             </TabsList>
             <TabsContent value={customForm.type} className="space-y-4 pt-2">
 
@@ -1358,7 +1407,27 @@ function AddCredentialModal({
             </div>
           )}
 
-          {customForm.type === "basic" ? (
+          {customForm.type === "service_account" ? (
+            <div className="space-y-3">
+              <div>
+                <Label htmlFor="vault-sa-key">Paste JSON key</Label>
+                <Textarea id="vault-sa-key" value={customForm.keyJson} onChange={(e) => setCustomForm({ ...customForm, keyJson: e.target.value })}
+                  rows={5} autoComplete="off" spellCheck={false} className={inputCls} />
+                <p className="text-xs text-fg-subtle mt-1">Paste the service account JSON key. Share your Drive folder with its client_email.</p>
+              </div>
+              <div>
+                <Label htmlFor="vault-sa-scopes">Scopes</Label>
+                <Input id="vault-sa-scopes" value={customForm.scopes} onChange={(e) => setCustomForm({ ...customForm, scopes: e.target.value })}
+                  placeholder="https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents" />
+                <p className="text-xs text-fg-subtle mt-1">Required, space-separated OAuth scopes.</p>
+              </div>
+              <div>
+                <Label htmlFor="vault-sa-subject">Subject (optional)</Label>
+                <Input id="vault-sa-subject" value={customForm.subject} onChange={(e) => setCustomForm({ ...customForm, subject: e.target.value })} />
+                <p className="text-xs text-fg-subtle mt-1">User email for domain-wide delegation. Leave blank to act as the service account.</p>
+              </div>
+            </div>
+          ) : customForm.type === "basic" ? (
             <div className="space-y-3">
               <div><Label htmlFor="vault-basic-username">Username</Label><Input id="vault-basic-username" value={customForm.username} onChange={(e) => setCustomForm({ ...customForm, username: e.target.value })} /></div>
               <div><Label htmlFor="vault-basic-password">Password</Label><SecretInput id="vault-basic-password" value={customForm.token} onChange={(e) => setCustomForm({ ...customForm, token: e.target.value })} /></div>
@@ -1391,7 +1460,7 @@ function AddCredentialModal({
 
           {/* Refresh token block (Optional) — only meaningful when an
               Access token is also set (RFC 6749 §6 refresh_token grant). */}
-          {customForm.type !== "basic" && customForm.token && (
+          {(customForm.type === "oauth" || customForm.type === "bearer") && customForm.token && (
             <Disclosure
               title="Refresh token"
               meta={
