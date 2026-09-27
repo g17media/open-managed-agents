@@ -122,7 +122,7 @@ const credentialCreateAuthSchema = z.discriminatedUnion("type", [
   registryAuthSchema.refine((auth) => !!auth.token || (!!auth.username && !!auth.password), {
     message: "Provide a registry token or both username and password",
   }),
-  z.object({ type: z.literal("cap_cli"), cli_id: z.string().min(1), token: z.string(),
+  z.object({ type: z.literal("cap_cli"), cli_id: z.string().min(1), token: z.string().min(1),
     mcp_server_url: credentialUrlSchema.optional(), handle: handleSchema.optional(),
     extras: z.record(z.string(), z.string()).optional() }).strict(),
   z
@@ -138,7 +138,7 @@ const credentialCreateAuthSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("static_bearer"),
       handle: handleSchema.optional(),
-      token: z.string(),
+      token: z.string().min(1),
       mcp_server_url: credentialUrlSchema,
     })
     .strict(),
@@ -156,7 +156,7 @@ const credentialCreateAuthSchema = z.discriminatedUnion("type", [
 const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("static_basic"), username: basicUsernameSchema.optional(), mcp_server_url: credentialUrlSchema.optional(), token: z.string().min(1).nullable().optional() }).strict(),
   registryAuthSchema,
-  z.object({ type: z.literal("cap_cli"), token: z.string().nullable().optional(),
+  z.object({ type: z.literal("cap_cli"), token: z.string().min(1).nullable().optional(),
     mcp_server_url: credentialUrlSchema.optional(), handle: handleSchema.nullable().optional(),
     extras: z.record(z.string(), z.string()).optional() }).strict(),
   z
@@ -172,7 +172,7 @@ const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
       type: z.literal("static_bearer"),
       mcp_server_url: credentialUrlSchema.optional(),
       handle: handleSchema.nullable().optional(),
-      token: z.string().nullable().optional(),
+      token: z.string().min(1).nullable().optional(),
     })
     .strict(),
   z

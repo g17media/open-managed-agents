@@ -5,13 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
 import { VaultDetail } from "./VaultDetail";
 
-const mocks = vi.hoisted(() => ({ api: vi.fn(), auth: {} as Record<string, unknown>, displayName: "Example credential" as string | null }));
+const mocks = vi.hoisted(() => ({ api: vi.fn(), auth: {} as Record<string, unknown>, displayName: "Example credential" as string | null, metadata: {} as Record<string, string> }));
 const vault = { id: "vault-1", display_name: "Team credentials", type: "vault", archived_at: null, metadata: {}, created_at: "2026-09-27T00:00:00Z", updated_at: "2026-09-27T01:00:00Z" };
 vi.mock("../lib/api", () => ({ useApi: () => ({ api: mocks.api }), getActiveTenantId: () => "workspace" }));
 vi.mock("../lib/useManagedApi", () => ({ useManagedApi: () => ({}) }));
 vi.mock("../lib/useApiQuery", () => ({
   useApiQuery: () => ({ data: vault, error: null }),
-  useInfiniteApiQuery: () => ({ items: [{ ...vault, id: "cred-1", vault_id: vault.id, type: "vault_credential", display_name: mocks.displayName, auth: mocks.auth }], isLoading: false, refresh: vi.fn() }),
+  useInfiniteApiQuery: () => ({ items: [{ ...vault, id: "cred-1", vault_id: vault.id, type: "vault_credential", display_name: mocks.displayName, auth: mocks.auth, metadata: mocks.metadata }], isLoading: false, refresh: vi.fn() }),
   useQueryClient: () => ({ invalidateQueries: vi.fn() }),
 }));
 vi.mock("../components/PageHeader", () => ({ PageHeader: ({ actions }: { actions?: React.ReactNode }) => <div>{actions}</div> }));
@@ -33,10 +33,47 @@ async function save() {
 beforeEach(() => {
   mocks.api.mockReset().mockResolvedValue({});
   mocks.displayName = "Example credential";
+  mocks.metadata = {};
   mocks.auth = { type: "static_bearer", mcp_server_url: "https://github.com", handle: "repo-reader" };
 });
 
 describe("credential details and updates", () => {
+  it.each([
+    { type: "static_bearer", mcp_server_url: "https://github.com", handle: "repo-reader" },
+    { type: "static_basic", mcp_server_url: "https://logs.example.com", username: "public" },
+    { type: "cap_cli", cli_id: "git", mcp_server_url: "https://git.example.com", handle: "writer" },
+    { type: "mcp_oauth", mcp_server_url: "https://mcp.example.com", expires_at: "2026-10-01T00:00:00Z", refresh: { client_id: "client", token_endpoint: "https://auth.example.com/token", token_endpoint_auth: { type: "client_secret_post", client_secret: "synthetic-client-secret" }, scope: "read write", resource: "https://resource.example.com", refresh_token: "synthetic-refresh" } },
+    { type: "container_registry", registry: "ghcr.io", username: "robot" },
+    { type: "environment_variable", secret_name: "SERVICE_KEY", networking: { type: "limited", allowed_hosts: ["api.example.com"] }, injection_location: { body: true, header: true } },
+  ])("copies each public field of $type and never renders secret properties", async (auth) => {
+    mocks.auth = { ...auth, token: "synthetic-private-token", password: "synthetic-private-password", access_token: "synthetic-access", secret_value: "synthetic-value" };
+    mocks.metadata = { provider: "example-provider" };
+    const clipboard = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: clipboard } });
+    const dialog = edit();
+    const fields: Record<string, string> = { "Display name": "Example credential", Created: vault.created_at, Updated: vault.updated_at, Provider: "example-provider" };
+    if (auth.mcp_server_url) fields["Server URL"] = auth.mcp_server_url;
+    if (auth.handle) fields.Handle = auth.handle;
+    if (auth.username) fields.Username = auth.username;
+    if (auth.cli_id) fields["CLI ID"] = auth.cli_id;
+    if (auth.registry) fields["Registry / host"] = auth.registry;
+    if (auth.refresh) Object.assign(fields, { "Client ID": "client", "Token endpoint": "https://auth.example.com/token", "Auth method": "client_secret_post", Scopes: "read write", Resource: "https://resource.example.com", Expires: "2026-10-01T00:00:00Z" });
+    if (auth.secret_name) Object.assign(fields, { "Secret name": "SERVICE_KEY", Networking: "limited", "Allowed hosts": "api.example.com", "Injection locations": "header, body" });
+    for (const [label, value] of Object.entries(fields)) {
+      expect(dialog.getByLabelText(label)).toHaveValue(value);
+      clipboard.mockClear();
+      fireEvent.click(dialog.getByRole("button", { name: `Copy ${label}` }));
+      await waitFor(() => expect(clipboard).toHaveBeenCalledExactlyOnceWith(value));
+    }
+    expect(screen.getByRole("dialog").outerHTML.includes("synthetic-")).toBe(false);
+    expect(dialog.getByLabelText("Stored secret is hidden")).toHaveTextContent("••••••••");
+    if (auth.type === "static_bearer") {
+      fireEvent.change(dialog.getByLabelText("Handle"), { target: { value: "edited" } });
+      fireEvent.click(dialog.getByRole("button", { name: "Copy Handle" }));
+      await waitFor(() => expect(clipboard).toHaveBeenLastCalledWith("edited"));
+    }
+  });
+
   it("edits unnamed credentials without requiring or sending a name", async () => {
     mocks.displayName = null;
     const dialog = edit();
@@ -146,6 +183,43 @@ describe("credential details and updates", () => {
 });
 
 describe("credential selectors", () => {
+  it("labels and validates the git Server URL and preserves HTTP and port on create", async () => {
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    const user = userEvent.setup();
+    show();
+    await user.click(screen.getByRole("button", { name: "+ Add credential" }));
+    const dialog = within(screen.getByRole("dialog"));
+    await user.click(dialog.getByRole("tab", { name: "CLI" }));
+    dialog.getByRole("combobox").focus();
+    await user.keyboard("{ArrowDown}{End}{Enter}");
+    fireEvent.change(dialog.getByLabelText(/Token \(write-only/), { target: { value: "synthetic-token" } });
+    const url = dialog.getByLabelText("Server URL");
+    fireEvent.change(url, { target: { value: "file:///tmp/key" } });
+    expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
+    fireEvent.change(url, { target: { value: "http://git.example.com:8080" } });
+    fireEvent.change(dialog.getByLabelText(/Handle/), { target: { value: "Exact.Handle" } });
+    await user.click(dialog.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(mocks.api).toHaveBeenCalledOnce());
+    expect(JSON.parse(mocks.api.mock.calls[0][1].body).auth).toEqual({ type: "cap_cli", cli_id: "git", token: "synthetic-token", mcp_server_url: "http://git.example.com:8080", handle: "Exact.Handle" });
+  });
+
+  it.each(["Bearer token", "HTTP Basic", "OAuth"])("validates the %s create URL before enabling submission", async (type) => {
+    const user = userEvent.setup();
+    show();
+    await user.click(screen.getByRole("button", { name: "+ Add credential" }));
+    const dialog = within(screen.getByRole("dialog"));
+    await user.click(dialog.getByRole("tab", { name: type }));
+    if (type !== "HTTP Basic") await user.click(dialog.getByRole("button", { name: /Access token/ }));
+    fireEvent.change(dialog.getByLabelText(type === "HTTP Basic" ? "Password" : "Access token"), { target: { value: "synthetic-token" } });
+    if (type === "HTTP Basic") fireEvent.change(dialog.getByLabelText("Username"), { target: { value: "user" } });
+    for (const value of ["not a URL", "file:///tmp/key", "https://"]) {
+      fireEvent.change(dialog.getByRole("combobox"), { target: { value } });
+      expect(dialog.getByRole("button", { name: "Add credential" })).toBeDisabled();
+    }
+    fireEvent.change(dialog.getByRole("combobox"), { target: { value: "https://api.example.com" } });
+    expect(dialog.getByRole("button", { name: "Add credential" })).toBeEnabled();
+  });
+
   it("exposes selected states and supports keyboard navigation for both selectors", async () => {
     const user = userEvent.setup();
     show();
@@ -156,6 +230,10 @@ describe("credential selectors", () => {
     expect(within(kind).getByRole("tab", { name: "MCP server" })).toHaveAttribute("aria-selected", "true");
     const oauth = dialog.getByRole("tab", { name: "OAuth" });
     expect(oauth).toHaveAttribute("aria-selected", "true");
+    for (const tab of dialog.getAllByRole("tab")) {
+      expect(tab).toHaveClass("data-[state=active]:bg-background", "data-[state=active]:text-foreground");
+      expect(tab).toHaveAttribute("data-state", tab.getAttribute("aria-selected") === "true" ? "active" : "inactive");
+    }
     oauth.focus();
     await user.keyboard("{ArrowRight}");
     await waitFor(() => expect(dialog.getByRole("tab", { name: "Bearer token" })).toHaveAttribute("aria-selected", "true"));

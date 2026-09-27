@@ -76,6 +76,35 @@ describe("static Basic credentials API and application", () => {
 
 
 describe("credential metadata editing", () => {
+  it.each(["static_basic", "static_bearer", "cap_cli"])("rejects empty %s tokens atomically and preserves exact secret bytes", async (type) => {
+    const { request, store } = setup();
+    const token = " exact:synthetic-token\t ";
+    const original = { type, token, mcp_server_url: "https://before.example.test", ...(type === "static_basic" ? { username: "user" } : { handle: "before" }), ...(type === "cap_cli" && { cli_id: "git" }) };
+    expect((await request("", "POST", { auth: original, display_name: "Before" })).status).toBe(201);
+    const rejected = await request("/vcrd_basic", "POST", { display_name: "Invalid", auth: { type, token: "", mcp_server_url: "https://invalid.example.test" } });
+    expect(rejected.status).toBe(400);
+    const unchanged = await (await request("/vcrd_basic")).json();
+    expect(unchanged.display_name).toBe("Before");
+    expect(unchanged.auth.mcp_server_url).toBe(original.mcp_server_url);
+    const updated = await request("/vcrd_basic", "POST", { auth: { type, mcp_server_url: "https://after.example.test" } });
+    expect(updated.status).toBe(200);
+    const publicAuth = (await updated.json()).auth;
+    expect(publicAuth).not.toHaveProperty("token");
+    expect(publicAuth).not.toHaveProperty("password");
+    const saved = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect("token" in saved!.credential.auth && saved!.credential.auth.token === token).toBe(true);
+    expect((await setup().request("", "POST", { auth: { ...original, token: "" } })).status).toBe(400);
+    // Tightening empty-string validation must not remove explicit disable/rotation support.
+    const disabled = await request("/vcrd_basic", "POST", { auth: { type, token: null } });
+    expect(disabled.status).toBe(200);
+    expect((await disabled.json()).auth).not.toHaveProperty("token");
+    const disabledRecord = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect(disabledRecord?.credential.auth).toHaveProperty("token", null);
+    expect((await request("/vcrd_basic", "POST", { auth: { type, token } })).status).toBe(200);
+    const rotated = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect("token" in rotated!.credential.auth && rotated!.credential.auth.token === token).toBe(true);
+  });
+
   it.each([
     { type: "static_basic", username: "public" },
     { type: "static_bearer", handle: "before" },
@@ -137,9 +166,13 @@ describe("credential metadata editing", () => {
   });
 
   it("keeps OAuth endpoint and auth type immutable", async () => {
-    const { request } = setup();
+    const { request, store } = setup();
     expect((await request("", "POST", { auth: { type: "mcp_oauth", access_token: "secret", mcp_server_url: "https://oauth.example.test" } })).status).toBe(201);
+    const before = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
     expect((await request("/vcrd_basic", "POST", { auth: { type: "mcp_oauth", mcp_server_url: "https://changed.example.test" } })).status).toBe(400);
     expect((await request("/vcrd_basic", "POST", { auth: { type: "static_bearer", handle: "changed" } })).status).toBe(400);
+    const after = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
+    expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
+    expect((await (await request("/vcrd_basic")).json()).auth).toEqual({ type: "mcp_oauth", mcp_server_url: "https://oauth.example.test" });
   });
 });

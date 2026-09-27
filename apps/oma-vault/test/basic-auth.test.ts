@@ -24,6 +24,7 @@ let upstreamUrl: string, proxyPort: number;
 let expectedAuth: string | undefined = authorization, reject = false, requests = 0;
 let logs = "";
 let expectStripped = false;
+let expectPassthrough: boolean | undefined;
 let api: ReturnType<typeof buildCredentialRoutes>;
 const seen: Array<{ matches: boolean; path: string }> = [];
 async function listen(server: Server): Promise<number> {
@@ -79,9 +80,9 @@ beforeAll(async () => {
     const unmatched = request.headers.host?.startsWith("127.0.0.1:");
     const matches = request.headers.authorization === expectedAuth && authHeaders.length === (expectedAuth === undefined ? 0 : 1)
       && request.headers["x-review-marker"] === "preserved"
-      && request.headers["x-api-key"] === (unmatched && !expectStripped ? "placeholder" : undefined)
-      && request.headers["x-goog-api-key"] === (unmatched && !expectStripped ? "placeholder" : undefined)
-      && request.headers["x-agent-token"] === (unmatched && !expectStripped ? "placeholder" : undefined)
+      && request.headers["x-api-key"] === ((expectPassthrough ?? (unmatched && !expectStripped)) ? "placeholder" : undefined)
+      && request.headers["x-goog-api-key"] === ((expectPassthrough ?? (unmatched && !expectStripped)) ? "placeholder" : undefined)
+      && request.headers["x-agent-token"] === ((expectPassthrough ?? (unmatched && !expectStripped)) ? "placeholder" : undefined)
       && request.headers["proxy-authorization"] === undefined;
     const chunks: Buffer[] = [];
     request.on("data", (chunk) => chunks.push(chunk));
@@ -239,6 +240,52 @@ describe("real oma-vault Basic injection", () => {
       expectedAuth = "Basic eC1hY2Nlc3MtdG9rZW46aGFuZGxlZC1wYXQ=";
       expect(await callProxy(managed, "Basic YnJhaW46cGxhY2Vob2xkZXI=", "/repo.git/info/refs?service=git-upload-pack")).toBe(204);
     } finally { expectedAuth = authorization; }
+  });
+  it.each(["static_bearer", "cap_cli", "static_basic"])("moves %s off a warmed host and changes selectors without changing its secret", async (type) => {
+    const page = await (await apiRequest("", "GET")).json();
+    for (const credential of page.data) expect((await apiRequest(`/${credential.id}`, "DELETE")).status).toBe(200);
+    const token = " exact:synthetic-pat ";
+    const basic = (username: string, password = "placeholder") => `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+    const path = "/repo.git/info/refs?service=git-upload-pack";
+    const created = await apiRequest("", "POST", { auth: { type, token, mcp_server_url: upstreamUrl, ...(type === "static_basic" ? { username: "before" } : { handle: "before" }), ...(type === "cap_cli" && { cli_id: "git" }) } });
+    expect(created.status).toBe(201);
+    const { id } = await created.json();
+    const editedUrl = new URL(upstreamUrl); editedUrl.hostname = "127.0.0.1";
+    try {
+      expectedAuth = basic(type === "static_basic" ? "before" : "x-access-token", token);
+      expectPassthrough = false;
+      expect(await callProxy(true, basic("before"), path)).toBe(204);
+      const update = await apiRequest(`/${id}`, "POST", { auth: { type, mcp_server_url: editedUrl.href } });
+      expect(update.status).toBe(200);
+      const publicAuth = (await update.json()).auth;
+      expect(publicAuth).not.toHaveProperty("token");
+      expect(publicAuth).not.toHaveProperty("password");
+      expectedAuth = basic("before"); expectPassthrough = true;
+      expect(await callProxy(true, basic("before"), path)).toBe(204);
+      expectedAuth = basic(type === "static_basic" ? "before" : "x-access-token", token); expectPassthrough = false;
+      expect(await callProxy(true, basic("before"), path, true)).toBe(204);
+      if (type === "static_basic") {
+        expect((await apiRequest(`/${id}`, "POST", { auth: { type, username: "after" } })).status).toBe(200);
+        expectedAuth = basic("after", token);
+        expect(await callProxy(true, basic("before"), path, true)).toBe(204);
+      } else {
+        const fallback = await apiRequest("", "POST", { auth: { type: "static_bearer", token: "fallback-pat", mcp_server_url: editedUrl.href } });
+        expect(fallback.status).toBe(201);
+        const { id: fallbackId } = await fallback.json();
+        expect(await callProxy(true, basic("before"), path, true)).toBe(204);
+        expect((await apiRequest(`/${id}`, "POST", { auth: { type, handle: "after" } })).status).toBe(200);
+        expect(await callProxy(true, basic("after"), path, true)).toBe(204);
+        expectedAuth = basic("x-access-token", "fallback-pat");
+        for (const selector of ["before", "AFTER", "unknown"]) expect(await callProxy(true, basic(selector), path, true)).toBe(204);
+        expect((await apiRequest(`/${fallbackId}`, "DELETE")).status).toBe(200);
+        // A handle is a preference, not an access boundary: unmatched handled credentials are last fallback.
+        expectedAuth = basic("x-access-token", token);
+        expect(await callProxy(true, basic("unknown"), path, true)).toBe(204);
+      }
+    } finally {
+      await apiRequest(`/${id}`, "DELETE");
+      expectedAuth = authorization; expectPassthrough = undefined;
+    }
   });
 });
 });

@@ -582,12 +582,13 @@ function validServerUrl(value: string) {
 }
 
 /** Only explicitly selected public values belong here; never pass an auth object. */
-function CredentialField({ label, value, onChange, help, invalid = false }: {
+function CredentialField({ label, value, onChange, help, invalid = false, maxLength }: {
   label: string;
   value: string;
   onChange?: (value: string) => void;
   help?: string;
   invalid?: boolean;
+  maxLength?: number;
 }) {
   const id = useId();
   const copy = async () => {
@@ -600,7 +601,7 @@ function CredentialField({ label, value, onChange, help, invalid = false }: {
     <div>
       <Label htmlFor={id} className="text-sm text-fg-muted block mb-1">{label}</Label>
       <div className="flex items-center gap-1">
-        <Input id={id} value={value} readOnly={!onChange} onChange={(e) => onChange?.(e.target.value)}
+        <Input id={id} value={value} maxLength={maxLength} readOnly={!onChange} onChange={(e) => onChange?.(e.target.value)}
           aria-invalid={invalid} aria-describedby={help ? `${id}-help` : undefined}
           placeholder={onChange ? undefined : "Not configured"}
           className={`${inputCls} min-w-0 ${onChange ? "" : "bg-bg-surface"}`} />
@@ -686,10 +687,7 @@ function EditCredentialModal({ vault, credential, onClose, onSaved }: {
           <span className={`px-2 py-0.5 rounded-full ${typeView.className}`}>{typeView.label}</span>
           <span className="font-mono">{auth.type}</span>
         </div>
-        <div>
-          <Label htmlFor="cred-edit-name" className="text-sm text-fg-muted block mb-1">{t.vaults.displayName}</Label>
-          <Input id="cred-edit-name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} className={inputCls} maxLength={255} autoFocus />
-        </div>
+        <CredentialField label={t.vaults.displayName} value={displayName} onChange={setDisplayName} maxLength={255} />
         {(editableServer || auth.type === "mcp_oauth") && <CredentialField label="Server URL" value={serverUrl}
           onChange={editableServer ? setServerUrl : undefined} invalid={urlInvalid}
           help={urlInvalid ? "Enter a valid HTTP or HTTPS URL. A configured server URL cannot be cleared." : SERVER_URL_HELP} />}
@@ -788,11 +786,12 @@ function AddCredentialModal({
     token: "",
     // git (HTTPS remotes) only: the host the token is for, stored as
     // mcp_server_url so the outbound proxy can match requests to it.
-    host: "github.com",
+    host: "https://github.com",
     // Optional selector — same contract as handleValid on the MCP form.
     handle: "",
   });
-  const cliHost = cliForm.host.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  const cliServerUrl = cliForm.host.trim();
+  const cliUrlValid = validServerUrl(cliServerUrl);
   const cliHandle = cliForm.handle.trim();
   const cliHandleValid = cliHandle === "" || /^[A-Za-z0-9._-]{1,128}$/.test(cliHandle);
   const cliIsGit = cliForm.cli_id === "git";
@@ -1027,7 +1026,7 @@ function AddCredentialModal({
           type: "cap_cli",
           cli_id: cliForm.cli_id,
           token: cliForm.token,
-          ...(cliIsGit && cliHost ? { mcp_server_url: `https://${cliHost}` } : {}),
+          ...(cliIsGit ? { mcp_server_url: cliServerUrl } : {}),
           ...(cliIsGit && cliHandle ? { handle: cliHandle } : {}),
         },
       }),
@@ -1151,7 +1150,7 @@ function AddCredentialModal({
               </Button>
               <Button
                 onClick={createCapCliCred}
-                disabled={!cliForm.token || (cliIsGit && (!cliHost || !cliHandleValid))}
+                disabled={!cliForm.token || (cliIsGit && (!cliUrlValid || !cliHandleValid))}
               >
                 Create
               </Button>
@@ -1180,7 +1179,7 @@ function AddCredentialModal({
             <Button
               onClick={submitCustom}
               disabled={
-                !customForm.url ||
+                !validServerUrl(customForm.url) ||
                 !!connecting ||
                 (customForm.type === "bearer" && !handleValid) ||
                 (customForm.type === "basic" && (!customForm.username || /[:\x00-\x1f\x7f]/.test(customForm.username))) ||
@@ -1667,7 +1666,7 @@ function AddCredentialModal({
                   htmlFor="vault-cli-host"
                   className="text-sm text-fg-muted block mb-1"
                 >
-                  Host
+                  Server URL
                 </Label>
                 <TextInput
                   id="vault-cli-host"
@@ -1676,13 +1675,14 @@ function AddCredentialModal({
                     setCliForm({ ...cliForm, host: e.target.value })
                   }
                   className={inputCls}
-                  placeholder="github.com"
+                  placeholder="https://github.com"
+                  aria-invalid={!cliUrlValid}
+                  aria-describedby="vault-cli-host-help"
                   spellCheck={false}
                   autoCapitalize="none"
                 />
-                <div className="text-xs text-fg-subtle mt-1">
-                  The git host this token is for. Outbound git traffic to it
-                  gets the token injected (Basic auth, as GitHub expects).
+                <div id="vault-cli-host-help" className={`text-xs mt-1 ${cliUrlValid ? "text-fg-subtle" : "text-danger"}`}>
+                  {cliUrlValid ? SERVER_URL_HELP : "Enter a valid HTTP or HTTPS URL."}
                 </div>
               </div>
               <div>
