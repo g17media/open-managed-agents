@@ -36,8 +36,10 @@ import {
  * transport and streaming; this adapter only translates the two public event
  * protocols.
  */
-export function toAiSdkLanguageModel(runtime: PiModelRuntime): LanguageModelV3 {
+export function toAiSdkLanguageModel(runtime: PiModelRuntime): LanguageModelV3 & { maxInputTokens?: number; contextWindow: number } {
   return {
+    maxInputTokens: runtime.maxInputTokens,
+    contextWindow: runtime.model.contextWindow,
     specificationVersion: "v3",
     provider: `pi.${runtime.model.provider}`,
     modelId: runtime.model.id,

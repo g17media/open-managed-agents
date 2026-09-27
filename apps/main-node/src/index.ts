@@ -1,3 +1,4 @@
+import { modelCardMaxInputTokens } from "@open-managed-agents/agent/harness/model-card-credentials";
 import { buildMemberChatSessionRoutes } from "./member-chat-session-routes";
 import { migrateV0AtStartup } from "./migrations/v0-data.js";
 
@@ -1011,6 +1012,7 @@ async function resolveNodeModelCreds(
   provider?: string;
   customHeaders?: Record<string, string>;
   piConfig?: PiModelConfig;
+  maxInputTokens?: number;
 }> {
   const handle = typeof agentModel === "string" ? agentModel : agentModel.id;
   try {
@@ -1020,6 +1022,7 @@ async function resolveNodeModelCreds(
       if (key) {
         return {
           wireModel: card.model,
+          maxInputTokens: modelCardMaxInputTokens(card),
           apiKey: key,
           baseURL: card.base_url ?? undefined,
           provider: card.provider,
@@ -1082,6 +1085,7 @@ async function resolveNodeWebSearchWiring(
     baseURL: creds.baseURL,
     customHeaders: creds.customHeaders,
     piConfig: creds.piConfig,
+    maxInputTokens: creds.maxInputTokens,
   });
   const filters = readWebSearchFilters(agent);
   const hosted = target && nativeWebSearchServerTool({ ...target, modelId: creds.wireModel }, filters);
@@ -1106,6 +1110,7 @@ async function buildNodeLanguageModel(
     baseURL: creds.baseURL,
     customHeaders: creds.customHeaders,
     piConfig: creds.piConfig,
+    maxInputTokens: creds.maxInputTokens,
     providerOptions:
       piProviderOptions &&
       typeof piProviderOptions === "object" &&
@@ -1187,6 +1192,7 @@ const sessionRegistry = new SessionRegistry({
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      maxInputTokens: creds.maxInputTokens,
       webSearch: webSearch.binding,
       providerOptions:
         typeof input.agent.model !== "string" &&

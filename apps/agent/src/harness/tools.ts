@@ -1,3 +1,4 @@
+import { capMcpResult as capMcpOutput } from "./mcp-output";
 import { dynamicTool, generateText, jsonSchema, tool } from "ai";
 import { z } from "zod";
 import type { LanguageModel } from "ai";
@@ -85,18 +86,23 @@ export async function disposeTools(tools: Record<string, unknown>): Promise<void
 // protocol client itself lives in the runtime-neutral MCP package.
 export { connectHttpMcpClient };
 
-function mcpToModelOutput({ output }: { output: unknown }) {
+export function capMcpResult(output: unknown): unknown {
+  return capMcpOutput(output, MAX_TOOL_RESULT_CHARS);
+}
+
+export function mcpToModelOutput({ output }: { output: unknown }) {
+  output = capMcpResult(output);
   if (!output || typeof output !== "object" || !("content" in output)) {
     return {
       type: "content" as const,
-      value: [{ type: "text" as const, text: JSON.stringify(output) ?? String(output) }],
+      value: [{ type: "text" as const, text: typeof output === "string" ? output : JSON.stringify(output) ?? String(output) }],
     };
   }
   const content = (output as { content?: unknown }).content;
   if (!Array.isArray(content)) {
     return {
       type: "content" as const,
-      value: [{ type: "text" as const, text: JSON.stringify(output) ?? String(output) }],
+      value: [{ type: "text" as const, text: typeof output === "string" ? output : JSON.stringify(output) ?? String(output) }],
     };
   }
   return {
@@ -108,7 +114,7 @@ function mcpToModelOutput({ output }: { output: unknown }) {
           return { type: "text" as const, text: block.text };
         }
         if (
-          block.type === "image" &&
+          (block.type === "image" || block.type === "audio") &&
           typeof block.data === "string" &&
           typeof block.mimeType === "string"
         ) {
@@ -116,6 +122,14 @@ function mcpToModelOutput({ output }: { output: unknown }) {
             type: "file" as const,
             mediaType: block.mimeType,
             data: { type: "data" as const, data: block.data },
+          };
+        }
+        if (block.type === "resource" && block.resource && typeof block.resource === "object") {
+          const resource = block.resource as Record<string, unknown>;
+          if (typeof resource.blob === "string") return {
+            type: "file" as const,
+            mediaType: typeof resource.mimeType === "string" ? resource.mimeType : "application/octet-stream",
+            data: { type: "data" as const, data: resource.blob },
           };
         }
       }
@@ -1251,7 +1265,7 @@ export async function buildTools(
               },
               execute: async (args, options) => {
                 options?.abortSignal?.throwIfAborted();
-                return mcpClient!.callTool({
+                return capMcpResult(await mcpClient!.callTool({
                   name: toolName,
                   arguments:
                     args && typeof args === "object"
@@ -1260,7 +1274,7 @@ export async function buildTools(
                 }, {
                   signal: options?.abortSignal,
                   timeoutMs: MCP_TOOL_TIMEOUT_MS,
-                });
+                }));
               },
               toModelOutput: mcpToModelOutput,
             });

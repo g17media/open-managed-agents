@@ -36,6 +36,56 @@ export interface ResolvedFile {
 }
 export type FileResolver = (file_id: string) => Promise<ResolvedFile | null>;
 
+/** Structural boundaries only replace result bodies; call IDs, tool names,
+ * user messages and ordering stay intact. Metadata is the existing wire
+ * extension point; the append-only original events are never rewritten.
+ */
+export function applyToolResultElisions(events: SessionEvent[]): SessionEvent[] {
+  const elisions = toolResultElisions(events);
+  if (!elisions.size) return events;
+  return events.map(event => {
+    const id = event.type === "agent.tool_result" ? event.tool_use_id
+      : event.type === "agent.mcp_tool_result" ? event.mcp_tool_use_id : undefined;
+    const chars = id === undefined ? undefined : elisions.get(id);
+    return chars === undefined ? event : {
+      ...event,
+      content: elidedResultText(chars),
+    } as SessionEvent;
+  });
+}
+
+function elidedResultText(chars: number): string {
+  return `[tool result elided during compaction: ${chars} chars; re-run the tool if needed]`;
+}
+
+function toolResultElisions(events: SessionEvent[]): Map<string, number> {
+  const elisions = new Map<string, number>();
+  for (const event of events) {
+    if (event.type !== "agent.thread_context_compacted") continue;
+    const entries = event.metadata?.tool_result_elisions;
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (typeof entry?.tool_call_id === "string" && Number.isFinite(entry.chars) && entry.chars >= 0) {
+        elisions.set(entry.tool_call_id, entry.chars);
+      }
+    }
+  }
+  return elisions;
+}
+
+function applyMessageElisions(messages: ModelMessage[], events: SessionEvent[]): ModelMessage[] {
+  const elisions = toolResultElisions(events);
+  if (!elisions.size) return messages;
+  return messages.map(message => {
+    if (message.role !== "tool") return message;
+    return { ...message, content: message.content.map(part => {
+      if (part.type !== "tool-result") return part;
+      const chars = elisions.get(part.toolCallId);
+      return chars === undefined ? part : { ...part, output: { type: "text" as const, value: elidedResultText(chars) } };
+    }) };
+  });
+}
+
 /**
  * Convert SessionEvent[] → ModelMessage[]. The strict inverse of
  * default-loop.ts onStepFinish writes — together they form the bijection
@@ -59,7 +109,8 @@ export type FileResolver = (file_id: string) => Promise<ResolvedFile | null>;
  *     `[summary, ...tail, ...post-boundary]`. Boundary events without a
  *     summary are pure UI signals (no effect here).
  *   - Skip lifecycle.* / span.* / notification.* / agent.thread_message_*
- *     and bare (summary-less) compaction events.
+ *     and bare compaction notifications. Summary-less boundaries with
+ *     tool_result_elisions metadata replace only the referenced results.
  *
  * Sync API: file_id-source image/document blocks fall back to a placeholder
  * text part because resolution requires I/O. Callers that own the resolver
@@ -115,17 +166,15 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
 
   // No boundary → walk everything straight through.
   if (boundaryIdx < 0) {
-    return buildMessages(events, 0, events.length, toolNameById);
+    return applyMessageElisions(buildMessages(events, 0, events.length, toolNameById), events);
   }
 
   // Boundary exists. Build pre/post separately; pick CC-style tail from pre.
-  const preBoundary = buildMessages(events, 0, boundaryIdx, toolNameById);
+  // Reconstruct the view as it existed at this boundary. Later elisions
+  // must not change which earlier messages its protected tail selected.
+  const preBoundary = eventsToMessages(events.slice(0, boundaryIdx));
   const postBoundary = buildMessages(events, boundaryIdx + 1, events.length, toolNameById);
-  const tail = pickPreservedTail(preBoundary, {
-    minTokens: TAIL_MIN_TOKENS,
-    maxTokens: TAIL_MAX_TOKENS,
-    minMessages: TAIL_MIN_MESSAGES,
-  });
+  const tail = pickPreservedTail(preBoundary, preservedTailOptions(events[boundaryIdx]));
 
   // Inject the boundary summary as a synthesized user message that opens
   // the post-compaction view. Wrapped in <conversation-summary> tags so the
@@ -135,7 +184,7 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
     content: [{ type: "text", text: serializeSummaryAsText(boundarySummary!) }],
   };
 
-  return [summaryMessage, ...tail, ...postBoundary];
+  return applyMessageElisions([summaryMessage, ...tail, ...postBoundary], events);
 }
 
 /**
@@ -216,23 +265,19 @@ export async function eventsToMessagesAsync(
   }
 
   if (boundaryIdx < 0) {
-    return buildMessagesAsync(events, 0, events.length, toolNameById, cachedResolve);
+    return applyMessageElisions(await buildMessagesAsync(events, 0, events.length, toolNameById, cachedResolve), events);
   }
 
-  const preBoundary = await buildMessagesAsync(events, 0, boundaryIdx, toolNameById, cachedResolve);
+  const preBoundary = await eventsToMessagesAsync(events.slice(0, boundaryIdx), cachedResolve);
   const postBoundary = await buildMessagesAsync(events, boundaryIdx + 1, events.length, toolNameById, cachedResolve);
-  const tail = pickPreservedTail(preBoundary, {
-    minTokens: TAIL_MIN_TOKENS,
-    maxTokens: TAIL_MAX_TOKENS,
-    minMessages: TAIL_MIN_MESSAGES,
-  });
+  const tail = pickPreservedTail(preBoundary, preservedTailOptions(events[boundaryIdx]));
 
   const summaryMessage: ModelMessage = {
     role: "user",
     content: [{ type: "text", text: serializeSummaryAsText(boundarySummary!) }],
   };
 
-  return [summaryMessage, ...tail, ...postBoundary];
+  return applyMessageElisions([summaryMessage, ...tail, ...postBoundary], events);
 }
 
 /**
@@ -530,7 +575,7 @@ function estimateMessageTokensCC(m: ModelMessage): number {
  * tokens). Tail must START on a user message — otherwise we'd send orphan
  * assistant/tool messages without their preceding user turn.
  */
-function pickPreservedTail(
+export function pickPreservedTail(
   messages: ModelMessage[],
   opts: { minTokens: number; maxTokens: number; minMessages: number },
 ): ModelMessage[] {
@@ -854,4 +899,16 @@ export class InMemoryHistory implements HistoryStore {
   getMessages(): ModelMessage[] {
     return eventsToMessages(this.getEvents());
   }
+}
+
+function preservedTailOptions(boundary: SessionEvent): { minTokens: number; maxTokens: number; minMessages: number } {
+  const value = boundary.metadata?.preserved_tail as Record<string, unknown> | undefined;
+  const number = (key: string, fallback: number) => {
+    // Node's runtime history codec snake-cases nested keys on replay;
+    // Cloudflare preserves the originally written metadata verbatim.
+    const persistedKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+    const item = value?.[key] ?? value?.[persistedKey];
+    return typeof item === "number" && Number.isFinite(item) && item >= 0 ? item : fallback;
+  };
+  return { minTokens: number("minTokens", TAIL_MIN_TOKENS), maxTokens: number("maxTokens", TAIL_MAX_TOKENS), minMessages: number("minMessages", TAIL_MIN_MESSAGES) };
 }

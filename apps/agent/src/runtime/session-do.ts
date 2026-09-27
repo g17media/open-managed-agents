@@ -4031,6 +4031,7 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      maxInputTokens: creds.maxInputTokens,
       providerOptions:
         typeof agent.aux_model !== "string" &&
         agent.aux_model.provider_options?.pi &&
@@ -4567,6 +4568,7 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: subCreds.baseURL,
       customHeaders: subCreds.customHeaders,
       piConfig: subCreds.piConfig,
+      maxInputTokens: subCreds.maxInputTokens,
       providerOptions:
         typeof subAgent.model !== "string" &&
         subAgent.model.provider_options?.pi &&
@@ -4919,6 +4921,7 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      maxInputTokens: creds.maxInputTokens,
       providerOptions:
         typeof agent.model !== "string" &&
         agent.model.provider_options?.pi &&
