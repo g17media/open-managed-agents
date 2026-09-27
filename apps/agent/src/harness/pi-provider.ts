@@ -30,6 +30,7 @@ export function modelThinkingLevel(model: string | {
 }
 
 export interface PiModelRuntime {
+  maxInputTokens?: number;
   models: Models;
   model: Model<Api>;
   /** JSON-compatible defaults from Agent `model.provider_options.pi`. */
@@ -69,6 +70,8 @@ export type PiModelConfig = Partial<
 >;
 
 export interface PiModelCardBinding {
+  /** Stored model card input budget; never sent as a provider option. */
+  maxInputTokens?: number;
   /** Wire-level provider model id, not the OpenMA model-card handle. */
   model: string;
   apiKey: string;
@@ -155,6 +158,9 @@ export function createPiModelRuntime(input: PiModelCardBinding): PiModelRuntime 
     api,
     baseUrl,
   };
+  if (typeof input.maxInputTokens === "number" && Number.isFinite(input.maxInputTokens) && input.maxInputTokens > 0) {
+    model.contextWindow = Math.min(input.maxInputTokens, input.piConfig?.contextWindow ?? Infinity, catalogModel?.contextWindow ?? Infinity);
+  }
   const providerStreams = resolveProviderStreams(plan, model, catalogModel);
 
   const provider = createProvider({
@@ -187,6 +193,7 @@ export function createPiModelRuntime(input: PiModelCardBinding): PiModelRuntime 
   return {
     models,
     model,
+    maxInputTokens: input.maxInputTokens,
     providerOptions: structuredClone(input.providerOptions ?? {}) as SimpleStreamOptions,
     thinkingLevel: clampThinkingLevel(model, input.thinkingLevel ?? "off"),
     speed: input.speed ?? "standard",

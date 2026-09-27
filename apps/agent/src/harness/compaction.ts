@@ -2,7 +2,7 @@ import { generateText } from "ai";
 import type { ModelMessage, LanguageModel } from "ai";
 import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { ContentBlock, SessionEvent } from "@open-managed-agents/shared";
-import { eventsToMessages } from "../runtime/history";
+import { eventsToMessages, pickPreservedTail, applyToolResultElisions } from "../runtime/history";
 import type { HarnessRuntime } from "./interface";
 
 /**
@@ -81,7 +81,7 @@ function estimateMessageTokens(m: ModelMessage): number {
   const s = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
   return Math.ceil(s.length / 4);
 }
-function estimateMessagesTokens(messages: ModelMessage[]): number {
+export function estimateMessagesTokens(messages: ModelMessage[]): number {
   let total = 0;
   for (const m of messages) total += estimateMessageTokens(m);
   return total;
@@ -96,6 +96,86 @@ function estimateMessagesTokens(messages: ModelMessage[]): number {
 // last K messages verbatim alongside the summary. Strategy doesn't need to
 // coordinate; it just produces the summary covering everything.
 const TRIGGER_FRACTION = 0.75;
+
+export function isContextLengthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /context[_ -]?(length|window)|prompt.{0,30}(too long|too large)|too many (input )?tokens|exceed.{0,40}(token|context)|finish_reason=length/i.test(message);
+}
+
+function assertSummaryFits(result: { text?: string; finishReason: string }): void {
+  if (result.finishReason === "length" && !result.text?.trim()) {
+    throw new Error("compaction context exceeded model window: finish_reason=length with empty output");
+  }
+}
+
+/** Largest results first, oldest first for equal sizes. Protect a recent,
+ * user-aligned tail with a budget scaled down for small model windows.
+ * This pass makes no model calls and can repair already-overflowed sessions.
+ */
+export function emergencyCompact(events: SessionEvent[], opts: {
+  contextWindowTokens: number;
+  triggerFraction?: number;
+  tailMinTokens?: number;
+  tailMaxTokens?: number;
+  tailMinMessages?: number;
+  force?: boolean;
+}): SessionEvent | null {
+  const messages = eventsToMessages(events);
+  const preTokens = estimateMessagesTokens(messages);
+  const target = Math.min(
+    opts.contextWindowTokens * (opts.triggerFraction ?? TRIGGER_FRACTION),
+    opts.force ? preTokens * 0.5 : Infinity,
+  );
+  if (preTokens < target) return null;
+  let tail = pickPreservedTail(messages, {
+    minTokens: Math.min(opts.tailMinTokens ?? 10_000, opts.contextWindowTokens * 0.1),
+    maxTokens: Math.min(opts.tailMaxTokens ?? 40_000, opts.contextWindowTokens * 0.25),
+    minMessages: opts.tailMinMessages ?? 5,
+  });
+  // An oversized current interaction can exceed the tail budget on its
+  // own. Structural compaction must still protect it: only a summarizer
+  // may replace the active interaction with a summary.
+  if (tail.length === 0) {
+    let lastUser = messages.length - 1;
+    while (lastUser >= 0 && messages[lastUser].role !== "user") lastUser--;
+    if (lastUser >= 0) tail = messages.slice(lastUser);
+  }
+  const protectedIds = new Set<string>();
+  const visibleIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    for (const part of message.content) {
+      if (part.type !== "tool-result") continue;
+      visibleIds.add(part.toolCallId);
+      if (tail.includes(message)) protectedIds.add(part.toolCallId);
+    }
+  }
+  const candidates = applyToolResultElisions(events).flatMap((event, index) => {
+    const id = event.type === "agent.tool_result" ? event.tool_use_id
+      : event.type === "agent.mcp_tool_result" ? event.mcp_tool_use_id : undefined;
+    if (!id || !visibleIds.has(id) || protectedIds.has(id)) return [];
+    const content = (event as { content: unknown }).content;
+    const text = typeof content === "string" ? content : JSON.stringify(content);
+    // Actual persisted elisions are already replaced with short placeholders
+    // above. A tool-supplied prefix is not evidence of a prior boundary.
+    if (text.length < 128) return [];
+    return [{ tool_call_id: id, chars: text.length, index }];
+  }).sort((a, b) => b.chars - a.chars || a.index - b.index);
+  const elisions: Array<{ tool_call_id: string; chars: number }> = [];
+  const boundary: SessionEvent = {
+    type: "agent.thread_context_compacted",
+    trigger: "auto",
+    original_message_count: messages.length,
+    compacted_message_count: messages.length,
+    pre_tokens: preTokens,
+    metadata: { harness: "default", kind: "tool_result_elision", tool_result_elisions: elisions },
+  };
+  for (const candidate of candidates) {
+    elisions.push({ tool_call_id: candidate.tool_call_id, chars: candidate.chars });
+    if (estimateMessagesTokens(eventsToMessages([...events, boundary])) < target) break;
+  }
+  return elisions.length ? boundary : null;
+}
 
 // ============================================================
 // SummarizeCompactionStrategy
@@ -205,6 +285,7 @@ export class SummarizeCompactionStrategy implements CompactionStrategy {
       final_text_length: typeof result.text === "string" ? result.text.length : 0,
     });
 
+    assertSummaryFits(result);
     return {
       summary: [{ type: "text", text: result.text }],
       pre_tokens: estimateMessagesTokens(messages),
@@ -390,6 +471,7 @@ export class CCStyleCompactionStrategy implements CompactionStrategy {
     // NOT write a boundary event. Otherwise downstream eventsToMessages
     // would honor the empty-summary boundary and silently drop the entire
     // pre-boundary history. Caller will retry on the next turn.
+    assertSummaryFits(result);
     if (typeof result.text !== "string" || result.text.trim().length === 0) {
       return null;
     }
@@ -494,6 +576,7 @@ export class OpenCodeStyleCompactionStrategy implements CompactionStrategy {
       final_text_length: typeof result.text === "string" ? result.text.length : 0,
     });
 
+    assertSummaryFits(result);
     if (typeof result.text !== "string" || result.text.trim().length === 0) {
       return null;
     }

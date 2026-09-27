@@ -1,13 +1,14 @@
-import { streamText, stepCountIs, wrapLanguageModel } from "ai";
+import { streamText, stepCountIs, wrapLanguageModel, NoOutputGeneratedError } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
 import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { HarnessInterface, HarnessContext, HarnessRuntime, FileResolver } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
 import { generateEventId, classifyExternalError, ModelError } from "@open-managed-agents/shared";
-import { eventsToMessagesAsync } from "../runtime/history";
-import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
+import { eventsToMessages, eventsToMessagesAsync } from "../runtime/history";
+import { SummarizeCompactionStrategy, resolveCompactionStrategy, emergencyCompact, isContextLengthError, estimateMessagesTokens } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
-import { ALL_TOOLS, toolPermissionEvaluation } from "./tools";
+import { ALL_TOOLS, toolPermissionEvaluation, mcpToModelOutput } from "./tools";
+import { capToolResultContent } from "./mcp-output";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
 import { modelCallOptions } from "./provider";
 import {
@@ -165,7 +166,7 @@ function emitToolResultEvent(
   part: ContentPart<any> & { type: "tool-result" | "tool-error" },
   timings?: Map<string, ToolTimingRecord>,
   harnessName = "default",
-): void {
+): boolean {
   const toolCallId = part.toolCallId;
   const toolName = part.toolName;
   // tool-error has `error`, tool-result has `output`.
@@ -174,13 +175,14 @@ function emitToolResultEvent(
       ? { type: "error-text", value: String((part as any).error ?? "") }
       : ((part as any).output ?? (part as any).result);
 
-  const content = normalizeToolOutputForWire(raw);
+  const normalized = normalizeToolOutputForWire(isMcpTool(toolName) && part.type !== "tool-error" ? mcpToModelOutput({ output: raw }) : raw);
+  const content = capToolResultContent(normalized);
 
   if (isMcpTool(toolName)) {
     runtime.broadcast({
       type: "agent.mcp_tool_result",
       mcp_tool_use_id: toolCallId,
-      content: typeof content === "string" ? content : JSON.stringify(content),
+      content,
       ...(part.type === "tool-error" && { is_error: true }),
       // v1-additive: causal predecessor is the matching agent.mcp_tool_use,
       // whose EventBase.id is set explicitly to toolCallId in
@@ -221,13 +223,18 @@ function emitToolResultEvent(
       parent_event_id: threadSentEventId(toolCallId),
     });
   }
+  // MCP adapters can supply execute without an SDK conversion hook. Rebase
+  // after their result so the SDK cannot retain its uncapped raw JSON.
+  return isMcpTool(toolName) || (typeof normalized === "string"
+    ? content !== normalized
+    : JSON.stringify(content) !== JSON.stringify(normalized));
 }
 
 /**
  * AI SDK ToolResultOutput union → wire `string | ContentBlock[]`.
  * Pure function; same input → same output bytes.
  */
-function normalizeToolOutputForWire(raw: unknown): string | ContentBlock[] {
+export function normalizeToolOutputForWire(raw: unknown): string | ContentBlock[] {
   if (typeof raw === "string") return raw;
   if (raw == null) return "";
 
@@ -252,6 +259,11 @@ function normalizeToolOutputForWire(raw: unknown): string | ContentBlock[] {
       const parts = (raw as unknown as { value: Array<{ type: string; text?: string; data?: string; mediaType?: string; url?: string }> }).value;
       return parts.map((p): ContentBlock => {
         if (p.type === "text") return { type: "text", text: p.text ?? "" };
+        if (p.type === "file" && typeof p.data === "object" && p.data !== null) {
+          const data = p.data as { type: string; data?: string };
+          return { type: p.mediaType?.startsWith("image/") ? "image" : "document",
+            source: { type: "base64", media_type: p.mediaType, data: data.data } };
+        }
         if (p.type === "image-data" || p.type === "media") {
           return {
             type: "image",
@@ -289,6 +301,7 @@ export class DefaultHarness implements HarnessInterface {
    * Set in run() before any compaction hook fires.
    */
   private compactionStrategy: CompactionStrategy = new SummarizeCompactionStrategy();
+  private preservedTail: { minTokens: number; maxTokens: number; minMessages: number } | undefined;
 
   async run(ctx: HarnessContext): Promise<void> {
     const { agent, userMessage, runtime, tools, model, systemPrompt } = ctx;
@@ -333,27 +346,58 @@ export class DefaultHarness implements HarnessInterface {
 
     // --- Harness decides HOW to deliver context to the model ---
 
-    // 1. Compaction check: ask the harness's own shouldCompact + compact
-    // hooks. Default impls live below the class. Custom harnesses override.
-    // compact() persists its product as a agent.thread_context_compacted
-    // event with summary — derive() then sees the boundary and serves the
-    // summarized view from this turn forward (NOT recomputed per turn).
-    const allEvents = runtime.history.getEvents();
     const ctxWindow = resolveContextWindowTokens(model);
-    if (this.shouldCompact && this.compact && this.shouldCompact(allEvents, { contextWindowTokens: ctxWindow })) {
+    this.preservedTail = {
+      minTokens: Math.min(tailMinTokens ?? 10_000, ctxWindow * 0.1),
+      maxTokens: Math.min(tailMaxTokens ?? 40_000, ctxWindow * 0.25),
+      minMessages: tailMinMessages ?? 5,
+    };
+    let contextRebased = false;
+    const structuralOptions = { contextWindowTokens: ctxWindow, triggerFraction,
+      tailMinTokens, tailMaxTokens, tailMinMessages };
+    const emergency = (force = false): boolean => {
+      const boundary = emergencyCompact(runtime.history.getEvents(), { ...structuralOptions, force });
+      if (!boundary) return false;
+      runtime.broadcast(boundary);
+      return true;
+    };
+    // Span/stream telemetry is not new context. A boundary itself must not
+    // cause another summarize call before any new conversation activity.
+    const contextEvents = () => runtime.history.getEvents().filter(e =>
+      e.type === "user.message" || e.type.startsWith("agent.") && !e.type.startsWith("agent.thread_"));
+    let lastCheckedCount = -1;
+    const compactBeforeRequest = async (): Promise<boolean> => {
+      const activity = contextEvents();
+      // Durable stores deserialize fresh objects on each read. Count the
+      // append-only context events, rather than comparing object identities.
+      if (activity.length === lastCheckedCount) return false;
+      lastCheckedCount = activity.length;
+      const events = runtime.history.getEvents();
+      if (!this.shouldCompact(events, { contextWindowTokens: ctxWindow })) return false;
+      let changed = false;
+      const tokens = () => estimateMessagesTokens(eventsToMessages(runtime.history.getEvents()));
+      if (tokens() >= ctxWindow) changed = emergency();
+      // Never feed a known-overflowed context back into the summarizer.
+      if (tokens() >= ctxWindow) return changed;
+      const summarize = () => this.compact(runtime.history.getEvents(), runtime, {
+        model, systemPrompt, tools: timedTools, providerOptions,
+      });
+      const before = runtime.history.getEvents().filter(e => e.type === "agent.thread_context_compacted").length;
       try {
-        await this.compact(allEvents, runtime, {
-          model,
-          systemPrompt,
-          tools: timedTools,
-          providerOptions,
-        });
+        await summarize();
       } catch (err) {
-        // Compaction is best-effort. Log and continue — the next turn will
-        // try again. Don't fail the whole turn over a summarize error.
-        console.warn(`[compact] failed: ${(err as Error).message}`);
+        if (isContextLengthError(err)) {
+          changed = emergency(true) || changed;
+          if (changed && tokens() < ctxWindow) {
+            try { await summarize(); }
+            catch (retryError) { console.warn(`[compact] failed after elision: ${(retryError as Error).message}`); }
+          }
+        } else {
+          console.warn(`[compact] failed: ${(err as Error).message}`);
+        }
       }
-    }
+      return changed || runtime.history.getEvents().filter(e => e.type === "agent.thread_context_compacted").length > before;
+    };
 
     // 2. Derive ModelMessage[] from events. Default = eventsToMessagesAsync
     // (strict bijection inverse of write-side, with boundary handling +
@@ -399,14 +443,15 @@ export class DefaultHarness implements HarnessInterface {
     // broadcast stream_end with the same id and finalize the stream
     // row. The same id lands on the `agent.message` event so clients
     // can swap chunk display for canonical content.
-      // Single-attempt model call. Retry/keepAlive/permanent-stall logic
-      // moved out to runtime/turn-runtime.ts (Primitive 1). Caller decides
-      // whether to retry on TurnAborted; default-loop just runs the model
-      // once and propagates errors. Stale-chunk detection stays here
+      // General retry/keepAlive logic lives in runtime/turn-runtime.ts.
+      // This loop owns one context-length recovery retry because it must
+      // persist elisions and rebuild the prompt before another request.
+      // Stale-chunk detection stays here
       // because it needs direct access to streamText's onChunk timing —
       // turn-runtime would need a chunk-arrival callback to do it from
       // outside, which is more plumbing for marginal gain.
-      const result = await (async () => {
+      let retryingContextLength = false;
+      const runAttempt = async () => {
       let currentMessageId: string | null = null;
       // Per-step thinking and tool-input streams keyed by the AI SDK
       // chunk's id (reasoning) or toolCallId (tool input). Multiple
@@ -480,6 +525,14 @@ export class DefaultHarness implements HarnessInterface {
       messages: finalMessages,
       tools: cached.tools,
       ...modelCallOptions(model, agent.model),
+      prepareStep: async ({ stepNumber }) => {
+        const changed = await compactBeforeRequest();
+        contextRebased ||= changed || retryingContextLength && stepNumber === 0;
+        if (!contextRebased) return undefined;
+        const nextMessages = await this.deriveModelContext(runtime.history.getEvents(), { fileFetcher: ctx.fileFetcher });
+        const next = applyProviderCacheStrategy(model, systemPrompt, timedTools, nextMessages);
+        return { messages: next.messages, system: next.system || undefined };
+      },
       stopWhen: stepCountIs(100),
       abortSignal: runtime.abortSignal,
 
@@ -617,7 +670,11 @@ export class DefaultHarness implements HarnessInterface {
             case "tool-result":
             case "tool-error":
               completedToolCalls.add(part.toolCallId);
-              emitToolResultEvent(runtime, part, toolTimings, harnessName);
+              // SDK tool errors bypass toModelOutput. If persistence capped
+              // them, rebuild subsequent steps from those bounded events.
+              if (emitToolResultEvent(runtime, part, toolTimings, harnessName)) {
+                contextRebased = true;
+              }
               break;
             // source / file / tool-approval-request: not produced by current
             // tool surface; intentionally skipped. Add cases here if those
@@ -832,9 +889,9 @@ export class DefaultHarness implements HarnessInterface {
       //     (`sess-6o5qhaa3v1l5r82h` 2026-05-02: 20 KB of agent.thinking,
       //     0 chars final text). Without surfacing this as an error the
       //     turn looks "successful" but ships nothing to the user.
-      // Throw so the failure is visible in events; the caller decides whether
-      // to retry (current default-loop has no internal retry — the throw
-      // propagates as a `unexpected` TurnError up to drainEventQueue).
+      // Empty length responses get one structural recovery retry below.
+      // Other silent stops remain terminal so deterministic empty answers
+      // cannot consume the runtime's general retry budget repeatedly.
       if (
         (finishReason === "stop" || finishReason === "length")
         && (!finalText || finalText.trim().length === 0)
@@ -844,12 +901,8 @@ export class DefaultHarness implements HarnessInterface {
         if (currentMessageId) {
           await runtime.broadcastStreamEnd(currentMessageId, "aborted", "silent_stop");
         }
-        // Throw as ModelError so processUserMessage's catch classifies
-        // it as fatal (no retry). silent_stop is deterministic per
-        // (model, prompt) — observed 2026-05-11 sess-y2bfxm1de4e1zqxm
-        // burning 12 LLM calls retrying the same empty response 3x ×
-        // 4 messages. classifyExternalError doesn't have a pattern
-        // for it; we know the class at the throw site, just type it.
+        // The local recovery handler recognizes length; ModelError keeps
+        // an unrecovered stop terminal at the surrounding runtime boundary.
         throw new ModelError(
           `silent_stop: model returned finish_reason=${finishReason} with empty text and no tool calls`,
         );
@@ -866,13 +919,33 @@ export class DefaultHarness implements HarnessInterface {
         // of substring matching the message.
         // TODO: extend wrapper coverage to other boundaries as new
         // failure modes surface (D1 client, KV ops, MCP transport).
-        throw classifyExternalError(err);
+        // A request rejected before its first complete step makes AI SDK's
+        // result promises throw NoOutputGeneratedError without the provider
+        // cause. Restore the onError diagnostic so context recovery (and
+        // auth/billing classification) sees the actual failure.
+        const diagnostic = NoOutputGeneratedError.isInstance(err) && lastStreamErrorMessage
+          ? new Error(lastStreamErrorMessage, { cause: err })
+          : err;
+        throw classifyExternalError(diagnostic);
       } finally {
         const totalElapsed = Date.now() - streamStartedAt;
         console.log(`[stream] streamText END elapsed=${totalElapsed}ms`);
       }
-    })();
-
+    };
+    let result;
+    try {
+      result = await runAttempt();
+    } catch (error) {
+      if (!isContextLengthError(error)) throw error;
+      emergency(true);
+      retryingContextLength = true;
+      try {
+        result = await runAttempt();
+      } catch (retryError) {
+        if (!isContextLengthError(retryError)) throw retryError;
+        throw new ModelError("context exceeded the model window after emergency compaction; session must be reset");
+      }
+    }
 
     // 8. Detect pending tool confirmations and custom tool results
     if (result.toolCalls?.length) {
@@ -990,6 +1063,7 @@ export class DefaultHarness implements HarnessInterface {
       summary: result.summary,
       trigger: "auto",
       pre_tokens: result.pre_tokens,
+      metadata: { preserved_tail: this.preservedTail },
     });
   }
 
@@ -1020,24 +1094,22 @@ export class DefaultHarness implements HarnessInterface {
 // Both are best-effort heuristics. The bijection itself doesn't depend on
 // these — they only drive WHEN to compact, not what the model sees.
 
-/** Crude: 4 chars ≈ 1 token. Fine for compaction trigger; not for billing. */
-function estimateMessageTokens(m: ModelMessage): number {
-  const s = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-  return Math.ceil(s.length / 4);
-}
-
-function estimateMessagesTokens(messages: ModelMessage[]): number {
-  let total = 0;
-  for (const m of messages) total += estimateMessageTokens(m);
-  return total;
-}
-
 /**
  * Map a LanguageModel to its context window in tokens. ai-sdk doesn't
- * expose this uniformly, so we hand-encode the common cases. Fallback to
- * 200K (Claude 4+ minimum) if unknown.
+ * expose this uniformly. Prefer card metadata carried by the Pi adapter,
+ * bound it by the provider hint, then use the legacy model-name heuristics.
+ * Unknown Pi models expose their conservative 128K runtime fallback.
  */
-function resolveContextWindowTokens(model: LanguageModel): number {
+export function resolveContextWindowTokens(model: LanguageModel): number {
+  const metadata = model as { maxInputTokens?: number; contextWindow?: number };
+  const positive = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n > 0;
+  const cardLimit = positive(metadata?.maxInputTokens) ? metadata.maxInputTokens : undefined;
+  const providerLimit = positive(metadata?.contextWindow) ? metadata.contextWindow : undefined;
+  if (cardLimit) return Math.floor(Math.min(cardLimit, providerLimit ?? Infinity));
+  return Math.floor(Math.min(providerLimit ?? Infinity, heuristicContextWindowTokens(model)));
+}
+
+function heuristicContextWindowTokens(model: LanguageModel): number {
   const id = (model as any)?.modelId ?? (typeof model === "string" ? model : "");
   if (typeof id !== "string") return 200_000;
   if (id.includes("opus-4-7") || id.includes("opus-4-6") || id.includes("sonnet-4-6")) return 1_000_000;

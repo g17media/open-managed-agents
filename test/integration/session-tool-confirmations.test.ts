@@ -110,14 +110,18 @@ describe("DO pending confirmations", () => {
     });
   });
 
-  it("executes allowed built-in and MCP calls once, then resumes after both answers", async () => {
+  it.each([false, true])("executes allowed built-in and MCP calls once with bounded native content (large=%s)", async (large) => {
     const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(`allow-${crypto.randomUUID()}`));
-    await runInDurableObject(stub, async instance => {
+    await runInDurableObject(stub, async (instance, state) => {
       const sandbox = new TestSandbox();
       const reads = vi.spyOn(sandbox, "readFile");
+      const resultText = large ? "\\\n".repeat(150_000) : "confirmed echo";
       const makeServer = () => createScriptedMcpServer({
         sessionId: "confirm-mcp", tools: [{ name: "echo", inputSchema: { type: "object" } }],
-        callTool: () => ({ content: [{ type: "text", text: "confirmed echo" }] }),
+        callTool: () => ({ content: [
+          { type: "text", text: resultText },
+          { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+        ] }),
       });
       let fake = makeServer();
       const agent = {
@@ -144,15 +148,19 @@ describe("DO pending confirmations", () => {
         { eventType: "agent.tool_use", toolCallId: "read_1", toolName: "read", args: { file_path: "/tmp/test" } },
         { eventType: "agent.mcp_tool_use", toolCallId: "echo_2", toolName: "mcp__test__echo", args: {} },
       ] });
-      const events = [];
-      const history = { append: event => events.push(event) };
+      const history = new SqliteHistory(state.storage.sql);
       try {
         await instance.handleToolConfirmation({ type: "user.tool_confirmation", tool_use_id: "read_1", result: "allow" }, history);
         expect(reads).toHaveBeenCalledTimes(1);
         expect(resume).not.toHaveBeenCalled();
         await instance.handleToolConfirmation({ type: "user.tool_confirmation", tool_use_id: "echo_2", result: "allow" }, history);
         expect(fake.state.counts["tools/call"]).toBe(1);
-        expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "agent.mcp_tool_result", mcp_tool_use_id: "echo_2", content: expect.stringContaining("confirmed echo") })]));
+        const result = history.getEvents().find(event => event.type === "agent.mcp_tool_result" && event.mcp_tool_use_id === "echo_2");
+        expect(Array.isArray(result.content)).toBe(true);
+        const text = result.content.filter(block => block.type === "text").map(block => block.text).join("");
+        expect(text.length).toBeLessThanOrEqual(50_050);
+        expect(text).toBe(large ? resultText.slice(0, 50_000) + "\n...(truncated, total 300000 chars)" : "confirmed echo");
+        expect(result.content).toContainEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } });
         expect(resume).toHaveBeenCalledTimes(1);
         await instance.handleToolConfirmation({ type: "user.tool_confirmation", tool_use_id: "echo_2", result: "allow" }, history);
         expect(fake.state.counts["tools/call"]).toBe(1);

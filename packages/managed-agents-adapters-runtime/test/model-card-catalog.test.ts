@@ -91,3 +91,24 @@ describe("ModelCardCatalogSource", () => {
     expect(listCalls).toEqual([{ tenantId: "tenant_a" }]);
   });
 });
+
+it.each([
+  { model: "claude-sonnet-4-6", contextWindow: 48_000 },
+  { model: "custom-model", contextWindow: 48_000 },
+])("exposes the stored context budget for $model without requiring an API override", async ({ model, contextWindow }) => {
+  const card = { ...cards[0]!, model, pi_config: { contextWindow } };
+  const source = new ModelCardCatalogSource({
+    list: async () => [card], findByModelId: async () => card,
+  });
+  expect((await source.find({ workspaceId: "tenant_a", modelId: card.model_id }))?.maxInputTokens).toBe(contextWindow);
+  const page = await source.list({ workspaceId: "tenant_a", limit: 10 });
+  expect(page.type === "page" && page.models[0]?.maxInputTokens).toBe(contextWindow);
+});
+
+it("caps stored input budgets at known provider capacity", async () => {
+  let card = { ...cards[0]!, pi_config: null as Record<string, unknown> | null };
+  const source = new ModelCardCatalogSource({ list: async () => [card], findByModelId: async () => card });
+  const capacity = (await source.find({ workspaceId: "tenant_a", modelId: card.model_id }))!.maxInputTokens;
+  card = { ...card, pi_config: { contextWindow: 10_000_000 } };
+  expect((await source.find({ workspaceId: "tenant_a", modelId: card.model_id }))?.maxInputTokens).toBe(capacity);
+});

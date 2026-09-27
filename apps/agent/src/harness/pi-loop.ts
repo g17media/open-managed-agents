@@ -26,7 +26,8 @@ import {
   type PiCompactionPolicy,
   type PiCompactionResult,
 } from "./pi-compaction";
-import { toolPermissionEvaluation } from "./tools";
+import { mcpToModelOutput, toolPermissionEvaluation } from "./tools";
+import { capMcpResult, capToolResultContent, truncateMcpText } from "./mcp-output";
 import { withPiRuntimeRequestOptions } from "./pi-provider";
 
 const EMPTY_USAGE: Usage = {
@@ -493,12 +494,20 @@ function toolsToPi(ctx: HarnessContext): AgentTool[] {
             terminate: true,
           };
         }
-        const value = await tool.execute(params, {
-          toolCallId,
-          messages: [],
-          abortSignal: signal,
-        });
-        return { content: valueToPiContent(value), details: value };
+        let value: unknown;
+        try {
+          value = await tool.execute(params, {
+            toolCallId,
+            messages: [],
+            abortSignal: signal,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const bounded = truncateMcpText(message);
+          if (bounded !== message) throw new Error(bounded);
+          throw error;
+        }
+        return { content: valueToPiContent(value), details: undefined };
       },
     };
   });
@@ -520,8 +529,33 @@ function toJsonSchema(input: unknown): Record<string, unknown> {
 }
 
 function valueToPiContent(value: unknown): Array<TextContent | ImageContent> {
-  if (typeof value === "string") return [{ type: "text", text: value }];
-  return [{ type: "text", text: JSON.stringify(value) ?? String(value) }];
+  if (value && typeof value === "object" && "source" in value && "type" in value
+    && (value.type === "image" || value.type === "document")) {
+    const blocks = capToolResultContent([value as ContentBlock]) as ContentBlock[];
+    return boundPiContent(blocks.map((block): TextContent | ImageContent => {
+      if (block.type === "text") return block;
+      if (block.type === "image" && block.source.type === "base64") {
+        return { type: "image", mimeType: block.source.media_type ?? "image/png", data: block.source.data ?? "" };
+      }
+      return { type: "text", text: `[binary tool result omitted: Pi does not support ${block.type} ${block.source.type}]` };
+    }));
+  }
+  if (value && typeof value === "object" && "content" in value && Array.isArray(value.content)) {
+    return boundPiContent(mcpToModelOutput({ output: value }).value.map((part): TextContent | ImageContent => {
+      if (part.type === "text") return part;
+      if (part.mediaType.startsWith("image/")) {
+        return { type: "image", mimeType: part.mediaType, data: part.data.data };
+      }
+      // Pi only accepts text and images in tool results. Never turn an
+      // unsupported audio/document blob into megabytes of JSON text.
+      return { type: "text", text: `[binary tool result omitted: Pi does not support ${part.mediaType}]` };
+    }));
+  }
+  return [{ type: "text", text: truncateMcpText(typeof value === "string" ? value : JSON.stringify(value) ?? String(value)) }];
+}
+
+function boundPiContent(content: Array<TextContent | ImageContent>): Array<TextContent | ImageContent> {
+  return (capMcpResult({ content }) as { content: Array<TextContent | ImageContent> }).content;
 }
 
 function piContentToWire(content: Array<TextContent | ImageContent>): ContentBlock[] {
@@ -626,7 +660,7 @@ function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
   if (value.type === "text" || value.type === "error-text") return [{ type: "text", text: String(value.value ?? "") }];
   if (value.type === "json" || value.type === "error-json") return valueToPiContent(value.value);
   if (value.type === "content" && Array.isArray(value.value)) {
-    return value.value.flatMap((part): Array<TextContent | ImageContent> => {
+    return boundPiContent(value.value.flatMap((part): Array<TextContent | ImageContent> => {
       if (!part || typeof part !== "object") return valueToPiContent(part);
       const item = part as Record<string, unknown>;
       if (item.type === "text") return [{ type: "text", text: String(item.text ?? "") }];
@@ -637,8 +671,11 @@ function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
           mimeType: String(item.mediaType ?? "image/png"),
         }];
       }
+      if (item.type === "file-data" || item.type === "file-url" || item.type === "file") {
+        return [{ type: "text", text: `[binary tool result omitted: Pi does not support ${item.mediaType ?? "document"}]` }];
+      }
       return valueToPiContent(item);
-    });
+    }));
   }
   return valueToPiContent(output);
 }

@@ -49,8 +49,13 @@ describe("official /v1 namespace", () => {
   });
 
   it("keeps Node OMA extensions behind /v1/oma", () => {
+    // Deployed member-chat clients probe this exact application endpoint.
+    // Keep the compatibility exception narrow: all other /member-chat mounts
+    // (and every other non-official segment) still fail the namespace check.
+    const capabilityProbe = 'v1.get("/member-chat/capabilities", (c) => c.json({ version: 1 }));';
+    expect(nodeComposition).toContain(capabilityProbe);
     expect(
-      mountedSegments(nodeComposition, "v1").filter(
+      mountedSegments(nodeComposition.replace(capabilityProbe, ""), "v1").filter(
         (segment) => !OFFICIAL_TOP_LEVEL.has(segment),
       ),
     ).toEqual([]);
