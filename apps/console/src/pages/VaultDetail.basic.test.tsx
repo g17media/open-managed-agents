@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
@@ -20,7 +21,7 @@ describe("vault Basic credentials", () => {
     show();
     fireEvent.click(await screen.findByRole("button", { name: "+ Add credential" }));
     const dialog = screen.getByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "HTTP Basic" }));
+    await userEvent.click(within(dialog).getByRole("tab", { name: "HTTP Basic" }));
     fireEvent.change(within(dialog).getByRole("combobox"), { target: { value: "https://langfuse.test" } });
     fireEvent.change(within(dialog).getByLabelText("Username"), { target: { value: "public" } });
     fireEvent.change(within(dialog).getByLabelText("Password"), { target: { value: " test:password " } });
@@ -35,7 +36,7 @@ describe("vault Basic credentials", () => {
     expect(await screen.findByText("HTTP Basic")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByText("public")).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue("public")).toBeInTheDocument();
     expect(within(dialog).getByText("••••••••")).toBeInTheDocument();
     fireEvent.change(within(dialog).getByLabelText("New password (optional)"), { target: { value: " rotated " } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));

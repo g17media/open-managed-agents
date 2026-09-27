@@ -1,13 +1,13 @@
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { toast } from "sonner";
+import { CopyIcon } from "lucide-react";
 import type {
   BetaManagedAgentsCredential,
   CredentialCreateParams,
-  CredentialUpdateParams,
 } from "@anthropic-ai/sdk/resources/beta/vaults/credentials";
 import type { BetaManagedAgentsVault } from "@anthropic-ai/sdk/resources/beta/vaults/vaults";
 
@@ -40,7 +40,7 @@ type Vault = BetaManagedAgentsVault;
 type Credential = Omit<BetaManagedAgentsCredential, "auth"> & {
   auth: { handle?: string } & (BetaManagedAgentsCredential["auth"]
     | { type: "static_basic"; username: string; mcp_server_url: string }
-    | { type: "container_registry"; registry?: string }
+    | { type: "container_registry"; registry?: string; username?: string | null }
     | { type: "cap_cli"; cli_id: string; mcp_server_url?: string });
 };
 
@@ -360,17 +360,17 @@ export function VaultDetail() {
             ) : filteredCreds.length === 0 ? (
               <div className="rounded-[var(--console-radius-row)] bg-[var(--data-row-bg)] px-3 py-8 text-center text-fg-subtle text-sm">
                 {credentials.length === 0
-                  ? "No credentials yet. Connect an MCP server or add a CLI token."
+                  ? "No credentials yet. Add a server, CLI or container registry credential."
                   : "No credentials match the current filter."}
               </div>
             ) : (
-              <Table className="console-detail-table">
+              <Table className="console-detail-table" style={{ tableLayout: "auto" }}>
                 <TableHeader variant="wireless">
                   <TableRow variant="wireless">
                     <TableHead>Name</TableHead>
                     <TableHead>ID</TableHead>
                     <TableHead>Type</TableHead>
-                    <TableHead>MCP server URL</TableHead>
+                    <TableHead>Server URL</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Updated</TableHead>
                     <TableHead className="text-right"></TableHead>
@@ -569,130 +569,165 @@ function RenameVaultModal({
 }
 
 // =================================================================
-// Edit credential — display name + optional secret rotation
+// Edit credential — public configuration + write-only secret rotation
 // =================================================================
 
-function EditCredentialModal({
-  vault,
-  credential,
-  onClose,
-  onSaved,
-}: {
+const SERVER_URL_HELP = "Requests from the sandbox to this host get the credential injected (matched by host). For MCP servers use the exact MCP URL the agent is configured with.";
+const HANDLE_HELP = "The handle selects a credential by the Basic-auth username the sandbox sends; copy it exactly from your sandbox image/environment configuration (git: https://<handle>:placeholder@github.com/org/repo.git). It is optional when only one credential exists for the host.";
+const HANDLE_ERROR = "Use letters, digits, dots, underscores or dashes (max 128 characters).";
+const validHandle = (value: string) => value === "" || /^[A-Za-z0-9._-]{1,128}$/.test(value);
+function validServerUrl(value: string) {
+  try { return ["http:", "https:"].includes(new URL(value).protocol); }
+  catch { return false; }
+}
+
+/** Only explicitly selected public values belong here; never pass an auth object. */
+function CredentialField({ label, value, onChange, help, invalid = false }: {
+  label: string;
+  value: string;
+  onChange?: (value: string) => void;
+  help?: string;
+  invalid?: boolean;
+}) {
+  const id = useId();
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`${label} copied`);
+    } catch { toast.error(`Could not copy ${label.toLowerCase()}`); }
+  };
+  return (
+    <div>
+      <Label htmlFor={id} className="text-sm text-fg-muted block mb-1">{label}</Label>
+      <div className="flex items-center gap-1">
+        <Input id={id} value={value} readOnly={!onChange} onChange={(e) => onChange?.(e.target.value)}
+          aria-invalid={invalid} aria-describedby={help ? `${id}-help` : undefined}
+          placeholder={onChange ? undefined : "Not configured"}
+          className={`${inputCls} min-w-0 ${onChange ? "" : "bg-bg-surface"}`} />
+        <Button type="button" variant="ghost" size="icon-sm" disabled={!value} onClick={copy} aria-label={`Copy ${label}`} title={`Copy ${label}`}>
+          <CopyIcon />
+        </Button>
+      </div>
+      {help && <p id={`${id}-help`} className={`text-xs mt-1 ${invalid ? "text-danger" : "text-fg-subtle"}`}>{help}</p>}
+    </div>
+  );
+}
+
+function EditCredentialModal({ vault, credential, onClose, onSaved }: {
   vault: Vault;
   credential: Credential;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const managedApi = useManagedApi();
+  const { api } = useApi();
   const { t } = useI18n();
+  const auth = credential.auth;
+  const typeView = credentialTypeView(credential);
+  const originalUrl = "mcp_server_url" in auth ? auth.mcp_server_url ?? "" : "";
+  const originalUsername = "username" in auth ? auth.username ?? "" : "";
+  const originalRegistry = auth.type === "container_registry" ? auth.registry ?? "" : "";
   const [displayName, setDisplayName] = useState(credential.display_name ?? "");
+  const [serverUrl, setServerUrl] = useState(originalUrl);
+  const [handle, setHandle] = useState(auth.handle ?? "");
+  const [username, setUsername] = useState(originalUsername);
+  const [registry, setRegistry] = useState(originalRegistry);
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-
-  const { api } = useApi();
-  const canRotateToken = credential.auth.type === "static_bearer" || credential.auth.type === "static_basic";
+  const editableServer = auth.type === "static_bearer" || auth.type === "static_basic" || auth.type === "cap_cli";
+  const hasHandle = auth.type === "static_bearer" || auth.type === "cap_cli";
+  const urlInvalid = editableServer && serverUrl !== originalUrl && !validServerUrl(serverUrl);
+  const handleInvalid = hasHandle && !validHandle(handle);
+  const usernameInvalid = (auth.type === "static_basic" && (!username || /[:\x00-\x1f\x7f]/.test(username)))
+    || (auth.type === "container_registry" && !!originalUsername && !username);
+  const registryInvalid = auth.type === "container_registry" && registry !== originalRegistry && !registry.trim();
+  const invalid = urlInvalid || handleInvalid || usernameInvalid || registryInvalid;
+  const canRotateToken = editableServer;
 
   const save = async () => {
     const trimmed = displayName.trim();
-    if (!trimmed) {
-      setError(t.common.nameRequired);
-      return;
-    }
+    if (invalid) return;
     setSaving(true);
     setError("");
     try {
-      const body: Omit<CredentialUpdateParams, "betas"> = {
-        vault_id: vault.id,
-        display_name: trimmed,
-      };
-      if (credential.auth.type === "static_bearer" && token.trim()) {
-        body.auth = { type: "static_bearer", token: token.trim() };
+      // Send only changed public fields. Blank rotation never replaces a stored secret.
+      const patch: Record<string, string | null> = {};
+      if (editableServer && serverUrl !== originalUrl) patch.mcp_server_url = serverUrl;
+      if (hasHandle && handle !== (auth.handle ?? "")) patch.handle = handle || null;
+      if ((auth.type === "static_basic" || auth.type === "container_registry") && username !== originalUsername) {
+        patch.username = auth.type === "container_registry" ? username || null : username;
       }
-      if (credential.auth.type === "static_basic") {
-        await api(`/v1/vaults/${vault.id}/credentials/${credential.id}`, { method: "POST", body: JSON.stringify({ display_name: trimmed, ...(token !== "" && { auth: { type: "static_basic", token } }) }) });
-      } else {
-        await managedApi.vaults.credentials.update(credential.id, body);
-      }
+      if (auth.type === "container_registry" && registry !== originalRegistry) patch.registry = registry.trim();
+      if (canRotateToken && token !== "") patch.token = token;
+      await api(`/v1/vaults/${vault.id}/credentials/${credential.id}`, {
+        method: "POST",
+        body: JSON.stringify({
+          ...(displayName !== (credential.display_name ?? "") && { display_name: trimmed || null }),
+          ...(Object.keys(patch).length > 0 && { auth: { type: auth.type, ...patch } }),
+        }),
+      });
       onSaved();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update credential");
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   };
 
   return (
-    <Modal
-      open
-      onClose={onClose}
-      title={t.vaults.editCredential}
-      subtitle={
-        credential.auth.type === "mcp_oauth" ? t.vaults.oauthEditHint : undefined
-      }
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose} disabled={saving}>
-            {t.common.cancel}
-          </Button>
-          <Button onClick={save} disabled={saving || !displayName.trim()}>
-            {saving ? t.common.saving : t.common.save}
-          </Button>
-        </>
-      }
+    <Modal open onClose={onClose} title={t.vaults.editCredential}
+      subtitle={auth.type === "mcp_oauth" ? t.vaults.oauthEditHint : undefined}
+      footer={<>
+        <Button variant="ghost" onClick={onClose} disabled={saving}>{t.common.cancel}</Button>
+        <Button onClick={save} disabled={saving || invalid}>{saving ? t.common.saving : t.common.save}</Button>
+      </>}
     >
-      {error && (
-        <div className="mb-3 text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">
-          {error}
+      {error && <div role="alert" className="mb-3 text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{error}</div>}
+      <div className="space-y-4">
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
+          <span className={`px-2 py-0.5 rounded-full ${typeView.className}`}>{typeView.label}</span>
+          <span className="font-mono">{auth.type}</span>
         </div>
-      )}
-      <div className="space-y-3">
         <div>
-          <Label htmlFor="cred-edit-name" className="text-sm text-fg-muted block mb-1">
-            {t.vaults.displayName}
-          </Label>
-          <Input
-            id="cred-edit-name"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            className={inputCls}
-            autoFocus
-          />
+          <Label htmlFor="cred-edit-name" className="text-sm text-fg-muted block mb-1">{t.vaults.displayName}</Label>
+          <Input id="cred-edit-name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} className={inputCls} maxLength={255} autoFocus />
         </div>
-        <div className="text-xs text-fg-subtle">
-          Type: <span className="font-mono">{credential.auth.type}</span>
-          {credential.auth.type !== "environment_variable" && (
-            <>
-              {" · "}
-              <span className="font-mono">
-                {("mcp_server_url" in credential.auth ? credential.auth.mcp_server_url : "")}
-              </span>
-            </>
-          )}
-          {credential.auth.type === "environment_variable" && (
-            <>
-              {" · "}
-              <span className="font-mono">{credential.auth.secret_name}</span>
-            </>
-          )}
+        {(editableServer || auth.type === "mcp_oauth") && <CredentialField label="Server URL" value={serverUrl}
+          onChange={editableServer ? setServerUrl : undefined} invalid={urlInvalid}
+          help={urlInvalid ? "Enter a valid HTTP or HTTPS URL. A configured server URL cannot be cleared." : SERVER_URL_HELP} />}
+        {hasHandle && <CredentialField label="Handle" value={handle} onChange={setHandle} invalid={handleInvalid} help={handleInvalid ? HANDLE_ERROR : HANDLE_HELP} />}
+        {auth.type === "cap_cli" && <CredentialField label="CLI ID" value={auth.cli_id} />}
+        {auth.type === "container_registry" && <CredentialField label="Registry / host" value={registry} onChange={setRegistry} invalid={registryInvalid} help={registryInvalid ? "A configured registry cannot be cleared." : undefined} />}
+        {(auth.type === "static_basic" || auth.type === "container_registry") && <CredentialField label="Username" value={username} onChange={setUsername}
+          invalid={usernameInvalid} help={usernameInvalid ? (auth.type === "container_registry" ? "Keep a username for the stored registry password." : "Username is required and cannot contain colons or control characters.") : undefined} />}
+        {auth.type === "mcp_oauth" && <>
+          {auth.refresh && <>
+            <CredentialField label="Token endpoint" value={auth.refresh.token_endpoint} />
+            <CredentialField label="Auth method" value={auth.refresh.token_endpoint_auth.type} />
+            <CredentialField label="Client ID" value={auth.refresh.client_id} />
+            <CredentialField label="Scopes" value={auth.refresh.scope ?? ""} />
+            {auth.refresh.resource != null && <CredentialField label="Resource" value={auth.refresh.resource} />}
+          </>}
+          {auth.expires_at != null && <CredentialField label="Expires" value={auth.expires_at} />}
+        </>}
+        {credential.metadata?.provider && <CredentialField label="Provider" value={credential.metadata.provider} />}
+        {auth.type === "environment_variable" && <>
+          <CredentialField label="Secret name" value={auth.secret_name} />
+          <CredentialField label="Networking" value={auth.networking.type} />
+          {auth.networking.type === "limited" && <CredentialField label="Allowed hosts" value={auth.networking.allowed_hosts.join(", ")} />}
+          <CredentialField label="Injection locations" value={[auth.injection_location.header && "header", auth.injection_location.body && "body"].filter(Boolean).join(", ") || "none"} />
+        </>}
+        <div className="text-sm text-fg-muted">
+          {auth.type === "static_basic" ? "Password" : "Stored secret"}: <span aria-label="Stored secret is hidden">••••••••</span>
+          <p className="text-xs text-fg-subtle mt-1">Stored secrets are never returned. {canRotateToken ? "Enter a replacement below to rotate." : "Only public configuration is shown."}</p>
         </div>
-        {credential.auth.type === "static_basic" && (
-          <div className="text-sm text-fg-muted">Username: <span>{credential.auth.username}</span><br />Password: <span>••••••••</span></div>
-        )}
-        {canRotateToken && (
-          <div>
-            <Label htmlFor="cred-edit-token" className="text-sm text-fg-muted block mb-1">
-              {credential.auth.type === "static_basic" ? "New password (optional)" : t.vaults.newTokenOptional}
-            </Label>
-            <SecretInput
-              id="cred-edit-token"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              className={inputCls}
-              placeholder={credential.auth.type === "static_basic" ? "Leave blank to keep current password" : t.vaults.leaveBlankKeepToken}
-            />
-          </div>
-        )}
+        {canRotateToken && <div>
+          <Label htmlFor="cred-edit-token" className="text-sm text-fg-muted block mb-1">{auth.type === "static_basic" ? "New password (optional)" : t.vaults.newTokenOptional}</Label>
+          <SecretInput id="cred-edit-token" value={token} onChange={(e) => setToken(e.target.value)} className={inputCls}
+            placeholder={auth.type === "static_basic" ? "Leave blank to keep current password" : t.vaults.leaveBlankKeepToken} />
+        </div>}
+        <div className="grid gap-3 sm:grid-cols-2 border-t border-border pt-4">
+          <CredentialField label="Created" value={credential.created_at} />
+          <CredentialField label="Updated" value={credential.updated_at} />
+        </div>
       </div>
     </Modal>
   );
@@ -759,7 +794,7 @@ function AddCredentialModal({
   });
   const cliHost = cliForm.host.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   const cliHandle = cliForm.handle.trim();
-  const cliHandleValid = cliHandle === "" || /^[a-z0-9][a-z0-9._-]{0,63}$/.test(cliHandle);
+  const cliHandleValid = cliHandle === "" || /^[A-Za-z0-9._-]{1,128}$/.test(cliHandle);
   const cliIsGit = cliForm.cli_id === "git";
 
   // Container-registry form (container_registry credentials) — pull auth
@@ -874,7 +909,7 @@ function AddCredentialModal({
   // the username (oma-vault swaps in the real token). URL-safe slug only —
   // it ends up inside remote URLs like https://<handle>@github.com/org/repo.
   const handle = customForm.handle.trim();
-  const handleValid = handle === "" || /^[a-z0-9][a-z0-9._-]{0,63}$/.test(handle);
+  const handleValid = handle === "" || /^[A-Za-z0-9._-]{1,128}$/.test(handle);
 
   const createBearerCred = async () => {
     setConnecting("custom");
@@ -1165,7 +1200,7 @@ function AddCredentialModal({
         onValueChange={(v) => setAddTab(v as "mcp" | "cli" | "registry")}
         aria-label="Add credential"
       >
-        <TabsList className="mb-3">
+        <TabsList aria-label="Credential kind" className="mb-3">
           <TabsTrigger value="mcp">MCP server</TabsTrigger>
           <TabsTrigger value="cli">CLI</TabsTrigger>
           <TabsTrigger value="registry">Registry</TabsTrigger>
@@ -1195,25 +1230,17 @@ function AddCredentialModal({
             />
           </div>
 
-          <div>
-            <Label className="text-sm font-medium text-fg block mb-1">Type</Label>
-            <div className="inline-flex rounded-md border border-border p-0.5">
-              {(["oauth", "bearer", "basic"] as const).map((t) => (
-                <Button variant="ghost"
-                  key={t}
-                  type="button"
-                  onClick={() => setCustomForm({ ...customForm, type: t })}
-                  className={`inline-flex items-center justify-center px-3 py-1 min-h-11 sm:min-h-0 text-sm rounded ${customForm.type === t ? "bg-bg-surface text-fg font-medium" : "text-fg-muted"}`}
-                >
-                  {t === "oauth" ? "OAuth" : t === "basic" ? "HTTP Basic" : "Bearer token"}
-                </Button>
-              ))}
-            </div>
-          </div>
+          <Tabs value={customForm.type} onValueChange={(type) => setCustomForm({ ...customForm, type: type as typeof customForm.type })}>
+            <TabsList aria-label="Authentication type">
+              <TabsTrigger value="oauth">OAuth</TabsTrigger>
+              <TabsTrigger value="bearer">Bearer token</TabsTrigger>
+              <TabsTrigger value="basic">HTTP Basic</TabsTrigger>
+            </TabsList>
+            <TabsContent value={customForm.type} className="space-y-4 pt-2">
 
           <div>
-            <Label className="text-sm font-medium text-fg block mb-1">
-              {customForm.type === "basic" ? "Server URL" : "MCP Server"}
+            <Label htmlFor="vault-server-url" className="text-sm font-medium text-fg block mb-1">
+              Server URL
             </Label>
             {/* Combobox: input filters the registry as you type. Pick a
                 row to fill the URL + show the favicon as a left-side
@@ -1221,6 +1248,8 @@ function AddCredentialModal({
                 dropdown renders into document.body via portal so it
                 escapes Modal's overflow-y-auto clipping. */}
             <LocalCombobox
+              id="vault-server-url"
+              aria-describedby="vault-server-url-help"
               value={customForm.url}
               onChange={(text) =>
                 setCustomForm({
@@ -1288,6 +1317,7 @@ function AddCredentialModal({
               placeholder="Search Anthropic's MCP registry or enter a custom URL"
               emptyHint="No matches — keep typing for a custom URL"
             />
+            <p id="vault-server-url-help" className="text-xs text-fg-subtle mt-1">{SERVER_URL_HELP}</p>
           </div>
 
           {/* Access token — collapsed Optional. Filling this switches the
@@ -1311,18 +1341,20 @@ function AddCredentialModal({
                 onChange={(e) =>
                   setCustomForm({ ...customForm, handle: e.target.value })
                 }
-                placeholder="brain"
+                placeholder="repo-reader"
                 spellCheck={false}
                 autoCapitalize="none"
                 aria-invalid={!handleValid}
+                aria-describedby="vault-mcp-handle-help"
                 className={inputCls}
               />
               <div
+                id="vault-mcp-handle-help"
                 className={`text-xs mt-1 ${handleValid ? "text-fg-subtle" : "text-danger"}`}
               >
                 {handleValid
-                  ? "Lets a sandbox pick this credential when several share a host: use it as the username, e.g. https://brain@github.com/org/repo — the password is ignored and the vault injects the real token."
-                  : "Lowercase letters, digits, dots, underscores or dashes; must start with a letter or digit (max 64)."}
+                  ? HANDLE_HELP
+                  : HANDLE_ERROR}
               </div>
             </div>
           )}
@@ -1498,6 +1530,8 @@ function AddCredentialModal({
               </div>
             </Disclosure>
           )}
+            </TabsContent>
+          </Tabs>
         </TabsContent>
 
         <TabsContent value="cli" className="space-y-3">
@@ -1666,17 +1700,19 @@ function AddCredentialModal({
                     setCliForm({ ...cliForm, handle: e.target.value })
                   }
                   className={inputCls}
-                  placeholder="brain"
+                  placeholder="repo-reader"
                   spellCheck={false}
                   autoCapitalize="none"
                   aria-invalid={!cliHandleValid}
+                  aria-describedby="vault-cli-handle-help"
                 />
                 <div
+                  id="vault-cli-handle-help"
                   className={`text-xs mt-1 ${cliHandleValid ? "text-fg-subtle" : "text-danger"}`}
                 >
                   {cliHandleValid
-                    ? "Lets a sandbox pick this credential when several share a host: use it as the username, e.g. git clone https://brain@github.com/org/repo — the password is ignored and the vault injects the real token."
-                    : "Lowercase letters, digits, dots, underscores or dashes; must start with a letter or digit (max 64)."}
+                    ? HANDLE_HELP
+                    : HANDLE_ERROR}
                 </div>
               </div>
             </>

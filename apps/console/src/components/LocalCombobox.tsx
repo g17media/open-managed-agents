@@ -36,6 +36,8 @@ import { cn } from "@/lib/utils";
  * into `value` via the same handler — usually yes.
  */
 export interface LocalComboboxProps<T> {
+  id?: string;
+  "aria-describedby"?: string;
   value: string;
   onChange: (text: string) => void;
   onPick?: (item: T) => void;
@@ -60,6 +62,8 @@ const DEFAULT_INPUT_CLS =
   "w-full rounded-md border border-border bg-bg px-3 py-2 min-h-11 sm:min-h-0 text-sm text-fg outline-none focus-within:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] flex items-center gap-2";
 
 export function LocalCombobox<T>({
+  id,
+  "aria-describedby": ariaDescribedBy,
   value,
   onChange,
   onPick,
@@ -105,6 +109,8 @@ export function LocalCombobox<T>({
         >
           {prefix}
           <Input
+            id={id}
+            aria-describedby={ariaDescribedBy}
             ref={inputRef}
             value={value}
             onChange={(e) => onChange(e.target.value)}
