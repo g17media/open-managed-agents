@@ -238,7 +238,7 @@ function toPiToolMedia(item: { type?: string; data?: unknown; mediaType?: string
   return { type: "text", text: `[${mediaType || item.type} tool output omitted]` };
 }
 
-function toPiToolResult(
+export function toPiToolResult(
   part: Extract<LanguageModelV3CallOptions["prompt"][number], { role: "tool" }>["content"][number] & { type: "tool-result" },
   timestamp: number,
 ): ToolResultMessage {

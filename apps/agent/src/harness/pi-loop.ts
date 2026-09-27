@@ -659,7 +659,7 @@ function modelMessagesToPi(
   });
 }
 
-function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
+export function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
   if (!output || typeof output !== "object") return valueToPiContent(output);
   const value = output as { type?: string; value?: unknown };
   if (value.type === "text" || value.type === "error-text") return [{ type: "text", text: String(value.value ?? "") }];
@@ -674,9 +674,11 @@ function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
         const raw = item.data as unknown;
         const data = typeof raw === "string"
           ? raw
-          : raw && typeof raw === "object" && (raw as { type?: string }).type === "data" && typeof (raw as { data?: unknown }).data === "string"
-            ? (raw as { data: string }).data
-            : null;
+          : raw instanceof Uint8Array
+            ? bytesToBase64(raw)
+            : raw && typeof raw === "object" && (raw as { type?: string }).type === "data" && typeof (raw as { data?: unknown }).data === "string"
+              ? (raw as { data: string }).data
+              : null;
         if (mediaType.startsWith("image/") && data !== null) return [{ type: "image", data, mimeType: mediaType }];
         return [{ type: "text", text: `[binary tool result omitted: Pi does not support ${mediaType}]` }];
       }
