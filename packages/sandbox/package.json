@@ -17,7 +17,8 @@
   },
   "dependencies": {
     "@open-managed-agents/observability": "workspace:*",
-    "@open-managed-agents/shared": "workspace:*"
+    "@open-managed-agents/shared": "workspace:*",
+    "undici": "7.29.0"
   },
   "devDependencies": {
     "vitest": "^4.1.3"

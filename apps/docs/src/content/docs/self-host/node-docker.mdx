@@ -152,6 +152,23 @@ allowlist the data dir's host path with `BELLJAR_ALLOWED_MOUNT_ROOTS` on
 the belljar server, and set `BELLJAR_MOUNT_PATH_MAP=/app/data=<host data
 dir>` on OMA when it runs in a container (see `.env.example`).
 
+**Belljar command timeouts:** the bash tool defaults to 120 seconds and accepts
+up to 600 seconds. OMA passes that command limit unchanged to the container and
+allows another 30 seconds for the HTTP response, including its body. Both HTTP
+headers and body timeouts are configured explicitly, so Node's default
+five-minute headers timeout does not cut short a ten-minute command. Other
+Belljar requests (files, processes, git checkout and ping) have a 120-second
+HTTP deadline.
+
+OMA uses a named shell and switches to a fresh shell after an execution error
+or transport timeout. Later execs can run in the same workspace without waiting
+behind the stuck shell; OMA does not automatically retry the failed command.
+The old command **may still be running**: switching shells does not kill it.
+Inspect processes and output before retrying work with side effects. Shell
+state is not preserved across recovery; OMA supplies `/workspace` and the
+configured environment on every exec. Commands already submitted to the old
+shell may still fail. Container sleep/restart clears abandoned shells.
+
 ### Run an ACP harness in E2B
 
 Set an Agent's OMA extension to `harness: "acp-sandbox"` and provide the

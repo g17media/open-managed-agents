@@ -64,7 +64,12 @@ describe("Built-in tool execution", () => {
     expect(result).toContain("echo hello");
   });
 
-  it("bash tool passes timeout to sandbox", async () => {
+  it.each([
+    [undefined, 120000],
+    [60000, 60000],
+    [600000, 600000],
+    [900000, 600000],
+  ])("bash passes command timeout %s as %s without transport grace", async (timeout, expected) => {
     let capturedTimeout: number | undefined;
     const sandbox: any = {
       exec: async (cmd: string, timeout?: number) => {
@@ -77,10 +82,10 @@ describe("Built-in tool execution", () => {
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     await tools.bash.execute(
-      { command: "sleep 10", timeout: 60000 },
+      { command: "sleep 10", timeout },
       TOOL_EXEC_OPTS
     );
-    expect(capturedTimeout).toBe(60000);
+    expect(capturedTimeout).toBe(expected);
   });
 
   it("bash tool uses bounded exec even when the sandbox exposes background processes", async () => {

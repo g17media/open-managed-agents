@@ -33,6 +33,21 @@ function makeLog(onAppend?: (rows: any[]) => void) {
 }
 
 describe("NodeSessionRouter", () => {
+  it.each([[undefined, 60_000], [600_000, 600_000]])("forwards exec timeout %s unchanged (%s ms)", async (timeout_ms, expected) => {
+    let received: number | undefined;
+    const router = new NodeSessionRouter({
+      sql: { prepare: () => ({ bind: () => ({ first: async () => ({ tenant_id: "tenant-1" }) }) }) } as any,
+      hub: {} as any,
+      registry: { getOrCreate: async () => ({ sandbox: { exec: async (_command: string, timeout: number) => {
+        received = timeout;
+        return "exit=0\nok";
+      } } }) } as any,
+      newEventLog: () => makeLog().log as any,
+    });
+    await expect(router.exec("session-1", { command: "echo ok", timeout_ms })).resolves.toMatchObject({ exit_code: 0, output: "ok" });
+    expect(received).toBe(expected);
+  });
+
   it("publishes session.error when session initialization fails", async () => {
     const events: any[] = [];
     const log = {
