@@ -127,7 +127,12 @@ export class PiHarness implements HarnessInterface {
           context,
           withPiRuntimeRequestOptions(ctx.pi!, options),
         ),
-      toolExecution: "parallel",
+      // Tool calls issued in one assistant message run one after another, in order. Parallel
+      // execution let a bash run start before an edit from the same message had landed
+      // (observed 2026-09-27: a rebuilt figure was byte-identical because the script ran on
+      // the pre-edit file). Operators can opt back in per agent with
+      // agent.metadata.tool_execution = "parallel".
+      toolExecution: ((ctx.agent.metadata ?? {}) as { tool_execution?: unknown }).tool_execution === "parallel" ? "parallel" : "sequential",
     });
 
     const unsubscribe = agent.subscribe(async (event) => {
