@@ -127,7 +127,12 @@ export class PiHarness implements HarnessInterface {
           context,
           withPiRuntimeRequestOptions(ctx.pi!, options),
         ),
-      toolExecution: "parallel",
+      // Tool calls issued in one assistant message run one after another, in order. Parallel
+      // execution let a bash run start before an edit from the same message had landed
+      // (observed 2026-09-27: a rebuilt figure was byte-identical because the script ran on
+      // the pre-edit file). Operators can opt back in per agent with
+      // agent.metadata.tool_execution = "parallel".
+      toolExecution: ((ctx.agent.metadata ?? {}) as { tool_execution?: unknown }).tool_execution === "parallel" ? "parallel" : "sequential",
     });
 
     const unsubscribe = agent.subscribe(async (event) => {
@@ -654,7 +659,7 @@ function modelMessagesToPi(
   });
 }
 
-function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
+export function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
   if (!output || typeof output !== "object") return valueToPiContent(output);
   const value = output as { type?: string; value?: unknown };
   if (value.type === "text" || value.type === "error-text") return [{ type: "text", text: String(value.value ?? "") }];
@@ -669,9 +674,11 @@ function toolOutputToPi(output: unknown): Array<TextContent | ImageContent> {
         const raw = item.data as unknown;
         const data = typeof raw === "string"
           ? raw
-          : raw && typeof raw === "object" && (raw as { type?: string }).type === "data" && typeof (raw as { data?: unknown }).data === "string"
-            ? (raw as { data: string }).data
-            : null;
+          : raw instanceof Uint8Array
+            ? bytesToBase64(raw)
+            : raw && typeof raw === "object" && (raw as { type?: string }).type === "data" && typeof (raw as { data?: unknown }).data === "string"
+              ? (raw as { data: string }).data
+              : null;
         if (mediaType.startsWith("image/") && data !== null) return [{ type: "image", data, mimeType: mediaType }];
         return [{ type: "text", text: `[binary tool result omitted: Pi does not support ${mediaType}]` }];
       }

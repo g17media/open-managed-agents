@@ -79,6 +79,38 @@ function makeContext(responses: ReturnType<typeof fauxAssistantMessage>[]) {
 }
 
 describe("PiHarness", () => {
+  // The converter matrix covers input shapes; this catches a replay path
+  // bypassing conversion or its aggregate binary budget before model delivery.
+  it("replays mixed images in order and omits an image over the shared budget", async () => {
+    const { ctx, events, faux } = makeContext([]);
+    const data = "a".repeat(1_000_000);
+    events.push(
+      { type: "agent.tool_use", id: "images", name: "read", input: {} },
+      { type: "agent.tool_result", tool_use_id: "images", content: [
+        { type: "text", text: "before" },
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data } },
+        { type: "text", text: "between" },
+        { type: "image", source: { type: "base64", media_type: "image/webp", data } },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+        { type: "text", text: "after" },
+      ] },
+    );
+    let served: unknown;
+    faux.setResponses([context => {
+      served = context.messages.find(message => message.role === "toolResult");
+      return fauxAssistantMessage("Done");
+    }]);
+    await new PiHarness({ compaction: { name: "replay-only", shouldCompact: () => false, compact: async () => null } }).run(ctx);
+    expect(served).toMatchObject({ content: [
+      { type: "text", text: "before" },
+      { type: "image", mimeType: "image/jpeg", data },
+      { type: "text", text: "between" },
+      { type: "image", mimeType: "image/webp", data },
+      { type: "text", text: "[binary tool result omitted: exceeds binary size limit]" },
+      { type: "text", text: "after" },
+    ] });
+  });
+
   it("preserves client tools whose names begin with the MCP prefix", async () => {
     const name = "mcp__client__answer";
     const { ctx, events } = makeContext([fauxAssistantMessage(fauxToolCall(name, {}, { id: "client_mcp" }), { stopReason: "toolUse" })]);

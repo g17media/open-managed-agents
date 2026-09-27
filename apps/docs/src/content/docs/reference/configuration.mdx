@@ -28,6 +28,38 @@ interface AgentConfig {
 }
 ```
 
+### Tool execution and media results
+
+`DefaultHarness` and `PiHarness` execute tools from one model step sequentially
+by default. Calls run in order, so a script run sees an edit made by an earlier
+call. An ordinary tool error is returned to the model and later calls still run;
+interrupting the turn stops queued calls. Client tools and calls awaiting
+permission still require the client's response; sequential execution does not
+make them barriers for other executable calls.
+
+Independent tools can opt into concurrent execution per agent:
+
+```json
+{ "metadata": { "tool_execution": "parallel" } }
+```
+
+Only the exact value `"parallel"` enables concurrency. Omitting the key, setting
+`"sequential"`, or any other value keeps sequential execution. Parallel calls
+may finish out of order, but their results reach the next model request in call
+order. A single tool call requires no extra batching delay in either mode.
+This option applies to these host harnesses, not third-party ACP agent loops.
+
+The `read` tool returns images as `image-data` and documents as `file-data`.
+The default harness's Anthropic adapter sends them as image and document blocks,
+respectively, including when replaying persisted history. Pi accepts inline
+images from `image-data`, image `file-data`, and AI SDK `file` parts containing
+base64 strings, byte arrays, or `{ "type": "data", "data": "<base64>" }`.
+MIME types and the order of text and image parts are preserved. Pi represents
+URL-backed files and non-image files such as PDFs with text omission notices.
+Pi tool results retain the shared binary budget from the tool-result limits:
+`max(40 × TOOL_RESULT_MAX_CHARS, 2,000,000)` base64 characters per result.
+Images beyond that budget are omitted whole with a notice, never truncated.
+
 ### Default harness context safety
 
 The default harness checks context size before every model request, including

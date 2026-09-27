@@ -9,6 +9,7 @@ import { SummarizeCompactionStrategy, resolveCompactionStrategy, emergencyCompac
 import type { CompactionStrategy } from "./compaction";
 import { ALL_TOOLS, toolPermissionEvaluation, mcpToModelOutput } from "./tools";
 import { capToolResultContent } from "./mcp-output";
+import { sequenceTools } from "./tool-execution";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
 import { modelCallOptions } from "./provider";
 import {
@@ -313,7 +314,13 @@ export class DefaultHarness implements HarnessInterface {
     // Wrap every executable tool so the tool_use/tool_result events below
     // can carry true per-call timings (see tool-timing.ts). Custom and
     // always_ask tools have no execute and pass through by reference.
-    const { tools: timedTools, timings: toolTimings } = instrumentToolTimings(tools);
+    const instrumented = instrumentToolTimings(tools);
+    const toolTimings = instrumented.timings;
+    // AI SDK dispatches one step's calls concurrently. Queue outside the timing
+    // wrapper so dependent calls see prior writes and waiting is not execution time.
+    const timedTools = agent.metadata?.tool_execution === "parallel"
+      ? instrumented.tools
+      : sequenceTools(instrumented.tools);
     const completedToolCalls = new Set<string>();
     const harnessName = agent.harness ?? "default";
 
