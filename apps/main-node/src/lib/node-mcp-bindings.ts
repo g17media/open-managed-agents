@@ -1,3 +1,4 @@
+import { getServiceAccountToken } from "@open-managed-agents/vault-forward/service-account";
 import { resolveProxyTargetByTenant, forwardWithRefresh } from "@open-managed-agents/vault-forward/proxy";
 import { forwardManagedMcpRequest } from "@open-managed-agents/vault-forward/managed";
 import { SqlVaultStore } from "@open-managed-agents/vault-store-sql";
@@ -68,7 +69,13 @@ export function createNodeMcpBindings(deps: {
       const record = await vaults.find({ workspaceId, vaultId });
       if (record?.vault.archivedAt === null) vaultIds.push(vaultId);
     }
-    return forwardManagedMcpRequest({ request, workspaceId, session: { ...context.session, vaultIds }, serverName, credentials: nativeCredentials() });
+    const credentials = nativeCredentials();
+    return forwardManagedMcpRequest({
+      request, workspaceId, session: { ...context.session, vaultIds }, serverName, credentials,
+      serviceAccountToken: (record, rejectedToken) => getServiceAccountToken(
+        credentials, workspaceId, record, { rejectedToken },
+      ),
+    });
   }
 
   return { mcpBindingFetch, managedMcpBindingFetch };
