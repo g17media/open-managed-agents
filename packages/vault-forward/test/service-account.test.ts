@@ -78,6 +78,37 @@ describe("service account JWT bearer", () => {
   it.each([{}, { access_token: "secret", expires_in: -1 }, { access_token: "secret", expires_in: "3600" }, { access_token: "bad\r\ntoken", expires_in: 3600 }])("sanitizes invalid token replies", async (body) => {
     await expect(mintServiceAccountToken(auth, async () => Response.json(body))).rejects.toThrow("Service account token exchange failed");
   });
+  it("aborts a hanging token exchange at the bound and releases single-flight for retry", async () => {
+    const { store, record } = await setup();
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    let aborted = 0;
+    const request = vi.fn<typeof fetch>()
+      .mockImplementationOnce(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) { reject(new Error("Expected bounded exchange")); return; }
+        const onAbort = () => { aborted++; reject(signal.reason); };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }))
+      .mockResolvedValueOnce(Response.json({ access_token: "recovered", expires_in: 3600 }));
+    try {
+      const outcomes = await Promise.allSettled([
+        getServiceAccountToken(store, "workspace", record, { fetch: request }),
+        getServiceAccountToken(store, "workspace", record, { fetch: request }),
+      ]);
+      expect(timeout).toHaveBeenCalledExactlyOnceWith(10_000);
+      expect(aborted).toBe(1);
+      expect(request).toHaveBeenCalledTimes(1);
+      for (const outcome of outcomes) {
+        expect(outcome.status).toBe("rejected");
+        if (outcome.status === "rejected") expect(outcome.reason.message).toBe("Service account token exchange failed");
+      }
+      expect(await getServiceAccountToken(store, "workspace", record, { fetch: request })).toBe("recovered");
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(await getServiceAccountToken(store, "workspace", record, { fetch: request })).toBe("recovered");
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally { timeout.mockRestore(); }
+  }, 15_000);
   it("sanitizes signing and transport failures", async () => {
     expect(() => createServiceAccountAssertion({ ...auth, privateKey: "SECRET INVALID PEM" })).toThrow("Invalid service account signing configuration");
     await expect(mintServiceAccountToken(auth, async () => { throw new Error("secret echoed by server"); })).rejects.toThrow(/^Service account token exchange failed$/);
