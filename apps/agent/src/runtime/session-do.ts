@@ -63,6 +63,7 @@ import type {
   UserCustomToolResultEvent,
   UserDefineOutcomeEvent,
   AgentMessageEvent,
+  ContentBlock,
   SystemUserMessagePendingEvent,
   SystemUserMessagePromotedEvent,
   SystemUserMessageCancelledEvent,
@@ -95,7 +96,9 @@ import {
   type ActiveOutcomeState,
   type OutcomeEvaluationRecord,
 } from "./outcome-supervisor";
-import { buildTools, disposeTools, nativeWebSearchRequested } from "../harness/tools";
+import { buildTools, disposeTools, nativeWebSearchRequested, mcpToModelOutput } from "../harness/tools";
+import { normalizeToolOutputForWire } from "../harness/default-loop";
+import { capToolResultContent } from "../harness/mcp-output";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
@@ -4065,7 +4068,8 @@ export class SessionDO extends DurableObject<Env> {
     const pending = this.state.pending_tool_calls.find(p => p.toolCallId === confirmation.tool_use_id);
     // Queued duplicate answers can outlive their pending call.
     if (!pending || this.pendingToolEventType(pending) === "agent.custom_tool_use") return;
-    const appendResult = (content: string, isError = false) => {
+    const appendResult = (rawContent: string | ContentBlock[], isError = false) => {
+      const content = capToolResultContent(rawContent);
       const event: SessionEvent = this.pendingToolEventType(pending) === "agent.mcp_tool_use"
         ? { type: "agent.mcp_tool_result", mcp_tool_use_id: pending.toolCallId, content, ...(isError && { is_error: true }), parent_event_id: pending.toolCallId }
         : { type: "agent.tool_result", tool_use_id: pending.toolCallId, content, ...(isError && { is_error: true }), parent_event_id: pending.toolCallId };
@@ -4132,7 +4136,11 @@ export class SessionDO extends DurableObject<Env> {
           const result = await originalTool.execute(pending.args, {
             toolCallId: pending.toolCallId, messages: [], abortSignal: parentSignal,
           });
-          appendResult(typeof result === "string" ? result : JSON.stringify(result));
+          appendResult(normalizeToolOutputForWire(
+            this.pendingToolEventType(pending) === "agent.mcp_tool_use"
+              ? mcpToModelOutput({ output: result })
+              : result,
+          ));
         } catch (e) {
           appendResult(`Error: ${e instanceof Error ? e.message : String(e)}`, true);
         } finally {

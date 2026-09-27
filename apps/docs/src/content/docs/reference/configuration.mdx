@@ -49,8 +49,8 @@ A context-length failure from the summarizer also triggers this structural
 pass. Elisions are persisted in `agent.thread_context_compacted` metadata;
 the original event log remains intact, while replay uses the smaller view.
 
-An empty `finish_reason=length` response triggers an emergency pass and one
-request retry. If it fails again for context length, the error states that the
+An empty `finish_reason=length` response or a provider context-length rejection
+triggers an emergency pass and one request retry. If it fails again for context length, the error states that the
 context exceeded the model window and the session must be reset. Histories
 dominated by protected messages or user content may still require a reset.
 
@@ -118,7 +118,7 @@ type ToolDefinition =
 
 ### MCP server config
 
-Cloud MCP text results share the built-in tool limit: 50,000 characters by
+MCP text results in the default and Pi harnesses share the built-in tool limit: 50,000 characters by
 default, configurable with `OMA_TOOL_RESULT_MAX_CHARS`. Both individual text
 blocks and the combined text are bounded, with a visible
 `...(truncated, total N chars)` suffix. The truncated form is persisted in the
@@ -126,6 +126,14 @@ event log and passed to the model; oversized duplicate `structuredContent`
 is omitted. Binary blocks are kept whole within a separate overall budget
 of `max(40 × text limit, 2,000,000)` characters. Blocks beyond that budget are
 replaced by an omission notice.
+
+Replay applies the same policy to older persisted tool results, including
+errors, without rewriting their original events. Built-in text results
+(including `read`, `glob`, `grep`, and `web_fetch`) are also capped after
+formatting, so a tool's own length option cannot raise the deployment limit.
+Confirmed MCP calls persist bounded native content blocks as well. The Pi
+harness preserves MCP images and emits omission notices for audio or document
+blobs its tool-result protocol cannot represent.
 
 ```ts
 type McpServerConfig =

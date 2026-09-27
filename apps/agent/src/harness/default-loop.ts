@@ -1,4 +1,4 @@
-import { streamText, stepCountIs, wrapLanguageModel } from "ai";
+import { streamText, stepCountIs, wrapLanguageModel, NoOutputGeneratedError } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
 import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { HarnessInterface, HarnessContext, HarnessRuntime, FileResolver } from "./interface";
@@ -8,6 +8,7 @@ import { eventsToMessages, eventsToMessagesAsync } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy, emergencyCompact, isContextLengthError, estimateMessagesTokens } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
 import { ALL_TOOLS, toolPermissionEvaluation, mcpToModelOutput } from "./tools";
+import { capToolResultContent } from "./mcp-output";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
 import { modelCallOptions } from "./provider";
 import {
@@ -165,7 +166,7 @@ function emitToolResultEvent(
   part: ContentPart<any> & { type: "tool-result" | "tool-error" },
   timings?: Map<string, ToolTimingRecord>,
   harnessName = "default",
-): void {
+): boolean {
   const toolCallId = part.toolCallId;
   const toolName = part.toolName;
   // tool-error has `error`, tool-result has `output`.
@@ -174,7 +175,8 @@ function emitToolResultEvent(
       ? { type: "error-text", value: String((part as any).error ?? "") }
       : ((part as any).output ?? (part as any).result);
 
-  const content = normalizeToolOutputForWire(isMcpTool(toolName) && part.type !== "tool-error" ? mcpToModelOutput({ output: raw }) : raw);
+  const normalized = normalizeToolOutputForWire(isMcpTool(toolName) && part.type !== "tool-error" ? mcpToModelOutput({ output: raw }) : raw);
+  const content = capToolResultContent(normalized);
 
   if (isMcpTool(toolName)) {
     runtime.broadcast({
@@ -221,13 +223,18 @@ function emitToolResultEvent(
       parent_event_id: threadSentEventId(toolCallId),
     });
   }
+  // MCP adapters can supply execute without an SDK conversion hook. Rebase
+  // after their result so the SDK cannot retain its uncapped raw JSON.
+  return isMcpTool(toolName) || (typeof normalized === "string"
+    ? content !== normalized
+    : JSON.stringify(content) !== JSON.stringify(normalized));
 }
 
 /**
  * AI SDK ToolResultOutput union → wire `string | ContentBlock[]`.
  * Pure function; same input → same output bytes.
  */
-function normalizeToolOutputForWire(raw: unknown): string | ContentBlock[] {
+export function normalizeToolOutputForWire(raw: unknown): string | ContentBlock[] {
   if (typeof raw === "string") return raw;
   if (raw == null) return "";
 
@@ -663,7 +670,11 @@ export class DefaultHarness implements HarnessInterface {
             case "tool-result":
             case "tool-error":
               completedToolCalls.add(part.toolCallId);
-              emitToolResultEvent(runtime, part, toolTimings, harnessName);
+              // SDK tool errors bypass toModelOutput. If persistence capped
+              // them, rebuild subsequent steps from those bounded events.
+              if (emitToolResultEvent(runtime, part, toolTimings, harnessName)) {
+                contextRebased = true;
+              }
               break;
             // source / file / tool-approval-request: not produced by current
             // tool surface; intentionally skipped. Add cases here if those
@@ -908,7 +919,14 @@ export class DefaultHarness implements HarnessInterface {
         // of substring matching the message.
         // TODO: extend wrapper coverage to other boundaries as new
         // failure modes surface (D1 client, KV ops, MCP transport).
-        throw classifyExternalError(err);
+        // A request rejected before its first complete step makes AI SDK's
+        // result promises throw NoOutputGeneratedError without the provider
+        // cause. Restore the onError diagnostic so context recovery (and
+        // auth/billing classification) sees the actual failure.
+        const diagnostic = NoOutputGeneratedError.isInstance(err) && lastStreamErrorMessage
+          ? new Error(lastStreamErrorMessage, { cause: err })
+          : err;
+        throw classifyExternalError(diagnostic);
       } finally {
         const totalElapsed = Date.now() - streamStartedAt;
         console.log(`[stream] streamText END elapsed=${totalElapsed}ms`);

@@ -156,7 +156,9 @@ export function emergencyCompact(events: SessionEvent[], opts: {
     if (!id || !visibleIds.has(id) || protectedIds.has(id)) return [];
     const content = (event as { content: unknown }).content;
     const text = typeof content === "string" ? content : JSON.stringify(content);
-    if (text.startsWith("[tool result elided during compaction:") || text.length < 128) return [];
+    // Actual persisted elisions are already replaced with short placeholders
+    // above. A tool-supplied prefix is not evidence of a prior boundary.
+    if (text.length < 128) return [];
     return [{ tool_call_id: id, chars: text.length, index }];
   }).sort((a, b) => b.chars - a.chars || a.index - b.index);
   const elisions: Array<{ tool_call_id: string; chars: number }> = [];

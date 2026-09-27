@@ -1,4 +1,4 @@
-import { capMcpResult as capMcpOutput } from "./mcp-output";
+import { capMcpResult as capMcpOutput, configureToolResultLimit, toolResultMaxChars, truncateMcpText } from "./mcp-output";
 import { dynamicTool, generateText, jsonSchema, tool } from "ai";
 import { z } from "zod";
 import type { LanguageModel } from "ai";
@@ -53,13 +53,11 @@ export const OPT_IN_TOOLS = ["browser"];
 export const ALL_TOOLS = [...DEFAULT_TOOLS, ...OPT_IN_TOOLS];
 // Default cap for tool-result text. Override per deployment with
 // OMA_TOOL_RESULT_MAX_CHARS (wired through buildTools' env param by both
-// runtimes) — buildTools stamps the module-level value below.
-const DEFAULT_MAX_TOOL_RESULT_CHARS = 50000;
-let MAX_TOOL_RESULT_CHARS = DEFAULT_MAX_TOOL_RESULT_CHARS;
+// runtimes) — buildTools configures the shared conversion/replay policy.
 // Binary (image/document) results can't be truncated without corrupting
 // them — over this ceiling the read tool refuses with an error instead.
 // Scales with the text cap so one env var governs both.
-const binaryResultMaxChars = () => Math.max(MAX_TOOL_RESULT_CHARS * 40, 2_000_000);
+const binaryResultMaxChars = () => Math.max(toolResultMaxChars() * 40, 2_000_000);
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
 // Cap MCP client init + tools/list. Without this, a hung upstream
@@ -87,7 +85,7 @@ export async function disposeTools(tools: Record<string, unknown>): Promise<void
 export { connectHttpMcpClient };
 
 export function capMcpResult(output: unknown): unknown {
-  return capMcpOutput(output, MAX_TOOL_RESULT_CHARS);
+  return capMcpOutput(output);
 }
 
 export function mcpToModelOutput({ output }: { output: unknown }) {
@@ -177,7 +175,7 @@ function safe<T>(fn: (args: T) => Promise<ToolResultValue>): (args: T) => Promis
       const result = await fn(args);
       // Handle empty string results (CC pattern: prevent model stop sequence issues)
       if (typeof result === "string" && result.trim() === "") return "(completed with no output)";
-      return result;
+      return typeof result === "string" ? truncateResult(result) : result;
     } catch (err) {
       let msg = err instanceof Error ? err.message : String(err);
       // Include stack trace for better debugging
@@ -191,7 +189,7 @@ function safe<T>(fn: (args: T) => Promise<ToolResultValue>): (args: T) => Promis
       const truncated = msg.length > 10000
         ? msg.slice(0, 5000) + `\n[${msg.length - 10000} characters truncated]\n` + msg.slice(-5000)
         : msg;
-      return `Error: ${truncated}`;
+      return truncateResult(`Error: ${truncated}`);
     }
   };
 }
@@ -202,10 +200,7 @@ function safe<T>(fn: (args: T) => Promise<ToolResultValue>): (args: T) => Promis
  * local filesystem access from the harness layer.
  */
 function truncateResult(result: string): string {
-  if (result.length > MAX_TOOL_RESULT_CHARS) {
-    return result.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...(truncated, total ${result.length} chars)`;
-  }
-  return result;
+  return truncateMcpText(result);
 }
 
 /** Shell-quote an argument safely (POSIX single-quote escaping). */
@@ -507,10 +502,7 @@ export async function buildTools(
     toolResultMaxChars?: number;
   }
 ): Promise<Record<string, any>> {
-  MAX_TOOL_RESULT_CHARS =
-    env?.toolResultMaxChars && Number.isFinite(env.toolResultMaxChars) && env.toolResultMaxChars > 0
-      ? env.toolResultMaxChars
-      : DEFAULT_MAX_TOOL_RESULT_CHARS;
+  configureToolResultLimit(env?.toolResultMaxChars);
   const enabled = getEnabledTools(agentConfig.tools);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools: Record<string, any> = {};

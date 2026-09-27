@@ -16,6 +16,7 @@ import type {
   UserMessageEvent,
 } from "@open-managed-agents/shared";
 import { generateEventId } from "@open-managed-agents/shared";
+import { capToolResultContent, truncateMcpText } from "../harness/mcp-output";
 
 /**
  * Resolve a `file_id` (Anthropic Managed Agents spec: ImageBlock/DocumentBlock
@@ -615,8 +616,9 @@ function wireContentToToolOutput(
   isError = false,
 ): { type: "error-text"; value: string } | { type: "text"; value: string } | { type: "content"; value: any[] } {
   if (isError) {
-    return { type: "error-text", value: typeof content === "string" ? content : content.map(block => block.type === "text" ? block.text : JSON.stringify(block)).join("\n") };
+    return { type: "error-text", value: truncateMcpText(typeof content === "string" ? content : content.map(block => block.type === "text" ? block.text : JSON.stringify(block)).join("\n")) };
   }
+  content = capToolResultContent(content);
   if (typeof content === "string") {
     return { type: "text", value: content };
   }

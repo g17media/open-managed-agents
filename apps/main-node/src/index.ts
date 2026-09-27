@@ -1,4 +1,4 @@
-import { modelCardMaxInputTokens } from "@open-managed-agents/agent/harness/model-card-credentials";
+import { createNodeModelBuilder } from "./lib/node-model-builder.js";
 import { buildMemberChatSessionRoutes } from "./member-chat-session-routes";
 import { migrateV0AtStartup } from "./migrations/v0-data.js";
 
@@ -146,7 +146,6 @@ import {
   createPiModelRuntime,
   modelThinkingLevel,
   resolvePiModelApi,
-  toAiSdkLanguageModel,
 } from "@open-managed-agents/agent/harness/pi-provider";
 import { nativeWebSearchRequested } from "@open-managed-agents/agent/harness/tools";
 import {
@@ -155,8 +154,6 @@ import {
   webSearchEnvFrom,
   type WebSearchFilters,
 } from "@open-managed-agents/agent/harness/web-search";
-
-import type { PiModelConfig } from "@open-managed-agents/agent/harness/pi-provider";
 
 import { generateText } from "ai";
 
@@ -1000,57 +997,9 @@ async function buildSandbox(
 
 // ─── Session registry ───────────────────────────────────────────────────
 
-/** Resolve agent.model (a model_id handle) → wire model + credentials.
- *  Prefer a matching model card; fall back to ANTHROPIC_* env vars. */
-async function resolveNodeModelCreds(
-  tenantId: string,
-  agentModel: import("@open-managed-agents/shared").AgentConfig["model"],
-): Promise<{
-  wireModel: string;
-  apiKey: string;
-  baseURL?: string;
-  provider?: string;
-  customHeaders?: Record<string, string>;
-  piConfig?: PiModelConfig;
-  maxInputTokens?: number;
-}> {
-  const handle = typeof agentModel === "string" ? agentModel : agentModel.id;
-  try {
-    const card = await modelCardsService.findByModelId({ tenantId, modelId: handle });
-    if (card && !card.archived_at) {
-      const key = await modelCardsService.getApiKey({ tenantId, cardId: card.id });
-      if (key) {
-        return {
-          wireModel: card.model,
-          maxInputTokens: modelCardMaxInputTokens(card),
-          apiKey: key,
-          baseURL: card.base_url ?? undefined,
-          provider: card.provider,
-          customHeaders: card.custom_headers ?? undefined,
-          piConfig: card.pi_config
-            ? card.pi_config as PiModelConfig
-            : undefined,
-        };
-      }
-    }
-  } catch (err) {
-    console.warn(
-      `[model-card] lookup failed, falling back to env: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "No model card matched and ANTHROPIC_API_KEY is unset — configure a model card or set the env var",
-    );
-  }
-  return {
-    wireModel: handle,
-    apiKey,
-    baseURL: process.env.ANTHROPIC_BASE_URL,
-    customHeaders: parseCustomHeaders(process.env.ANTHROPIC_CUSTOM_HEADERS),
-  };
-}
+const { resolveNodeModelCreds, buildNodeLanguageModel } = createNodeModelBuilder(
+  modelCardsService, process.env,
+);
 
 /**
  * Web search wiring for one (tenant, agent) pair, computed the same way by
@@ -1090,39 +1039,6 @@ async function resolveNodeWebSearchWiring(
   const filters = readWebSearchFilters(agent);
   const hosted = target && nativeWebSearchServerTool({ ...target, modelId: creds.wireModel }, filters);
   return hosted ? { env, nativeActive: true, binding: { filters } } : { env, nativeActive: false };
-}
-
-async function buildNodeLanguageModel(
-  tenantId: string,
-  agentModel: import("@open-managed-agents/shared").AgentConfig["model"],
-  webSearch?: { filters: WebSearchFilters },
-) {
-  const creds = await resolveNodeModelCreds(tenantId, agentModel);
-  const configuredProviderOptions =
-    typeof agentModel === "string"
-      ? undefined
-      : agentModel.providerOptions ?? agentModel.provider_options;
-  const piProviderOptions = configuredProviderOptions?.pi;
-  return toAiSdkLanguageModel(createPiModelRuntime({
-    model: creds.wireModel,
-    apiKey: creds.apiKey,
-    provider: creds.provider,
-    baseURL: creds.baseURL,
-    customHeaders: creds.customHeaders,
-    piConfig: creds.piConfig,
-    maxInputTokens: creds.maxInputTokens,
-    providerOptions:
-      piProviderOptions &&
-      typeof piProviderOptions === "object" &&
-      !Array.isArray(piProviderOptions)
-        ? piProviderOptions as Record<string, unknown>
-        : undefined,
-    thinkingLevel: modelThinkingLevel(agentModel),
-    speed: typeof agentModel === "string"
-      ? undefined
-      : agentModel.speed === "fast" ? "fast" : "standard",
-    webSearch,
-  }));
 }
 
 // Only the legacy binding is destructured: managed sessions now go through
@@ -3612,17 +3528,6 @@ if (ownsLongLivedProcesses) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
-
-function parseCustomHeaders(raw: string | undefined): Record<string, string> | undefined {
-  if (!raw) return undefined;
-  const out: Record<string, string> = {};
-  for (const part of raw.split(",")) {
-    const [name, ...rest] = part.split(":");
-    if (!name || rest.length === 0) continue;
-    out[name.trim()] = rest.join(":").trim();
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
 
 function randomFallback(): string {
   // Pre-bootstrap fallback — logger is built before BetterAuth in the

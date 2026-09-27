@@ -90,9 +90,18 @@ function toModel(card: ModelCardCatalogRecord): Model {
     capabilities: piModel ? toCapabilities(piModel) : null,
     createdAt: card.created_at,
     displayName: piModel?.name ?? card.model_id,
-    maxInputTokens: piModel?.contextWindow ?? null,
+    maxInputTokens: modelCardInputBudget(card, piModel),
     maxTokens: piModel?.maxTokens ?? null,
   };
+}
+
+/** Stored capacity is useful even when a custom card has no full Pi metadata. */
+function modelCardInputBudget(card: ModelCardCatalogRecord, piModel: PiModel<Api> | null): number | null {
+  const configured = card.pi_config?.contextWindow;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) {
+    return Math.min(configured, piModel?.contextWindow ?? Infinity);
+  }
+  return piModel?.contextWindow ?? null;
 }
 
 function resolvePiModel(card: ModelCardCatalogRecord): PiModel<Api> | null {

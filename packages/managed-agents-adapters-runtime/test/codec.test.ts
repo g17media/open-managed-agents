@@ -79,8 +79,11 @@ describe("Managed session runtime codec", () => {
       processedAt: "2026-08-26T00:00:01.000Z",
     });
     expect(
-      decodeRuntimeEvent({ type: "session.warning", message: "extension" }, new Set()),
+      decodeRuntimeEvent({ type: "session.unknown_extension", message: "extension" }, new Set()),
     ).toEqual([]);
+    expect(
+      decodeRuntimeEvent({ type: "session.warning", message: "supported warning" }, new Set()),
+    ).toEqual([{ type: "session.warning", message: "supported warning" }]);
   });
 
   it.each(["agent.tool_result", "agent.mcp_tool_result"] as const)(

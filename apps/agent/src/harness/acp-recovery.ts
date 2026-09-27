@@ -3,6 +3,7 @@ import type {
   SessionEvent,
   UserMessageEvent,
 } from "@open-managed-agents/shared";
+import { applyToolResultElisions } from "../runtime/history";
 
 export type AcpSemanticRecoveryReason = "native-state-missing";
 
@@ -27,7 +28,7 @@ export function buildAcpSemanticRecoveryPrompt(
 ): string {
   const currentText = contentToText(currentMessage.content).trim();
   const relevantEvents = withoutCurrentMessage(
-    eventsAfterLastCompaction(events),
+    eventsAfterLastCompaction(applyToolResultElisions([...events])),
     currentMessage,
   );
   const toolNames = collectToolNames(relevantEvents);
