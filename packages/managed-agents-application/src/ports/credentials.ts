@@ -1,5 +1,6 @@
 import type {
   ContainerRegistryAuth,
+  ServiceAccountJwtAuth,
   CliCredentialAuth,
   CredentialInjectionLocation,
   CredentialNetworking,
@@ -56,6 +57,7 @@ export interface CredentialOAuthRefreshUpdate {
 }
 
 export type CredentialAuthInput =
+  | (Omit<ServiceAccountJwtAuth, "privateKey" | "accessToken" | "expiresAt"> & { privateKey: string })
   | ContainerRegistryAuth
   | (Omit<CliCredentialAuth, "token"> & { token: string })
   | {
@@ -86,6 +88,7 @@ export type CredentialAuthInput =
     };
 
 export type CredentialAuthView =
+  | Omit<ServiceAccountJwtAuth, "privateKey" | "accessToken" | "expiresAt">
   | Pick<ContainerRegistryAuth, "type" | "registry" | "username">
   | Pick<CliCredentialAuth, "type" | "cliId" | "mcpServerUrl" | "handle">
   | {
@@ -104,6 +107,7 @@ export type CredentialAuthView =
     };
 
 export type CredentialAuthUpdate =
+  | ({ type: "service_account_jwt"; privateKeyId?: string | null; subject?: string | null; audience?: string | null } & Partial<Pick<ServiceAccountJwtAuth, "privateKey" | "mcpServerUrl" | "clientEmail" | "tokenUri" | "scopes">>)
   | ContainerRegistryAuth
   | { type: "cap_cli"; token?: string | null; handle?: string | null; mcpServerUrl?: string; extras?: Record<string, string> }
   | {

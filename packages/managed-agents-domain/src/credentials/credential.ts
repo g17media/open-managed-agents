@@ -38,7 +38,22 @@ export interface CliCredentialAuth {
   extras?: Record<string, string>;
 }
 
+export interface ServiceAccountJwtAuth {
+  type: "service_account_jwt";
+  mcpServerUrl: string;
+  clientEmail: string;
+  privateKey: string | null;
+  privateKeyId?: string;
+  tokenUri: string;
+  scopes: string;
+  subject?: string;
+  audience?: string;
+  accessToken?: string | null;
+  expiresAt?: string | null;
+}
+
 export type CredentialAuth =
+  | ServiceAccountJwtAuth
   | ContainerRegistryAuth
   | CliCredentialAuth
   | {

@@ -10,6 +10,7 @@ export interface NodeMcpProxyTarget {
   accessToken: string;
   basicUsername?: string;
   refresh?: OauthRefreshMetadata;
+  refreshAccessToken?: (rejectedToken: string) => Promise<string>;
   onRefreshed?: (tokens: RefreshedTokens) => Promise<void>;
 }
 
@@ -59,6 +60,7 @@ export function createNodeMcpProxyBinding(
         accessToken: target.accessToken,
         basicUsername: target.basicUsername,
         refresh: target.refresh,
+        refreshAccessToken: target.refreshAccessToken,
         onRefreshed: target.onRefreshed,
         fetcher: dependencies.fetcher,
       });
@@ -98,6 +100,7 @@ export function buildNodeHttpMcpProxyRoutes(
       accessToken: target.accessToken,
       basicUsername: target.basicUsername,
       refresh: target.refresh,
+      refreshAccessToken: target.refreshAccessToken,
       onRefreshed: target.onRefreshed,
       fetcher: dependencies.fetcher,
     });

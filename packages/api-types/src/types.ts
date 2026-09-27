@@ -1029,14 +1029,23 @@ export interface VaultConfig {
 // --- Credential ---
 
 export interface CredentialAuth {
-  type: "mcp_oauth" | "static_bearer" | "static_basic" | "cap_cli" | "container_registry";
-  // mcp_oauth / static_bearer / static_basic: match by MCP server URL
+  type: "mcp_oauth" | "static_bearer" | "static_basic" | "service_account_jwt" | "cap_cli" | "container_registry";
+  // mcp_oauth / static_bearer / static_basic / service_account_jwt: match by server URL
   mcp_server_url?: string;
   // static_bearer: optional URL-safe selector. A sandbox picks this
   // credential over others on the same host by sending Basic auth with
   // this value as the username (the password is a placeholder; oma-vault
   // replaces it). Lets several GitHub identities coexist in one session.
   handle?: string;
+  // service_account_jwt: private_key/key_json are write-only; tokens stay in the vault.
+  client_email?: string;
+  private_key?: string;
+  private_key_id?: string;
+  token_uri?: string;
+  scopes?: string;
+  subject?: string;
+  audience?: string;
+  key_json?: string | Record<string, unknown>;
   // mcp_oauth fields
   access_token?: string;
   refresh_token?: string;

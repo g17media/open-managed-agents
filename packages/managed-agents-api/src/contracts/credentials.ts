@@ -110,6 +110,80 @@ const oauthRefreshResponseSchema = z
 const handleSchema = z.string().regex(/^[A-Za-z0-9._-]+$/u).max(128);
 const basicUsernameSchema = z.string().min(1).regex(/^[^:\x00-\x1f\x7f]+$/u);
 const credentialUrlSchema = z.url({ protocol: /^https?$/ });
+// WebCrypto keeps API validation portable; signing remains in the vault runtime.
+function derElement(tag: number, bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const length: number[] = [];
+  for (let n = bytes.length; n > 0; n = Math.floor(n / 256)) length.unshift(n & 255);
+  return new Uint8Array([tag, ...(bytes.length < 128 ? [bytes.length] : [0x80 | length.length, ...length]), ...bytes]);
+}
+const rsaPrivateKeySchema = z.string().min(1).refine(async (value) => {
+  try {
+    const match = /^-----BEGIN (RSA PRIVATE KEY|PRIVATE KEY)-----\s*([A-Za-z0-9+/=\s]+)\s*-----END \1-----$/u.exec(value.trim());
+    if (!match) return false;
+    let bytes = Uint8Array.from(atob(match[2]!.replace(/\s/gu, "")), c => c.charCodeAt(0));
+    if (match[1] === "RSA PRIVATE KEY") {
+      // PKCS#1 wrapped in PKCS#8 PrivateKeyInfo (rsaEncryption OID).
+      bytes = derElement(0x30, new Uint8Array([0x02, 0x01, 0x00,
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+        ...derElement(0x04, bytes)]));
+    }
+    await crypto.subtle.importKey("pkcs8", bytes, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+    return true;
+  } catch { return false; }
+}, "Provide a valid unencrypted RSA private key in PEM format");
+const tokenUriSchema = z.url({ protocol: /^https$/ }).refine((value) => {
+  try {
+    const url = new URL(value);
+    return !url.username && !url.password && !url.hash;
+  } catch { return false; }
+}, "Token URI must be HTTPS without user information or a fragment");
+const serviceAccountFields = {
+  type: z.literal("service_account_jwt"),
+  mcp_server_url: credentialUrlSchema,
+  client_email: z.string().trim().min(1),
+  private_key: rsaPrivateKeySchema,
+  private_key_id: z.string().min(1).optional(),
+  token_uri: tokenUriSchema.default("https://oauth2.googleapis.com/token"),
+  scopes: z.string().trim().min(1),
+  subject: z.string().trim().min(1).optional(),
+  audience: z.string().min(1).optional(),
+};
+const serviceAccountCreateSchema = z.object(serviceAccountFields).strict();
+const serviceAccountUpdateSchema = serviceAccountCreateSchema.partial().extend({
+  type: z.literal("service_account_jwt"),
+  token_uri: tokenUriSchema.optional(),
+  private_key: rsaPrivateKeySchema.nullable().optional(),
+  private_key_id: z.string().min(1).nullable().optional(),
+  subject: z.string().trim().min(1).nullable().optional(),
+  audience: z.string().min(1).nullable().optional(),
+}).strict();
+const serviceAccountKeySchema = z.object({
+  client_email: serviceAccountFields.client_email,
+  private_key: rsaPrivateKeySchema,
+  private_key_id: z.string().min(1).optional(),
+  token_uri: tokenUriSchema.optional(),
+});
+
+// Extract only supported identity fields; Google project/certificate metadata is not stored.
+// Explicit auth fields override their JSON-key counterparts after both inputs validate.
+function normalizeServiceAccountKey(value: unknown, ctx: z.RefinementCtx): unknown {
+  if (value === null || typeof value !== "object" || !("type" in value) ||
+      value.type !== "service_account_jwt" || !("key_json" in value)) return value;
+  let key: unknown = value.key_json;
+  try { if (typeof key === "string") key = JSON.parse(key); } catch {
+    ctx.addIssue({ code: "custom", path: ["key_json"], message: "Provide a valid service account JSON key" });
+    return z.NEVER;
+  }
+  return serviceAccountKeySchema.safeParseAsync(key).then((parsed) => {
+    if (!parsed.success) {
+      ctx.addIssue({ code: "custom", path: ["key_json"], message: "JSON key requires client_email, an RSA private_key and a valid HTTPS token_uri when provided" });
+      return z.NEVER;
+    }
+    const { key_json: _key, ...fields } = value;
+    return { ...parsed.data, ...fields };
+  });
+}
+
 const registryAuthSchema = z.object({
   type: z.literal("container_registry"),
   registry: z.string().min(1).optional(),
@@ -117,7 +191,8 @@ const registryAuthSchema = z.object({
   password: z.string().nullable().optional(),
   token: z.string().nullable().optional(),
 }).strict();
-const credentialCreateAuthSchema = z.discriminatedUnion("type", [
+const credentialCreateAuthSchema = z.preprocess(normalizeServiceAccountKey, z.discriminatedUnion("type", [
+  serviceAccountCreateSchema,
   z.object({ type: z.literal("static_basic"), username: basicUsernameSchema, token: z.string().min(1), mcp_server_url: credentialUrlSchema }).strict(),
   registryAuthSchema.refine((auth) => !!auth.token || (!!auth.username && !!auth.password), {
     message: "Provide a registry token or both username and password",
@@ -151,9 +226,10 @@ const credentialCreateAuthSchema = z.discriminatedUnion("type", [
       injection_location: injectionLocationInputSchema.optional(),
     })
     .strict(),
-]);
+]));
 
-const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
+const credentialUpdateAuthSchema = z.preprocess(normalizeServiceAccountKey, z.discriminatedUnion("type", [
+  serviceAccountUpdateSchema,
   z.object({ type: z.literal("static_basic"), username: basicUsernameSchema.optional(), mcp_server_url: credentialUrlSchema.optional(), token: z.string().min(1).nullable().optional() }).strict(),
   registryAuthSchema,
   z.object({ type: z.literal("cap_cli"), token: z.string().min(1).nullable().optional(),
@@ -183,9 +259,10 @@ const credentialUpdateAuthSchema = z.discriminatedUnion("type", [
       secret_value: z.string().nullable().optional(),
     })
     .strict(),
-]);
+]));
 
 const credentialResponseAuthSchema = z.discriminatedUnion("type", [
+  serviceAccountCreateSchema.omit({ private_key: true }),
   z.object({ type: z.literal("static_basic"), username: z.string(), mcp_server_url: z.string() }).strict(),
   z.object({ type: z.literal("container_registry"), registry: z.string().optional(), username: z.string().nullable().optional() }).strict(),
   z.object({ type: z.literal("cap_cli"), cli_id: z.string(), mcp_server_url: z.string().optional(),

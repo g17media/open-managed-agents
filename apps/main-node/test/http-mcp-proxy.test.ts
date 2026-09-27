@@ -152,3 +152,42 @@ it("passes the Basic username through the Node binding and HTTP route", async ()
   expect((await app.request("/proxy/session/server", { headers: { authorization: "Bearer operator" } })).status).toBe(204);
   expect(dependencies.fetcher).toHaveBeenCalledTimes(2);
 });
+
+
+describe("Node service-account retry transport", () => {
+  it.each(["binding", "http"])("%s injects the re-minted token exactly once and replays the body", async (transport) => {
+    const seen: { authorization: string | null; body: string }[] = [];
+    const deps = {
+      resolveTarget: async () => ({
+        upstreamUrl: "https://google.example.test/rpc",
+        accessToken: "minted-first",
+        refreshAccessToken: async (rejected: string) => {
+          expect(rejected).toBe("minted-first");
+          return "minted-second";
+        },
+      }),
+      fetcher: (async (url, init) => {
+        const request = new Request(url, init);
+        seen.push({ authorization: request.headers.get("authorization"), body: await request.text() });
+        return new Response("still unauthorized", { status: 401 });
+      }) as typeof fetch,
+    };
+    const request = new Request("https://local.test/session/google", {
+      method: "POST",
+      headers: { "x-oma-tenant": "workspace", "x-oma-session": "session", "x-oma-mcp-server": "google" },
+      body: '{"query":"files"}',
+    });
+    const app = new Hono<{ Variables: { tenant_id: string } }>();
+    app.use("*", async (c, next) => { c.set("tenant_id", "workspace"); await next(); });
+    app.route("/", buildNodeHttpMcpProxyRoutes(deps));
+    const response = transport === "binding"
+      ? await createNodeMcpProxyBinding(deps).fetch(request)
+      : await app.fetch(request);
+    expect(response.status).toBe(401);
+    expect(await response.text()).toBe("still unauthorized");
+    expect(seen).toEqual([
+      { authorization: "Bearer minted-first", body: '{"query":"files"}' },
+      { authorization: "Bearer minted-second", body: '{"query":"files"}' },
+    ]);
+  });
+});

@@ -24,7 +24,7 @@ export async function listManagedVaultCredentials(
 
 export function credentialBearer(auth: CredentialAuth): string | null {
   if (auth.type === "static_bearer" || auth.type === "cap_cli") return auth.token;
-  return auth.type === "mcp_oauth" ? auth.accessToken : null;
+  return auth.type === "mcp_oauth" || auth.type === "service_account_jwt" ? auth.accessToken ?? null : null;
 }
 
 /** Full header; Basic passwords must never be consumed as bearer tokens. */
@@ -57,7 +57,7 @@ export function matchManagedCredential(
   let best: { rank: number; credential: Credential } | undefined;
   for (const credential of credentials) {
     const auth = credential.auth;
-    if (credential.archivedAt || !("mcpServerUrl" in auth) || !auth.mcpServerUrl || !credentialAuthorization(auth)) continue;
+    if (credential.archivedAt || !("mcpServerUrl" in auth) || !auth.mcpServerUrl || (auth.type !== "service_account_jwt" && !credentialAuthorization(auth))) continue;
     try { if (new URL(auth.mcpServerUrl).host !== host) continue; } catch { continue; }
     const handle = "handle" in auth ? auth.handle : undefined;
     const rank = credentialMatchRank(auth.type, handle, selector, incomingBasic);
@@ -146,22 +146,37 @@ export async function forwardManagedMcpRequest(input: {
   serverName: string;
   credentials: CredentialStore;
   fetch?: typeof fetch;
+  serviceAccountToken?: (record: StoredCredential, rejectedToken?: string) => Promise<string>;
 }): Promise<Response> {
   const server = input.session.agent.mcpServers.find((server) => server.name.trim() === input.serverName.trim());
   // A stdio server has no URL to forward to — not proxyable over HTTP.
   if (input.session.archivedAt || !server || !("url" in server)) return new Response("Forbidden", { status: 403 });
   const credentials = await listManagedVaultCredentials(input.credentials, input.workspaceId, input.session.vaultIds);
-  let record = credentials.find(({ credential }) => "mcpServerUrl" in credential.auth && credential.auth.mcpServerUrl === server.url && credentialAuthorization(credential.auth));
+  let record = credentials.find(({ credential }) => "mcpServerUrl" in credential.auth && credential.auth.mcpServerUrl === server.url && (credential.auth.type === "service_account_jwt" || credentialAuthorization(credential.auth)));
+  const serviceAccount = record?.credential.auth.type === "service_account_jwt";
+  if (serviceAccount && !input.serviceAccountToken) return new Response("service_account_jwt requires self-host oma-vault; Cloudflare forwarding is not supported", { status: 501 });
+  let serviceAccountToken: string | undefined;
+  if (serviceAccount) {
+    try { serviceAccountToken = await input.serviceAccountToken!(record!); }
+    catch { return new Response("Service account token exchange failed", { status: 502 }); }
+  }
   const headers = new Headers(input.request.headers);
   for (const key of ["x-oma-tenant", "x-oma-session", "x-oma-mcp-server", "host", "authorization", "proxy-authorization", "cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-forwarded-proto", "x-real-ip"]) headers.delete(key);
   const body = ["GET", "HEAD"].includes(input.request.method) ? undefined : await input.request.arrayBuffer();
   const request = input.fetch ?? fetch;
   const forward = () => {
-    const authorization = record && credentialAuthorization(record.credential.auth);
+    const authorization = serviceAccountToken ? `Bearer ${serviceAccountToken}` : record && credentialAuthorization(record.credential.auth);
     if (authorization) headers.set("authorization", authorization);
     return request(server.url, { method: input.request.method, headers, body, redirect: "manual" });
   };
   const first = await forward();
+  if (serviceAccount) {
+    if (first.status !== 401) return first;
+    try { serviceAccountToken = await input.serviceAccountToken!(record!, serviceAccountToken); }
+    catch { return first; }
+    await first.body?.cancel().catch(() => {});
+    return forward();
+  }
   if ((first.status !== 401 && first.status !== 403) || record?.credential.auth.type !== "mcp_oauth" || !record.credential.auth.refresh?.refreshToken) return first;
   await first.body?.cancel();
   record = await refreshManagedCredential(input.credentials, input.workspaceId, record, request);
@@ -170,22 +185,37 @@ export async function forwardManagedMcpRequest(input: {
 
 export async function forwardManagedOutboundRequest(input: {
   request: Request; workspaceId: string; session: Session; credentials: CredentialStore; fetch?: typeof fetch;
+  serviceAccountToken?: (record: StoredCredential, rejectedToken?: string) => Promise<string>;
 }): Promise<Response> {
   if (input.session.archivedAt) return new Response("Forbidden", { status: 403 });
   const records = await listManagedVaultCredentials(input.credentials, input.workspaceId, input.session.vaultIds);
   const inboundAuth = input.request.headers.get("authorization");
   const matched = matchManagedCredential(records.map((record) => record.credential), input.request.url, basicAuthSelector(inboundAuth), /^basic /i.test(inboundAuth ?? ""));
   let record = records.find((record) => record.credential.id === matched?.id && record.credential.vaultId === matched?.vaultId);
+  const serviceAccount = record?.credential.auth.type === "service_account_jwt";
+  if (serviceAccount && !input.serviceAccountToken) return new Response("service_account_jwt requires self-host oma-vault; Cloudflare forwarding is not supported", { status: 501 });
+  let serviceAccountToken: string | undefined;
+  if (serviceAccount) {
+    try { serviceAccountToken = await input.serviceAccountToken!(record!); }
+    catch { return new Response("Service account token exchange failed", { status: 502 }); }
+  }
   const headers = new Headers(input.request.headers);
   for (const key of ["host", "proxy-authorization", "x-oma-tenant", "x-oma-session", "x-oma-mcp-server", "cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-forwarded-proto", "x-real-ip"]) headers.delete(key);
   const body = ["GET", "HEAD"].includes(input.request.method) ? undefined : await input.request.arrayBuffer();
   const request = input.fetch ?? fetch;
   const forward = () => {
-    const authorization = record && credentialAuthorization(record.credential.auth);
+    const authorization = serviceAccountToken ? `Bearer ${serviceAccountToken}` : record && credentialAuthorization(record.credential.auth);
     if (authorization) headers.set("authorization", authorization);
     return request(input.request.url, { method: input.request.method, headers, body, redirect: "manual" });
   };
   const first = await forward();
+  if (serviceAccount) {
+    if (first.status !== 401) return first;
+    try { serviceAccountToken = await input.serviceAccountToken!(record!, serviceAccountToken); }
+    catch { return first; }
+    await first.body?.cancel().catch(() => {});
+    return forward();
+  }
   if ((first.status !== 401 && first.status !== 403) || record?.credential.auth.type !== "mcp_oauth" || !record.credential.auth.refresh?.refreshToken) return first;
   await first.body?.cancel();
   record = await refreshManagedCredential(input.credentials, input.workspaceId, record, request);

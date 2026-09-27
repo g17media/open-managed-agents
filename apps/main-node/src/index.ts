@@ -1,4 +1,5 @@
 import { createNodeModelBuilder } from "./lib/node-model-builder.js";
+import { getServiceAccountToken } from "@open-managed-agents/vault-forward/service-account";
 import { buildMemberChatSessionRoutes } from "./member-chat-session-routes";
 import { migrateV0AtStartup } from "./migrations/v0-data.js";
 
@@ -1192,9 +1193,19 @@ async function resolveNodeMcpProxyTarget(input: {
         const credential = record.credential;
         const auth = credential.auth;
         if (
-          (auth.type !== "static_basic" && auth.type !== "static_bearer" && auth.type !== "mcp_oauth")
+          (auth.type !== "static_basic" && auth.type !== "static_bearer" && auth.type !== "mcp_oauth" && auth.type !== "service_account_jwt")
           || auth.mcpServerUrl !== server.url
         ) continue;
+        if (auth.type === "service_account_jwt") {
+          const accessToken = await getServiceAccountToken(managedCredentialStore, input.tenantId, record);
+          return {
+            upstreamUrl: server.url,
+            accessToken,
+            refreshAccessToken: (rejectedToken) => getServiceAccountToken(
+              managedCredentialStore, input.tenantId, record, { rejectedToken },
+            ),
+          };
+        }
         const accessToken = auth.type === "static_bearer" || auth.type === "static_basic"
           ? auth.token
           : auth.accessToken;

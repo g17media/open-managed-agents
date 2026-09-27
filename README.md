@@ -562,8 +562,11 @@ Outbound credential types:
 |---|---|---|
 | `static_bearer` | request host matches `mcp_server_url` | never |
 | `static_basic` | host matches `mcp_server_url`; injects Basic using `username` and password in `token` (self-host sandbox) | never |
+| `service_account_jwt` | host matches `mcp_server_url`; RS256 service-account key stays in vault (self-host) | JWT bearer mint; renew within 5 minutes of expiry, retry once on 401 |
 | `mcp_oauth` | request host matches `mcp_server_url` | on 401 / 403 via `token_endpoint`, CAS-writes new token to D1 |
 | `cap_cli` | sandbox CLI invocations match `cli_id` in the cap registry (`gh`, `glab`, `aws`, …) | per-CLI |
+
+For Google Drive and Docs, create a service account, enable both APIs, share a shared drive with its `client_email` as Content manager, and add `service_account_jwt` with `key_json` plus Drive/Docs scopes. Service accounts have no Drive storage of their own (quota 0); create files in that shared drive or a folder inside it. Creation elsewhere fails with a quota error. [Setup, host bindings, and sandbox placeholder calls](apps/docs/src/content/docs/build/vault-and-mcp.mdx#google-drive-and-docs-with-a-service-account).
 
 Max 20 credentials per vault. Each forward emits a structured `op:"mcp_proxy.forward"` log. Full design: [`docs/mcp-credential-architecture.md`](docs/mcp-credential-architecture.md), [docs.openma.dev/build/vault-and-mcp](https://docs.openma.dev/build/vault-and-mcp/).
 

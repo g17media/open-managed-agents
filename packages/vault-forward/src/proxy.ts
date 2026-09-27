@@ -239,6 +239,7 @@ export async function resolveProxyTargetByTenant(
         | undefined;
       if (!auth) continue;
       if ((auth.mcp_server_url ?? auth.mcpServerUrl) !== server.url) continue;
+      if (auth.type === "service_account_jwt") throw new Error("service_account_jwt requires self-host oma-vault; Cloudflare forwarding is not supported");
       const token = auth.bearer_token ?? auth.token ?? auth.access_token ?? auth.accessToken;
       if (!token) continue;
       const target: ProxyTarget = { upstreamUrl: server.url, upstreamToken: token,

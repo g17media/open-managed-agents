@@ -195,6 +195,9 @@ interface Vault {
 
 // Credentials live in a separate table
 type CredentialAuth =
+  | { type: 'service_account_jwt'; mcp_server_url: string; client_email: string;
+      private_key: string; private_key_id?: string; token_uri?: string; scopes: string;
+      subject?: string; audience?: string }
   | { type: 'static_basic'; username: string; token: string; mcp_server_url: string }
   | { type: 'static_bearer'; token: string; mcp_server_url: string }
   | { type: 'mcp_oauth'; access_token: string; refresh_token?: string;
@@ -202,7 +205,7 @@ type CredentialAuth =
   | { type: 'cap_cli'; cli_id: string; token: string };  // e.g. cli_id: "gh", "glab", "aws"
 ```
 
-Binding to a host happens via the credential, not the vault: a `static_basic` / `static_bearer` / `mcp_oauth` credential matches by parsing the request hostname against `mcp_server_url`; a `cap_cli` credential matches by `cli_id` lookup in the cap spec registry. Up to 20 credentials per vault. Tokens are AES-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` and never returned via the API once written.
+Binding to a host happens via the credential, not the vault: a `service_account_jwt` / `static_basic` / `static_bearer` / `mcp_oauth` credential matches by parsing the request hostname against `mcp_server_url`; a `cap_cli` credential matches by `cli_id` lookup in the cap spec registry. Up to 20 credentials per vault. Tokens are AES-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` and never returned via the API once written.
 
 ### HTTP Basic credentials
 
@@ -236,6 +239,71 @@ Use the native credentials API for this OMA extension. The upstream OpenAI SDK
 contract does not include it, so OpenAI credential lists omit it. Shared MCP
 forwarders support Basic, but Cloudflare's bearer-only outbound credential lookup
 explicitly rejects it. See the [self-host Langfuse example](/self-host/node-docker/#langfuse-with-http-basic).
+
+### Service account JWT credentials
+
+`service_account_jwt` exchanges an RS256-signed assertion for a short-lived
+Bearer token using the RFC 7523 JWT bearer grant. Google service accounts are
+the first supported recipe; no user consent or personal refresh token is needed.
+Use the native `/v1/vaults/:id/credentials` API. The OpenAI compatibility API
+omits this extension from its credential lists.
+
+| Auth field | Meaning |
+|---|---|
+| `mcp_server_url` | Required HTTP(S) host binding, including a nondefault port |
+| `client_email` | Required issuer (`iss`) |
+| `private_key` | Required RSA private key PEM; encrypted and never returned |
+| `private_key_id` | Optional JWT header `kid` |
+| `token_uri` | HTTPS token endpoint; defaults to `https://oauth2.googleapis.com/token` |
+| `scopes` | Required space-separated scope string; JWT `scope` |
+| `subject` | Optional JWT `sub`, for administrator-authorized domain-wide delegation |
+| `audience` | Optional JWT `aud`; defaults to `token_uri` |
+| `key_json` | Input-only Google JSON key, as an object or JSON string; supplies `client_email`, `private_key`, `private_key_id`, and `token_uri` |
+
+Supply `scopes` alongside `key_json`. List/get responses expose public metadata,
+including the issuer, scopes, token endpoint and configured subject, but omit
+`private_key`, `key_json` and minted access tokens. The console accepts a pasted
+JSON key and shows a masked key after saving.
+
+Google service accounts have no Drive storage of their own (quota **0**). Add
+the service account to a **shared drive** as **Content manager**, and create
+files there or in a folder inside it. Creation elsewhere fails with a
+`storageQuotaExceeded` quota error.
+
+Update non-secret fields using `POST /v1/vaults/:id/credentials/:credential_id`:
+
+```json
+{
+  "auth": {
+    "type": "service_account_jwt",
+    "mcp_server_url": "https://www.googleapis.com/",
+    "scopes": "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents",
+    "subject": "delegated-user@example.com"
+  }
+}
+```
+
+Omit `subject` for direct service-account access. Rotate with the same endpoint
+and `auth: { type: "service_account_jwt", key_json: NEW_KEY_OBJECT }`, or supply
+`private_key` and `private_key_id` directly. Delete with `DELETE` on the same
+resource. Key or authentication metadata changes invalidate cached tokens.
+
+Self-host `oma-vault` mints on first use and renews within five minutes of
+expiry. Concurrent requests share one mint per credential/revision in a
+process. Tokens and expiry are persisted in encrypted credential storage using
+a revision check so other processes can reuse them; this is not a distributed
+mint lock. When processes race, the loser uses the persisted winner's token;
+a restart reuses that token until renewal is due. A rejected upstream token
+(401) triggers at most one re-mint and
+retry. Token requests have a bounded timeout and do not follow redirects.
+Cloudflare forwarding explicitly rejects this kind; use self-host `oma-vault`.
+
+This kind has the same rank as a handle-less `static_bearer`. Exact bearer/CLI
+handle matches win first. Basic callers then prefer `static_basic`; other
+callers prefer handle-less bearers. A service account and a `static_bearer` on
+the same host tie: the first credential in the existing vault/store traversal
+wins. Avoid ambiguous bindings by attaching only the intended credential for
+that host. See the [Google Drive and Docs recipe](/build/vault-and-mcp/#google-drive-and-docs-with-a-service-account).
 
 ### Codex / ChatGPT subscription credentials
 

@@ -248,6 +248,22 @@ curl -s -X POST localhost:8787/v1/vaults/$VID/credentials \
 
 Skip the sidecar if you don't need it: `docker compose up oma-server`.
 
+### Google service accounts
+
+Use `service_account_jwt` to let a bot call Drive and Docs with a JSON key kept
+in the vault. Enable both APIs, create the service account and JSON key, then
+share a shared drive with its `client_email` as **Content manager**. In the
+console, paste the key and set the scopes to
+`https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents`.
+Attach the vault to the session; sandbox calls use any placeholder bearer.
+The service account has no Drive storage of its own (quota **0**). Create files
+in that **shared drive** or a folder inside it; creation elsewhere fails with
+a `storageQuotaExceeded` quota error.
+
+Bind Drive calls to `https://www.googleapis.com/` and create a second credential
+for `https://docs.googleapis.com/` when calling Docs. Tokens renew before expiry
+and retry once on 401. [Full setup, API payload and sandbox examples](/build/vault-and-mcp/#google-drive-and-docs-with-a-service-account).
+
 ### Langfuse with HTTP Basic
 
 Create the credential from an operator context, using the Langfuse **public key**

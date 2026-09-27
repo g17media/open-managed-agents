@@ -242,3 +242,36 @@ describe("CredentialsApplicationService", () => {
     });
   });
 });
+
+
+describe("service account credential updates", () => {
+  it.each([
+    { scopes: "new-scope" }, { subject: "delegate@example.test" },
+    { mcpServerUrl: "https://docs.googleapis.com" }, { privateKey: "replacement-key" },
+    { privateKey: null }, { audience: "new-audience" }, { subject: null },
+  ])("invalidates tokens and increments revision for %j without exposing secrets", async (patch) => {
+    const persistence = new InMemoryCredentialPersistence();
+    const service = new CredentialsApplicationService({
+      workspaceId: "workspace_01", store: persistence, vaults,
+      validation: { validate: async () => ({ hasRefreshToken: false, mcpProbe: null, refresh: null, status: "indeterminate" }) },
+      clock: { now: () => new Date("2026-08-26T19:00:00.000Z") },
+      ids: { nextCredentialId: () => "vcrd_01" },
+    });
+    await persistence.insert({ workspaceId: "workspace_01", credential: {
+      id: "vcrd_01", vaultId: "vlt_01", archivedAt: null, metadata: {},
+      createdAt: "2026-08-26T19:00:00.000Z", updatedAt: "2026-08-26T19:00:00.000Z",
+      auth: { type: "service_account_jwt", privateKey: "saved-key", clientEmail: "bot@example.test",
+        mcpServerUrl: "https://www.googleapis.com", tokenUri: "https://oauth2.googleapis.com/token",
+        scopes: "original-scope", subject: "original@example.test", accessToken: "cached-secret", expiresAt: "2026-08-26T20:00:00.000Z" },
+    } });
+    const retrieved = await service.retrieveCredential({ vaultId: "vlt_01", credentialId: "vcrd_01" });
+    expect(JSON.stringify(retrieved)).not.toContain("saved-key");
+    expect(JSON.stringify(retrieved)).not.toContain("cached-secret");
+    expect(await service.updateCredential({ vaultId: "vlt_01", credentialId: "vcrd_01", auth: { type: "service_account_jwt", ...patch } })).toMatchObject({ type: "updated" });
+    const saved = persistence.records.get("workspace_01:vlt_01:vcrd_01")!;
+    expect(saved.revision).toBe(2);
+    expect(saved.credential.auth).not.toHaveProperty("accessToken");
+    expect(saved.credential.auth).not.toHaveProperty("expiresAt");
+    expect(saved.credential.auth).toHaveProperty("privateKey", "privateKey" in patch ? patch.privateKey : "saved-key");
+  });
+});

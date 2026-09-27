@@ -533,6 +533,7 @@ curl -sX POST $BASE/v1/sessions -H "x-api-key: $KEY" \
 |---|---|---|
 | `static_bearer` | 请求 host 匹配 `mcp_server_url` | 永不 |
 | `static_basic` | host 匹配 `mcp_server_url`；用 `username` 和 `token` 中的密码注入 Basic（自托管沙箱）| 永不 |
+| `service_account_jwt` | host 匹配 `mcp_server_url`；RS256 服务账号私钥保存在 vault（自托管） | JWT bearer 换取 token；过期前 5 分钟更新，401 后重试一次 |
 | `mcp_oauth` | 请求 host 匹配 `mcp_server_url` | 401 / 403 时用 `token_endpoint` 刷新，CAS 写回 D1 |
 | `cap_cli` | 沙箱里 CLI 调用按 `cli_id` 在 cap registry 里查（`gh`、`glab`、`aws` ……）| 按每个 CLI 处理 |
 
