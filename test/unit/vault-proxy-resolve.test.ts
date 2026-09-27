@@ -83,21 +83,22 @@ describe("resolveProxyTargetByTenant server-name matching", () => {
   });
 });
 
-it("resolves and forwards Basic credentials without using bearer auth or refreshing", async () => {
+it.each([401, 403])("resolves and forwards Basic without refresh on %s even with refresh metadata", async (status) => {
   const { forwardWithRefresh } = await import("../../packages/vault-forward/src/proxy");
   const services = makeServices("basic");
   services.credentials.listByVaults = async () => [{ vault_id: "vlt_1", credentials: [{ id: "cred_1", auth: { type: "static_basic", mcp_server_url: URL, username: "public", token: "password" } }] }];
   const target = await resolveProxyTargetByTenant(services, TENANT, SESSION, "basic");
   expect(target).toMatchObject({ basicUsername: "public", upstreamToken: "password" });
+  target!.refresh = { refreshToken: "unused", tokenEndpoint: "https://example.test/token", credentialId: "cred_1", vaultId: "vlt_1" };
   const original = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async (_input, init) => {
     calls++;
     expect(new Request(_input, init).headers.get("authorization")).toBe("Basic cHVibGljOnBhc3N3b3Jk");
-    return new Response("rejected", { status: 401 });
+    return new Response("rejected", { status });
   };
   try {
-    expect((await forwardWithRefresh(services, TENANT, target!, "POST", new Headers({ authorization: "Basic placeholder" }), "{}")).status).toBe(401);
+    expect((await forwardWithRefresh(services, TENANT, target!, "POST", new Headers({ authorization: "Basic placeholder" }), "{}")).status).toBe(status);
     expect(calls).toBe(1);
   } finally { globalThis.fetch = original; }
 });

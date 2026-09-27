@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, request as httpRequest, type Server } from "node:http";
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createServer as createHttpsServer, request as httpsRequest, Agent } from "node:https";
+import { connect } from "node:tls";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -15,41 +17,85 @@ import { sessionVaultProxyUrl } from "@open-managed-agents/sandbox/vault-proxy";
 // Dummy credentials only. The upstream returns status, never credential values.
 const authorization = "Basic cHVibGljOnBhc3N3b3Jk";
 const placeholder = "Basic cGxhY2Vob2xkZXI6cGxhY2Vob2xkZXI=";
+const proxyKey = "throwaway-review-signing-key";
+describe.each(["http", "https"])("%s proxy", (protocol) => {
 let directory: string, upstream: Server, child: ChildProcess, sql: SqlClient;
 let upstreamUrl: string, proxyPort: number;
-let expectedAuth = authorization, reject = false, requests = 0;
+let expectedAuth: string | undefined = authorization, reject = false, requests = 0;
+let logs = "";
+let expectStripped = false;
 let api: ReturnType<typeof buildCredentialRoutes>;
 const seen: Array<{ matches: boolean; path: string }> = [];
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return (server.address() as { port: number }).port;
 }
-function callProxy(managed: boolean, auth: string | undefined = placeholder, path = "/api/public/otel/v1/traces"): Promise<number> {
+async function callProxy(managed: boolean, auth: string | null = placeholder, path = "/api/public/otel/v1/traces", unmatched = false, forged = false): Promise<number> {
   const headers: Record<string, string> = {};
-  if (auth !== undefined) headers.authorization = auth;
+  if (auth !== null) headers.authorization = auth;
+  headers["x-review-marker"] = "preserved";
+  headers["x-api-key"] = "placeholder";
+  headers["x-goog-api-key"] = "placeholder";
+  headers["x-agent-token"] = "placeholder";
   if (managed) {
-    const url = new URL(sessionVaultProxyUrl(`http://127.0.0.1:${proxyPort}`, { tenantId: "workspace", sessionId: "session" }, ""));
+    const url = new URL(sessionVaultProxyUrl(`http://127.0.0.1:${proxyPort}`, { tenantId: "workspace", sessionId: "session" }, forged ? "wrong-key" : proxyKey));
     headers["proxy-authorization"] = `Basic ${Buffer.from(`${url.username}:${url.password}`).toString("base64")}`;
   }
-  return new Promise((resolve, reject) => {
-    const request = httpRequest({ hostname: "127.0.0.1", port: proxyPort, path: upstreamUrl + path, method: "POST", headers }, (response) => {
+  const target = new URL(upstreamUrl + path);
+  if (unmatched) target.hostname = "127.0.0.1";
+  let agent: Agent | undefined;
+  if (protocol === "https") {
+    const ca = await readFile(join(directory, "ca", "ca.crt"));
+    const socket = await new Promise<import("node:net").Socket>((resolve, reject) => {
+      const tunnel = httpRequest({ hostname: "127.0.0.1", port: proxyPort, method: "CONNECT", path: target.host,
+        headers: headers["proxy-authorization"] ? { "proxy-authorization": headers["proxy-authorization"] } : {} });
+      tunnel.once("connect", (response, socket) => response.statusCode === 200 ? resolve(socket) : reject(new Error("CONNECT failed")));
+      tunnel.once("error", reject); tunnel.end();
+    });
+    const tlsSocket = connect({ socket, ca, servername: "localhost" });
+    await new Promise<void>((resolve, reject) => { tlsSocket.once("secureConnect", resolve); tlsSocket.once("error", reject); });
+    agent = new Agent();
+    agent.createConnection = () => tlsSocket;
+    delete headers["proxy-authorization"];
+  }
+  return new Promise<number>((resolve, reject) => {
+    const options = protocol === "https"
+      ? { hostname: target.hostname, port: target.port, path: target.pathname + target.search, agent }
+      : { hostname: "127.0.0.1", port: proxyPort, path: target.href };
+    const request = (protocol === "https" ? httpsRequest : httpRequest)({ ...options, method: "POST", headers }, (response) => {
       response.resume(); response.on("end", () => resolve(response.statusCode!));
     });
     request.on("error", reject); request.end("test trace body");
-  });
+  }).finally(() => agent?.destroy());
 }
 function apiRequest(path: string, method: string, body?: unknown) {
   return api.request(`/vault/credentials${path}`, { method, headers: { "content-type": "application/json", "anthropic-beta": "managed-agents-2026-04-01" }, ...(body !== undefined && { body: JSON.stringify(body) }) });
 }
 beforeAll(async () => {
   directory = await mkdtemp(join(tmpdir(), "oma-basic-"));
-  upstream = createServer((request, response) => {
+  const handler: import("node:http").RequestListener = (request, response) => {
     requests++;
-    const matches = request.headers.authorization === expectedAuth;
-    seen.push({ matches, path: request.url! });
-    response.writeHead(matches && !reject ? 204 : 401); response.end();
-  });
-  upstreamUrl = `http://127.0.0.1:${await listen(upstream)}`;
+    const authHeaders = request.rawHeaders.filter((header, index) => index % 2 === 0 && header.toLowerCase() === "authorization");
+    const unmatched = request.headers.host?.startsWith("127.0.0.1:");
+    const matches = request.headers.authorization === expectedAuth && authHeaders.length === (expectedAuth === undefined ? 0 : 1)
+      && request.headers["x-review-marker"] === "preserved"
+      && request.headers["x-api-key"] === (unmatched && !expectStripped ? "placeholder" : undefined)
+      && request.headers["x-goog-api-key"] === (unmatched && !expectStripped ? "placeholder" : undefined)
+      && request.headers["x-agent-token"] === (unmatched && !expectStripped ? "placeholder" : undefined)
+      && request.headers["proxy-authorization"] === undefined;
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      seen.push({ matches, path: request.url! });
+      response.writeHead(matches && !reject && Buffer.concat(chunks).toString() === "test trace body" ? 204 : 401); response.end();
+    });
+  };
+  const upstreamCa = join(directory, "upstream.crt");
+  if (protocol === "https") {
+    execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-keyout", join(directory, "upstream.key"), "-out", upstreamCa], { stdio: "ignore" });
+    upstream = createHttpsServer({ key: await readFile(join(directory, "upstream.key")), cert: await readFile(upstreamCa) }, handler);
+  } else upstream = createServer(handler);
+  upstreamUrl = `${protocol}://localhost:${await listen(upstream)}`;
   const reserve = createServer(); proxyPort = await listen(reserve); await new Promise<void>((resolve) => reserve.close(() => resolve()));
   const dbPath = join(directory, "vault.db");
   sql = await createBetterSqlite3SqlClient(dbPath);
@@ -76,7 +122,9 @@ beforeAll(async () => {
   const auth = { type: "static_basic", username: "public", token: "password", mcp_server_url: upstreamUrl };
   expect((await apiRequest("", "POST", { auth })).status).toBe(201);
   await sql.prepare("INSERT INTO credentials VALUES (?, ?, ?, ?, 0, 0, NULL)").bind("legacy-basic", "workspace", "vault", JSON.stringify(auth)).run();
-  child = spawn("pnpm", ["exec", "tsx", "src/index.ts"], { cwd: resolve(import.meta.dirname, ".."), detached: true, env: { ...process.env, DATABASE_URL: "", DATABASE_PATH: dbPath, OMA_VAULT_CA_DIR: join(directory, "ca"), OMA_VAULT_PORT: String(proxyPort), OMA_TENANT: "workspace", OMA_VAULT_PROXY_KEY: "", OMA_VAULT_UNATTRIBUTED_EGRESS: "allow", PLATFORM_ROOT_SECRET: rootSecret }, stdio: ["ignore", "pipe", "pipe"] });
+  child = spawn("pnpm", ["exec", "tsx", "src/index.ts"], { cwd: resolve(import.meta.dirname, ".."), detached: true, env: { ...process.env, ...(protocol === "https" && { NODE_EXTRA_CA_CERTS: upstreamCa }), CAP_OVERRIDE_FEEDFORWARD_ENDPOINTS: "localhost 127.0.0.1", DATABASE_URL: "", DATABASE_PATH: dbPath, OMA_VAULT_CA_DIR: join(directory, "ca"), OMA_VAULT_PORT: String(proxyPort), OMA_TENANT: "workspace", OMA_VAULT_PROXY_KEY: proxyKey, OMA_VAULT_UNATTRIBUTED_EGRESS: "allow", PLATFORM_ROOT_SECRET: rootSecret }, stdio: ["ignore", "pipe", "pipe"] });
+  child.stdout!.on("data", (chunk) => { logs += String(chunk); });
+  child.stderr!.on("data", (chunk) => { logs += String(chunk); });
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Proxy did not start within 20s")), 20_000);
     child.on("exit", (code) => { clearTimeout(timeout); reject(new Error(`Proxy exited before readiness: ${code}`)); });
@@ -94,14 +142,34 @@ afterAll(async () => {
 
 describe("real oma-vault Basic injection", () => {
   it.each([false, true])("replaces placeholders on REST and OTLP; managed=%s", async (managed) => {
-    expect((await fetch(upstreamUrl, { headers: { authorization: placeholder } })).status).toBe(401);
+    if (protocol === "http") expect((await fetch(upstreamUrl, { headers: { authorization: placeholder } })).status).toBe(401);
     expect(await callProxy(managed)).toBe(204);
     expect(await callProxy(managed, placeholder, "/api/public/projects")).toBe(204);
     expect(seen.slice(-2)).toEqual([{ matches: true, path: "/api/public/otel/v1/traces" }, { matches: true, path: "/api/public/projects" }]);
   });
+  it.each([false, true])("injects sole Basic for absent and Bearer headers; managed=%s", async (managed) => {
+    expect(await callProxy(managed, null)).toBe(204);
+    expect(await callProxy(managed, "Bearer x")).toBe(204);
+  });
+  it.each([false, true])("preserves authorization on an unmatched host; managed=%s", async (managed) => {
+    try {
+      for (const auth of [placeholder, "Bearer x", null]) {
+        expectedAuth = auth ?? undefined;
+        expect(await callProxy(managed, auth, "/api/public/projects", true)).toBe(204);
+      }
+    } finally { expectedAuth = authorization; }
+  });
   it.each([false, true])("does not retry a Basic 401; managed=%s", async (managed) => {
     reject = true; const before = requests;
     try { expect(await callProxy(managed)).toBe(401); expect(requests - before).toBe(1); } finally { reject = false; }
+  });
+  it("strips caller auth and injects nothing for forged attribution", async () => {
+    expectedAuth = undefined;
+    expectStripped = true;
+    try {
+      expect(await callProxy(true, placeholder, "/api/public/projects", true, true)).toBe(204);
+      expect(await callProxy(true, placeholder, "/api/public/projects", false, true)).toBe(204);
+    } finally { expectedAuth = authorization; expectStripped = false; }
   });
   it("masks list/get and immediately injects the rotated managed password", async () => {
     expect((await (await apiRequest("", "GET")).json()).data[0].auth).toEqual({ type: "static_basic", username: "public", mcp_server_url: upstreamUrl });
@@ -114,14 +182,39 @@ describe("real oma-vault Basic injection", () => {
   });
   it.each([false, true])("preserves exact bearer handles and selects by incoming scheme; managed=%s", async (managed) => {
     for (const [id, handle] of [["bearer", undefined], ["handled", "brain"]] as const) {
-      const auth = { type: "static_bearer", token: "pat", mcp_server_url: upstreamUrl, ...(handle && { handle }) };
+      const auth = { type: "static_bearer", token: handle ? "handled-pat" : "pat", mcp_server_url: upstreamUrl, ...(handle && { handle }) };
       if (managed) expect((await apiRequest("", "POST", { auth })).status).toBe(201);
       else await sql.prepare("INSERT INTO credentials VALUES (?, ?, ?, ?, 0, 0, NULL)").bind(id, "workspace", "vault", JSON.stringify(auth)).run();
     }
     expect(await callProxy(managed)).toBe(204);
-    expectedAuth = "Bearer pat";
+    expectedAuth = "Bearer handled-pat";
     expect(await callProxy(managed, "Basic YnJhaW46cGxhY2Vob2xkZXI=")).toBe(204);
+    expectedAuth = "Bearer pat";
     expect(await callProxy(managed, "Bearer placeholder")).toBe(204);
+    expect(await callProxy(managed, null)).toBe(204);
     expectedAuth = authorization;
   });
+  it("keeps passwords and encoded credentials out of proxy logs", () => {
+    expect(["password", "rotated", "cHVibGljOnBhc3N3b3Jk", "cHVibGljOnJvdGF0ZWQ="].some((secret) => logs.includes(secret))).toBe(false);
+  });
+  it.each([false, true])("preserves bearer-only behavior across selectors and git paths; managed=%s", async (managed) => {
+    if (managed) {
+      const page = await (await apiRequest("", "GET")).json();
+      for (const credential of page.data) expect((await apiRequest(`/${credential.id}`, "DELETE")).status).toBe(200);
+    } else await sql.prepare("DELETE FROM credentials").run();
+    for (const [id, handle, token] of [["default", undefined, "pat"], ["selector", "brain", "handled-pat"]] as const) {
+      const auth = { type: "static_bearer", token, mcp_server_url: upstreamUrl, ...(handle && { handle }) };
+      if (managed) expect((await apiRequest("", "POST", { auth })).status).toBe(201);
+      else await sql.prepare("INSERT INTO credentials VALUES (?, ?, ?, ?, 0, 0, NULL)").bind(id, "workspace", "vault", JSON.stringify(auth)).run();
+    }
+    try {
+      for (const [incoming, expected] of [["Basic YnJhaW46cGxhY2Vob2xkZXI=", "Bearer handled-pat"], [placeholder, "Bearer pat"], [null, "Bearer pat"], ["Bearer x", "Bearer pat"]] as const) {
+        expectedAuth = expected;
+        expect(await callProxy(managed, incoming)).toBe(204);
+      }
+      expectedAuth = "Basic eC1hY2Nlc3MtdG9rZW46aGFuZGxlZC1wYXQ=";
+      expect(await callProxy(managed, "Basic YnJhaW46cGxhY2Vob2xkZXI=", "/repo.git/info/refs?service=git-upload-pack")).toBe(204);
+    } finally { expectedAuth = authorization; }
+  });
+});
 });

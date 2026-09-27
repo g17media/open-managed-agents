@@ -632,7 +632,9 @@ for the matched host, regardless of path; real keys stay outside the sandbox.
 An exact incoming Basic username matching a bearer credential's `handle` wins.
 Otherwise a Basic request prefers `static_basic` over a handle-less bearer on
 the same host; a non-Basic request prefers that bearer. If only Basic exists,
-it applies even without an incoming auth header. Unmatched handled credentials
+it applies with no incoming auth header or with a Bearer placeholder. Requests
+to hosts with no matching credential retain their caller-supplied auth headers
+(unless session attribution is forged). Unmatched handled credentials
 are the last fallback; ties within a rank use the first match. Avoid reusing a
 bearer handle as a placeholder username when that selection is not intended.
 

@@ -55,4 +55,21 @@ describe("static Basic credentials API and application", () => {
     const { request } = setup();
     expect((await request("", "POST", { auth: { ...auth, ...patch } })).status).toBe(400);
   });
+  it.each(["username", "token"] as const)("identifies missing %s without echoing secrets", async (field) => {
+    const { request } = setup();
+    const response = await request("", "POST", { auth: { ...auth, [field]: undefined } });
+    expect(response.status).toBe(400);
+    const body = await response.text();
+    expect(body).toContain(`auth.${field}`);
+    expect(body.includes(auth.token)).toBe(false);
+  });
+  it.each(["static_basic", "static_bearer"] as const)("rejects unknown create and rotation fields consistently (%s)", async (type) => {
+    const { request, store } = setup();
+    const input = type === "static_basic" ? auth : { type, token: auth.token, mcp_server_url: auth.mcp_server_url };
+    expect((await request("", "POST", { auth: { ...input, unexpected: true } })).status).toBe(400);
+    expect((await request("", "POST", { auth: input })).status).toBe(201);
+    const response = await request("/vcrd_basic", "POST", { auth: { type, token: "replacement", unexpected: true } });
+    expect(response.status).toBe(400);
+    expect((await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" }))?.credential.auth).toMatchObject({ token: auth.token });
+  });
 });

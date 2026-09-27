@@ -172,7 +172,10 @@ on every path, including REST and OTLP ingestion. An exact Basic-username
 prefers `static_basic` over an unhandled bearer; other requests prefer the
 unhandled bearer. Unmatched handled credentials are the last fallback. Ties
 within a rank retain the existing first-match behavior. A sole Basic credential
-also applies to requests with no Authorization header.
+also applies to requests with no Authorization header or with a Bearer placeholder.
+When no credential matches, caller-supplied Authorization and API-key headers
+pass through unchanged. Forged session attribution still strips those headers
+and never injects vault credentials; networking policy is enforced in every case.
 
 List/get responses include the username and URL but omit `token`. Rotate with
 `POST /v1/vaults/:id/credentials/:credential_id` and

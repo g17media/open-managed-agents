@@ -724,9 +724,9 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   const selector = basicAuthUsername(req.headers["authorization"]);
   const matched: MatchedCred | null = forged ? null : await findCredentialForUrl(url, attr, selector, /^basic /i.test(String(req.headers["authorization"] ?? "")));
 
-  // Strip any incoming Authorization headers — the agent must not be able
-  // to override the injected value or smuggle a stolen token. Mirrors the
-  // Infisical Agent Vault + CF outboundByHost zero-trust behaviour.
+  // Replace client auth for matched credentials. Unmatched destinations keep
+  // their caller-supplied auth, just like managed outbound forwarding. Forged
+  // attribution must never preserve auth or obtain a vault credential.
   //
   // Also strip hop-by-hop / connection-level headers that would confuse
   // node:fetch's outbound — `host` (we let fetch infer from the URL),
@@ -734,9 +734,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   // strip, fetch() throws "fetch failed" when the inbound `host:
   // oma-vault:14322` clashes with the upstream URL's actual host.
   const STRIP = new Set([
-    "authorization",
-    "x-api-key",
-    "x-goog-api-key",
+    ...(matched || forged ? ["authorization", "x-api-key", "x-goog-api-key"] : []),
     "host",
     "content-length",
     "connection",
@@ -753,12 +751,11 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     "transfer-encoding",
     "upgrade",
   ]);
-  // A companion token header is a credential slot like Authorization: strip it whatever the
-  // match outcome, so the sandbox supplies the shape only and can never forward a value of its own.
+  // Companion headers follow the same replacement/passthrough rule as Authorization.
   let requestHostname = "";
   try { requestHostname = new URL(url).hostname; } catch { /* an unparsable url gets no injection either */ }
   const companionHeaderName = capRegistry.byHostname(requestHostname)?.companion_token_header;
-  if (companionHeaderName) STRIP.add(companionHeaderName);
+  if (companionHeaderName && (matched || forged)) STRIP.add(companionHeaderName);
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const lower = k.toLowerCase();
