@@ -66,6 +66,7 @@ import {
   refreshManagedCliCredential,
 } from "@open-managed-agents/vault-forward/managed";
 
+import { getServiceAccountToken } from "@open-managed-agents/vault-forward/service-account";
 import { buildAuthHeader, credentialMatchRank } from "@open-managed-agents/vault-forward";
 
 const logger: Logger = await createNodeLogger({ bindings: { service: "oma-vault" } });
@@ -335,7 +336,7 @@ async function findCredentialForUrl(
       const door = matchManagedCapCredential(credentials, hostname);
       const credential = primary ?? door;
       if (!credential) return null;
-      const matched = toManagedMatched(credential, records, attr.tenantId);
+      const matched = await toManagedMatched(credential, records, attr.tenantId);
       // An app behind an SSO ingress may need two credentials on one request: the OAuth
       // credential opens the ingress in Authorization and the app's own static token rides in
       // the spec's companion header. Both are resolved here; the injection site applies the
@@ -343,7 +344,7 @@ async function findCredentialForUrl(
       // Authorization keeps the single-credential behaviour (static token, as before).
       const companionHeader = capRegistry.byHostname(hostname)?.companion_token_header;
       if (companionHeader && primary?.auth.type === "static_bearer" && door && door.id !== primary.id) {
-        matched.companion = { header: companionHeader, door: toManagedMatched(door, records, attr.tenantId) };
+        matched.companion = { header: companionHeader, door: await toManagedMatched(door, records, attr.tenantId) };
       }
       return matched;
     }
@@ -432,15 +433,22 @@ function matchManagedCapCredential(credentials: Credential[], hostname: string):
 
 /**
  * Builds the injection shape for one managed credential, with a refresh hook when it is a
- * device-flow cap_cli token whose spec has a token endpoint.
+ * JWT service account or a device-flow cap_cli token with a token endpoint.
  */
-function toManagedMatched(
+async function toManagedMatched(
   credential: Credential,
   records: Awaited<ReturnType<typeof listManagedVaultCredentials>>,
   workspaceId: string,
-): MatchedCred {
+): Promise<MatchedCred> {
   const token = credentialBearer(credential.auth)!;
   const record = records.find((r) => r.credential.id === credential.id);
+  if (record && credential.auth.type === "service_account_jwt") {
+    const token = await getServiceAccountToken(managedCredentials, workspaceId, record);
+    return { credentialId: credential.id, vaultId: credential.vaultId,
+      injectHeader: { name: "authorization", value: `Bearer ${token}` },
+      refresh: () => getServiceAccountToken(managedCredentials, workspaceId, record, { rejectedToken: token }),
+    };
+  }
   const deviceFlow = credential.auth.type === "cap_cli" && credential.auth.extras?.refresh_token
     ? capRegistry.byCliId(credential.auth.cliId)?.oauth?.device_flow : undefined;
   return { credentialId: credential.id, vaultId: credential.vaultId,
@@ -722,7 +730,12 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   // username is read first: it lets the sandbox name which credential it
   // wants when several match the host (see matchRowsByHost).
   const selector = basicAuthUsername(req.headers["authorization"]);
-  const matched: MatchedCred | null = forged ? null : await findCredentialForUrl(url, attr, selector, /^basic /i.test(String(req.headers["authorization"] ?? "")));
+  let matched: MatchedCred | null;
+  try { matched = forged ? null : await findCredentialForUrl(url, attr, selector, /^basic /i.test(String(req.headers["authorization"] ?? ""))); }
+  catch {
+    logger.warn({ op: "oma_vault.credential_failed", session_id: attr.sessionId }, "Credential resolution failed");
+    return { statusCode: 502, headers: { "content-type": "text/plain" }, body: "oma-vault: credential resolution failed" };
+  }
 
   // Replace client auth for matched credentials. Unmatched destinations keep
   // their caller-supplied auth, just like managed outbound forwarding. Forged

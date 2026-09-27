@@ -361,6 +361,7 @@ export async function resolveOutboundCredentialByHost(
         continue;
       }
       if (credUrl.hostname !== hostname) continue;
+      if (auth.type === "service_account_jwt") throw new Error("service_account_jwt requires self-host oma-vault; Cloudflare forwarding is not supported");
       const token = auth.bearer_token ?? auth.token ?? auth.access_token ?? auth.accessToken;
       if (!token) continue;
       const tsRaw = credential.updated_at

@@ -218,6 +218,8 @@ export interface ForwardOpts {
   /** When set, a 401 triggers refresh + retry once. Caller persists the
    *  rotated tokens via `onRefreshed`. */
   refresh?: OauthRefreshMetadata;
+  /** Node service-account exchange; called once after a rejected access token. */
+  refreshAccessToken?: (rejectedToken: string) => Promise<string>;
   /** Called after a successful refresh so the runtime can persist the
    *  new tokens (re-encrypted) back to the canonical credential row. */
   onRefreshed?: (t: RefreshedTokens) => Promise<void>;
@@ -280,7 +282,13 @@ export async function forwardWithRefresh(opts: ForwardOpts): Promise<Response> {
   };
 
   const first = await send(opts.accessToken);
-  if (first.status !== 401 || opts.basicUsername !== undefined || !opts.refresh) return first;
+  if (first.status !== 401 || opts.basicUsername !== undefined || (!opts.refresh && !opts.refreshAccessToken)) return first;
+  if (opts.refreshAccessToken) {
+    let token: string;
+    try { token = await opts.refreshAccessToken(opts.accessToken); } catch { return first; }
+    await first.body?.cancel().catch(() => {});
+    return send(token);
+  }
 
   // Drain the body so we can return a fresh Response without two
   // outstanding streams.
@@ -290,7 +298,7 @@ export async function forwardWithRefresh(opts: ForwardOpts): Promise<Response> {
     /* already consumed / closed */
   }
 
-  const refreshed = await refreshMcpOAuth(opts.refresh, fetcher);
+  const refreshed = await refreshMcpOAuth(opts.refresh!, fetcher);
   if (!refreshed) {
     // Refresh failed — re-issue with the original token to surface the
     // upstream's actual 401 (matches old apps/main behavior).

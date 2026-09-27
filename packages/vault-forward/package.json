@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./proxy": "./src/proxy.ts",
-    "./managed": "./src/managed.ts"
+    "./managed": "./src/managed.ts",
+    "./service-account": "./src/service-account.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts"
