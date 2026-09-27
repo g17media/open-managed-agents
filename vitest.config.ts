@@ -440,6 +440,7 @@ export default defineConfig({
       "**/.vercel/**",
       "apps/agent/build-*/**",
       "apps/console/**",
+      "apps/oma-vault/test/**",
       "apps/main-node/**",
       "apps/main-fly/**",
       "apps/main-vercel/**",

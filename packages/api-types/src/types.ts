@@ -1029,8 +1029,8 @@ export interface VaultConfig {
 // --- Credential ---
 
 export interface CredentialAuth {
-  type: "mcp_oauth" | "static_bearer" | "cap_cli" | "container_registry";
-  // mcp_oauth / static_bearer: match by MCP server URL
+  type: "mcp_oauth" | "static_bearer" | "static_basic" | "cap_cli" | "container_registry";
+  // mcp_oauth / static_bearer / static_basic: match by MCP server URL
   mcp_server_url?: string;
   // static_bearer: optional URL-safe selector. A sandbox picks this
   // credential over others on the same host by sending Basic auth with
@@ -1049,7 +1049,7 @@ export interface CredentialAuth {
   // response omitted `scope`). Reused as the default on re-authorization
   // so user-added scopes (e.g. offline_access) survive reconnects.
   scope?: string;
-  // static_bearer / cap_cli fields
+  // static_bearer / cap_cli token, or static_basic password (username below)
   token?: string;
   // Provider tag: when set, the outbound proxy can request a token refresh
   // via the integrations gateway (which holds the secrets needed to mint a

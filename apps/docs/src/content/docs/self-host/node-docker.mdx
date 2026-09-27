@@ -248,6 +248,59 @@ curl -s -X POST localhost:8787/v1/vaults/$VID/credentials \
 
 Skip the sidecar if you don't need it: `docker compose up oma-server`.
 
+### Langfuse with HTTP Basic
+
+Create the credential from an operator context, using the Langfuse **public key**
+as `username` and **secret key** as `token` (replace the example values below):
+
+```http
+POST /v1/vaults/VAULT_ID/credentials
+Content-Type: application/json
+anthropic-beta: managed-agents-2026-04-01
+x-api-key: YOUR_OMA_API_KEY
+
+{
+  "display_name": "Langfuse",
+  "auth": {
+    "type": "static_basic",
+    "mcp_server_url": "https://langfuse.example.com",
+    "username": "YOUR_LANGFUSE_PUBLIC_KEY",
+    "token": "YOUR_LANGFUSE_SECRET_KEY"
+  }
+}
+```
+
+Attach that vault to the session's `vault_ids`. In the sandbox, use placeholders:
+
+```bash
+export LANGFUSE_PUBLIC_KEY=placeholder
+export LANGFUSE_SECRET_KEY=placeholder
+export LANGFUSE_BASE_URL=https://langfuse.example.com
+```
+
+The Langfuse Python SDK sends placeholder Basic auth on REST requests and the
+OpenTelemetry HTTP exporter sends it to `/api/public/otel/v1/traces`. Route both
+through `oma-vault` with the sandbox's proxy settings and trusted proxy CA. The
+proxy replaces the placeholder header with `Basic base64(public_key:secret_key)`
+for the matched host, regardless of path; real keys stay outside the sandbox.
+
+An exact incoming Basic username matching a bearer credential's `handle` wins.
+Otherwise a Basic request prefers `static_basic` over a handle-less bearer on
+the same host; a non-Basic request prefers that bearer. If only Basic exists,
+it applies with no incoming auth header or with a Bearer placeholder. Requests
+to hosts with no matching credential retain their caller-supplied auth headers
+(unless session attribution is forged). Unmatched handled credentials
+are the last fallback; ties within a rank use the first match. Avoid reusing a
+bearer handle as a placeholder username when that selection is not intended.
+
+The console's **HTTP Basic** type supports creation and password rotation. The
+API omits passwords from list/get; rotate with
+`POST /v1/vaults/VAULT_ID/credentials/CREDENTIAL_ID` and
+`{"auth":{"type":"static_basic","token":"NEW_LANGFUSE_SECRET_KEY"}}`.
+A rejected Basic credential returns the upstream 401 without OAuth refresh.
+This sandbox flow requires self-host `oma-vault`; Cloudflare's bearer-only
+outbound lookup rejects Basic credentials explicitly.
+
 ## Operator gotchas
 
 - **`AUTH_DISABLED=1` belongs in `.env`, not the shell.** Compose

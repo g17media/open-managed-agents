@@ -8,6 +8,7 @@ import {
 export interface NodeMcpProxyTarget {
   upstreamUrl: string;
   accessToken: string;
+  basicUsername?: string;
   refresh?: OauthRefreshMetadata;
   onRefreshed?: (tokens: RefreshedTokens) => Promise<void>;
 }
@@ -56,6 +57,7 @@ export function createNodeMcpProxyBinding(
         inboundHeaders: new Headers(request.headers),
         body,
         accessToken: target.accessToken,
+        basicUsername: target.basicUsername,
         refresh: target.refresh,
         onRefreshed: target.onRefreshed,
         fetcher: dependencies.fetcher,
@@ -94,6 +96,7 @@ export function buildNodeHttpMcpProxyRoutes(
       inboundHeaders,
       body,
       accessToken: target.accessToken,
+      basicUsername: target.basicUsername,
       refresh: target.refresh,
       onRefreshed: target.onRefreshed,
       fetcher: dependencies.fetcher,

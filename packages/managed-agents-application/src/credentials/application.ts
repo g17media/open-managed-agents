@@ -80,7 +80,7 @@ function decodeCredentialCursor(
 }
 
 function resolveCreateAuth(input: CredentialAuthInput): CredentialAuth {
-  if (input.type === "static_bearer" || input.type === "container_registry" || input.type === "cap_cli") return structuredClone(input);
+  if (input.type === "static_basic" || input.type === "static_bearer" || input.type === "container_registry" || input.type === "cap_cli") return structuredClone(input);
   if (input.type === "environment_variable") {
     return {
       type: input.type,
@@ -121,6 +121,9 @@ function toAuthView(auth: CredentialAuth): CredentialAuthView {
     return { type: auth.type, cliId: auth.cliId,
       ...(auth.mcpServerUrl !== undefined && { mcpServerUrl: auth.mcpServerUrl }),
       ...(auth.handle !== undefined && { handle: auth.handle }) };
+  }
+  if (auth.type === "static_basic") {
+    return { type: auth.type, username: auth.username, mcpServerUrl: auth.mcpServerUrl };
   }
   if (auth.type === "static_bearer") {
     return { type: auth.type, mcpServerUrl: auth.mcpServerUrl, ...(auth.handle !== undefined && { handle: auth.handle }) };
@@ -233,6 +236,9 @@ function patchAuth(
     if (handle === null) delete next.handle;
     else if (handle !== undefined) next.handle = handle;
     return next;
+  }
+  if (current.type === "static_basic" && update.type === "static_basic") {
+    return { ...current, ...update };
   }
   if (current.type === "static_bearer" && update.type === "static_bearer") {
     const next = { ...current, ...(update.token !== undefined && { token: update.token }) };

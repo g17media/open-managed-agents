@@ -36,6 +36,15 @@ Mirrors the [Claude Managed Agents](https://www.anthropic.com/engineering/manage
 | Cloud agent DO | `(tenantId, sid, server)` | `env.MAIN_MCP.mcpForward(...)` via service-binding RPC (binding scope = auth) |
 | Sandbox container | full upstream URL | `env.MAIN_MCP.outboundForward(...)` via the agent worker's outbound interceptor |
 
+## HTTP Basic (self-host)
+
+Use `static_basic` for username/password APIs such as Langfuse. Store the public
+key as `username` and secret key as `token`; `oma-vault` injects Basic auth on REST
+and OTLP paths and replaces sandbox placeholders. Passwords are omitted from API
+responses and can be rotated without restarting the session. Basic credentials
+never trigger OAuth refresh. See the [Langfuse setup](/self-host/node-docker/#langfuse-with-http-basic)
+and [credential reference](/reference/configuration/#http-basic-credentials).
+
 ## OAuth refresh
 
 For credentials of type `mcp_oauth`, the proxy automatically handles 401:

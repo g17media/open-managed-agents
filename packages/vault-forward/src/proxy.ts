@@ -1,3 +1,4 @@
+import { basicAuthorization } from "./index";
 // MCP / outbound credential-injection forwarding. The only layer that
 // ever holds plaintext upstream tokens — the sandbox / harness sees only
 // references. Shared by the CF worker (HTTP endpoint + McpProxyRpc) and
@@ -95,6 +96,8 @@ export interface McpProxyCredentialSource {
 }
 
 export interface ProxyTarget {
+  /** Static HTTP Basic username; upstreamToken is its password. */
+  basicUsername?: string;
   /** Real upstream MCP server URL (e.g. https://integrations.openma.dev/.../mcp). */
   upstreamUrl: string;
   /** Bearer token to inject on the upstream request. */
@@ -212,6 +215,7 @@ export async function resolveProxyTargetByTenant(
       const auth = credential.auth as
         | {
             type?: string;
+            username?: string;
             mcp_server_url?: string;
             mcpServerUrl?: string;
             bearer_token?: string;
@@ -237,7 +241,9 @@ export async function resolveProxyTargetByTenant(
       if ((auth.mcp_server_url ?? auth.mcpServerUrl) !== server.url) continue;
       const token = auth.bearer_token ?? auth.token ?? auth.access_token ?? auth.accessToken;
       if (!token) continue;
-      const target: ProxyTarget = { upstreamUrl: server.url, upstreamToken: token };
+      const target: ProxyTarget = { upstreamUrl: server.url, upstreamToken: token,
+        ...(auth.type === "static_basic" && { basicUsername: auth.username }) };
+      if (auth.type === "static_basic" && auth.username === undefined) throw new Error("static_basic requires a username");
       // Surface refresh metadata for mcp_oauth so 401 can trigger an
       // automatic token refresh + retry. static_bearer creds skip this.
       if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
@@ -289,7 +295,8 @@ export async function forwardToUpstream(
   body: BodyInit | null,
 ): Promise<Response> {
   const upstreamHeaders = new Headers(inboundHeaders);
-  upstreamHeaders.set("authorization", `Bearer ${target.upstreamToken}`);
+  upstreamHeaders.set("authorization", target.basicUsername !== undefined
+    ? basicAuthorization(target.basicUsername, target.upstreamToken) : `Bearer ${target.upstreamToken}`);
   upstreamHeaders.delete("host");
   upstreamHeaders.delete("cf-connecting-ip");
   upstreamHeaders.delete("cf-ray");
@@ -378,7 +385,7 @@ export async function forwardWithRefresh(
   // sess-pvdx9d16zitzhw39 saw all three of airtable/asana/sentry
   // permanently 403 across multiple sessions until manual SQL cleanup).
   const refreshableStatus = first.status === 401 || first.status === 403;
-  if (!refreshableStatus || !target.refresh) {
+  if (!refreshableStatus || target.basicUsername !== undefined || !target.refresh) {
     log(
       {
         op: "mcp_proxy.forward",

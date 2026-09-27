@@ -226,7 +226,7 @@ export function createResourcesHandler(deps: ResourceDependencies) {
       }
       case "vaults.credentials.retrieve": {
         const retrieved = result(await deps.credentials.retrieveCredential({ vaultId, credentialId }));
-        if (retrieved.type !== "found" || retrieved.credential.auth.type === "environment_variable") throw new OpenAIAgentsProtocolError(404, "Credential not found");
+        if (retrieved.type !== "found" || ["environment_variable", "static_basic"].includes(retrieved.credential.auth.type)) throw new OpenAIAgentsProtocolError(404, "Credential not found");
         return { body: await credentialWire(retrieved.credential) };
       }
       case "vaults.credentials.update": {
@@ -235,7 +235,7 @@ export function createResourcesHandler(deps: ResourceDependencies) {
         return { body: await credentialWire(updated.credential) };
       }
       case "vaults.credentials.list": {
-        const credentials = (await credentialRows(vaultId)).filter(credential => credential.auth.type !== "environment_variable");
+        const credentials = (await credentialRows(vaultId)).filter(credential => !["environment_variable", "static_basic"].includes(credential.auth.type));
         return { body: page(await Promise.all(credentials.map(credentialWire)), query, new Map(credentials.map(credential => [credential.id, credential.archivedAt === null ? "active" : "archived"]))) };
       }
       case "vaults.credentials.delete": {

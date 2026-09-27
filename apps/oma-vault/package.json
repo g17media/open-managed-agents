@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "test": "vitest run --config vitest.config.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit"
   },

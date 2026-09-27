@@ -14,7 +14,7 @@
  * The shape matches the JSON the outbound worker walks at
  * apps/agent/src/outbound.ts:findCredentialForHost — it scans
  * `vault_credentials[*].credentials[*].auth.mcp_server_url` for a host match,
- * then injects either `auth.token` (static_bearer) or `auth.access_token`
+ * then injects either `auth.token` (static_bearer, or static_basic with username) or `auth.access_token`
  * (mcp_oauth). On 401 it uses `refresh_token` + `token_endpoint` + `client_id`
  * + optional `client_secret` to refresh, and writes the refreshed snapshot
  * back via the same key.
@@ -30,6 +30,7 @@ export interface OutboundSnapshot {
         type: string;
         mcp_server_url?: string;
         token?: string;
+        username?: string;
         access_token?: string;
         refresh_token?: string;
         token_endpoint?: string;

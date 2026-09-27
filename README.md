@@ -556,11 +556,12 @@ curl -sX POST $BASE/v1/sessions -H "x-api-key: $KEY" \
 # Inside the sandbox: curl https://api.github.com/user → 200, Authorization injected at the network layer
 ```
 
-Three credential types share one resolver:
+Outbound credential types:
 
 | Type | Match by | Refresh |
 |---|---|---|
 | `static_bearer` | request host matches `mcp_server_url` | never |
+| `static_basic` | host matches `mcp_server_url`; injects Basic using `username` and password in `token` (self-host sandbox) | never |
 | `mcp_oauth` | request host matches `mcp_server_url` | on 401 / 403 via `token_endpoint`, CAS-writes new token to D1 |
 | `cap_cli` | sandbox CLI invocations match `cli_id` in the cap registry (`gh`, `glab`, `aws`, …) | per-CLI |
 

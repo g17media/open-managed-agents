@@ -405,6 +405,8 @@ export async function resolveOutboundCredentialByHost(
     // hit. We thread the cred's mcp_server_url through so log messages
     // / refresh persistence can correlate, but it's not used by
     // forwardWithRefresh's fetch (which uses caller's URL).
+    // This RPC returns only bearer tokens; never expose a Basic password as a bearer.
+    if (auth.type === "static_basic") throw new Error("static_basic is not supported by Cloudflare outbound credential lookup; use self-host oma-vault");
     const target: ProxyTarget = { upstreamUrl: mcpServerUrl, upstreamToken: token };
     if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
       target.refresh = {

@@ -2,7 +2,7 @@
 //
 // Tables:
 //   vaults       — tenant-scoped credential collections.
-//   credentials  — three auth types: mcp_oauth | static_bearer |
+//   credentials  — auth types include mcp_oauth | static_bearer | static_basic |
 //                  command_secret. Hot fields (auth_type, mcp_server_url,
 //                  provider) are denormalized columns; full
 //                  CredentialAuth lives encrypted in `auth` (AES-GCM).

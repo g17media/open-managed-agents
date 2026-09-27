@@ -1270,16 +1270,17 @@ async function resolveNodeMcpProxyTarget(input: {
         const credential = record.credential;
         const auth = credential.auth;
         if (
-          (auth.type !== "static_bearer" && auth.type !== "mcp_oauth")
+          (auth.type !== "static_basic" && auth.type !== "static_bearer" && auth.type !== "mcp_oauth")
           || auth.mcpServerUrl !== server.url
         ) continue;
-        const accessToken = auth.type === "static_bearer"
+        const accessToken = auth.type === "static_bearer" || auth.type === "static_basic"
           ? auth.token
           : auth.accessToken;
         if (!accessToken) continue;
         const target: NodeMcpProxyTarget = {
           upstreamUrl: server.url,
           accessToken,
+          ...(auth.type === "static_basic" && { basicUsername: auth.username }),
         };
         if (auth.type === "mcp_oauth" && auth.refresh?.refreshToken) {
           const tokenEndpointAuth = auth.refresh.tokenEndpointAuth;
