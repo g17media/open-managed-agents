@@ -60,6 +60,77 @@ describe("service account JWT bearer", () => {
     await store.replace({ workspaceId: "workspace", vaultId: "vault", credentialId: "sa", expectedRevision: saved.revision, next: { ...saved.credential, auth: { ...auth, accessToken: "minted-2", expiresAt: new Date(Date.now() + 299_000).toISOString() } } });
     expect(await getServiceAccountToken(store, "workspace", record, { fetch: request })).toBe("minted-3");
   });
+  it("does not cache a mint under a rotation that wins between SQL replacement and its readback", async () => {
+    const { store, record } = await setup();
+    const replace = store.replace.bind(store);
+    const rotatedKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    // SqlCredentialStore.replace updates, then separately reads the current row.
+    // An operator can rotate the key between those two database operations.
+    vi.spyOn(store, "replace").mockImplementationOnce(async (input) => {
+      const written = await replace(input);
+      if (written.type !== "replaced") throw new Error("Expected replacement");
+      const rotated = await replace({ ...input, expectedRevision: written.record.revision,
+        next: { ...written.record.credential, auth: { ...auth, privateKey: rotatedKey } } });
+      if (rotated.type !== "replaced") throw new Error("Expected rotation");
+      return rotated;
+    });
+    const request = endpoint();
+    await expect(getServiceAccountToken(store, "workspace", record, { fetch: request })).rejects.toThrow("changed during token exchange");
+    const current = (await store.find({ workspaceId: "workspace", vaultId: "vault", credentialId: "sa" }))!;
+    let minted = 0;
+    const fresh = await getServiceAccountToken(store, "workspace", current, { fetch: async () => {
+      minted++;
+      return Response.json({ access_token: "rotated-token", expires_in: 3600 });
+    } });
+    expect(fresh).toBe("rotated-token");
+    expect(minted).toBe(1);
+  });
+  it("returns and caches the newer token observed after a successful SQL write", async () => {
+    const { store, record } = await setup(); const replace = store.replace.bind(store);
+    vi.spyOn(store, "replace").mockImplementationOnce(async (input) => {
+      const written = await replace(input);
+      if (written.type !== "replaced") throw new Error("Expected replacement");
+      // A different process refreshed again before the SQL store's SELECT.
+      return replace({ ...input, expectedRevision: written.record.revision,
+        next: { ...written.record.credential, auth: { ...auth, accessToken: "canonical-token", expiresAt: new Date(Date.now() + 3_600_000).toISOString() } } });
+    });
+    const request = endpoint();
+    expect(await getServiceAccountToken(store, "workspace", record, { fetch: request })).toBe("canonical-token");
+    expect(await getServiceAccountToken(store, "workspace", record, { fetch: request })).toBe("canonical-token");
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it("reuses until exactly five minutes remain and renews once for concurrent expired callers", async () => {
+    const { store, record } = await setup(); const request = endpoint();
+    const start = 1_800_000_000_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(start);
+    try {
+      expect(await getServiceAccountToken(store, "workspace", record, { fetch: request })).toBe("minted-1");
+      clock.mockReturnValue(start + 3_299_999);
+      expect(await getServiceAccountToken(store, "workspace", record, { fetch: request })).toBe("minted-1");
+      expect(request).toHaveBeenCalledTimes(1);
+      clock.mockReturnValue(start + 3_300_000);
+      expect(await Promise.all([1, 2].map(() => getServiceAccountToken(store, "workspace", record, { fetch: request })))).toEqual(["minted-2", "minted-2"]);
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally { clock.mockRestore(); }
+  });
+  it("invalidates an already warm cache when a key is rotated", async () => {
+    const { store, record } = await setup(); const request = endpoint();
+    expect(await getServiceAccountToken(store, "workspace", record, { fetch: request })).toBe("minted-1");
+    const saved = (await store.find({ workspaceId: "workspace", vaultId: "vault", credentialId: "sa" }))!;
+    const rotated = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const updated = await store.replace({ workspaceId: "workspace", vaultId: "vault", credentialId: "sa", expectedRevision: saved.revision,
+      next: { ...saved.credential, auth: { ...auth, privateKey: rotated.privateKey.export({ type: "pkcs8", format: "pem" }).toString() } } });
+    if (updated.type !== "replaced") throw new Error("Rotation failed");
+    let mints = 0;
+    const token = await getServiceAccountToken(store, "workspace", updated.record, { fetch: async (_url, init) => {
+      const jwt = new URLSearchParams(String(init?.body)).get("assertion")!;
+      const [header, claims, signature] = jwt.split(".");
+      expect(verify("RSA-SHA256", Buffer.from(`${header}.${claims}`), rotated.publicKey, Buffer.from(signature!, "base64url"))).toBe(true);
+      mints++;
+      return Response.json({ access_token: "rotated-token", expires_in: 3600 });
+    } });
+    expect(token).toBe("rotated-token"); expect(mints).toBe(1);
+  });
   it("never revives a deleted credential or overwrites a concurrent operator edit", async () => {
     const { store, record } = await setup();
     const request = vi.fn<typeof fetch>(async () => {

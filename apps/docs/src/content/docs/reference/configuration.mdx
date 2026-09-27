@@ -217,6 +217,11 @@ including the issuer, scopes, token endpoint and configured subject, but omit
 `private_key`, `key_json` and minted access tokens. The console accepts a pasted
 JSON key and shows a masked key after saving.
 
+Google service accounts have no Drive storage of their own (quota **0**). Add
+the service account to a **shared drive** as **Content manager**, and create
+files there or in a folder inside it. Creation elsewhere fails with a
+`storageQuotaExceeded` quota error.
+
 Update non-secret fields using `POST /v1/vaults/:id/credentials/:credential_id`:
 
 ```json
@@ -239,7 +244,9 @@ Self-host `oma-vault` mints on first use and renews within five minutes of
 expiry. Concurrent requests share one mint per credential/revision in a
 process. Tokens and expiry are persisted in encrypted credential storage using
 a revision check so other processes can reuse them; this is not a distributed
-mint lock. A rejected upstream token (401) triggers at most one re-mint and
+mint lock. When processes race, the loser uses the persisted winner's token;
+a restart reuses that token until renewal is due. A rejected upstream token
+(401) triggers at most one re-mint and
 retry. Token requests have a bounded timeout and do not follow redirects.
 Cloudflare forwarding explicitly rejects this kind; use self-host `oma-vault`.
 

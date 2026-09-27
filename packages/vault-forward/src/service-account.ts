@@ -78,19 +78,19 @@ export async function getServiceAccountToken(store: CredentialStore, workspaceId
     const result = await store.replace({ ...location, expectedRevision: current.revision, next: {
       ...current.credential, updatedAt: new Date().toISOString(), auth: { ...auth, ...minted },
     } });
-    if (result.type !== "replaced") {
-      // A concurrent process can win the mint; an operator edit clears token state.
-      const latest = await store.find(location);
-      const live = latest?.credential.auth;
-      if (latest && !latest.credential.archivedAt && live?.type === "service_account_jwt" && sameConfiguration(auth, live) && live.accessToken && fresh(live.expiresAt)
-        && live.accessToken !== options.rejectedToken) return live.accessToken;
+    // SQL replacement reads the row back separately from its CAS write. Even a
+    // successful write can return a subsequent rotation or another process's mint.
+    const latest = result.type === "replaced" ? result.record : await store.find(location);
+    const live = latest?.credential.auth;
+    if (!latest || latest.credential.archivedAt || live?.type !== "service_account_jwt" || !sameConfiguration(auth, live)
+      || !live.accessToken || !live.expiresAt || (result.type !== "replaced" && (!fresh(live.expiresAt) || live.accessToken === options.rejectedToken))) {
       throw new Error("Service account credential changed during token exchange");
     }
     // Bound retained secrets/revisions in long-lived vault processes.
     for (const [key, value] of state.cache) if (!fresh(value.expiresAt)) state.cache.delete(key);
     if (state.cache.size >= 1000) state.cache.delete(state.cache.keys().next().value!);
-    state.cache.set(JSON.stringify([workspaceId, location.vaultId, location.credentialId, result.record.revision]), minted);
-    return minted.accessToken;
+    state.cache.set(JSON.stringify([workspaceId, location.vaultId, location.credentialId, latest.revision]), { accessToken: live.accessToken, expiresAt: live.expiresAt });
+    return live.accessToken;
   })();
   state.flights.set(cacheKey, job);
   try { return await job; } finally { state.flights.delete(cacheKey); }

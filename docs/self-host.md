@@ -602,8 +602,10 @@ for matching a credential's handle to the Basic username configured in the sandb
 Use `service_account_jwt` for a bot identity independent of a user's OAuth
 refresh token. Enable the Drive and Docs APIs in the service account's GCP
 project, create a JSON key, and share the target shared drive with its
-`client_email` as **Content manager** (or share an existing My Drive folder as
-**Editor**). Service accounts cannot own files; use a shared drive for creation.
+`client_email` as **Content manager**. A service account has no Drive storage
+of its own (quota **0**); the bot must create files in this **shared drive**
+or a folder inside it. Creating files elsewhere, including an ordinary shared
+My Drive folder, fails with a `storageQuotaExceeded` quota error.
 
 In **Vault → Add credential → Service account**, paste the JSON key, set the
 host to `https://www.googleapis.com/`, and enter these space-separated scopes:
