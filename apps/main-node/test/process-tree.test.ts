@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -33,19 +34,26 @@ describe.runIf(process.platform !== "win32")("test process-tree cleanup", () => 
       });
     });
 
+    expect(processIsRunning(grandchildPid)).toBe(true);
     await killProcessTree(launcher);
 
-    await expect.poll(() => processExists(grandchildPid), {
+    await expect.poll(() => processIsRunning(grandchildPid), {
       timeout: 500,
     }).toBe(false);
   });
 });
 
-function processExists(pid: number): boolean {
+function processIsRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
+    // Minimal container init processes may not reap orphaned grandchildren.
+    // A zombie is terminated and cannot hold ports or execute server work.
+    if (process.platform === "linux") {
+      return !/^State:\s+Z\b/m.test(readFileSync(`/proc/${pid}/status`, "utf8"));
+    }
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (["ESRCH", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+    throw error;
   }
 }
