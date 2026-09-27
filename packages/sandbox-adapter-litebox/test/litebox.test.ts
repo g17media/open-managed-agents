@@ -229,7 +229,11 @@ describe("LiteBoxSandbox", () => {
     await sandbox.exec("x");
     expect(box.copyIn).toHaveBeenCalledWith(caPath, "/etc/ssl/oma-vault-ca.crt");
     const shellCall = box.exec.mock.calls.find(([command]) => command === "sh");
-    expect(shellCall?.[2]).toMatchObject({ HTTPS_PROXY: "http://proxy", SSL_CERT_FILE: "/etc/ssl/oma-vault-ca.crt" });
+    expect(shellCall?.[2]).toMatchObject({ SSL_CERT_FILE: "/etc/ssl/oma-vault-ca.crt" });
+    const proxy = new URL(shellCall![2]!.HTTPS_PROXY);
+    expect(proxy.origin).toBe("http://proxy");
+    expect(proxy.username).toBe("metadata");
+    expect(JSON.parse(Buffer.from(decodeURIComponent(proxy.password), "base64").toString())).toEqual({ tags: ["oma-tenant:t", "oma-session:s"] });
     await sandbox.destroy();
 
     const warn = vi.fn();

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BelljarSandbox } from "../src/adapters/belljar";
+import { BelljarSandbox, sandboxFactory } from "../src/adapters/belljar";
 
 const agents = vi.hoisted(() => [] as Array<{ options: unknown; destroyed: boolean }>);
 vi.mock("undici", async (importOriginal) => {
@@ -42,13 +42,17 @@ describe("Belljar HTTP deadlines", () => {
   });
   it("bounds other runtime calls and honours timeoutMs through runtimeFetch", async () => {
     const { adapter } = fixture();
-    await adapter.readFile("/workspace/file");
-    await adapter.writeFile("/workspace/file", "hello");
-    await adapter.gitCheckout("https://example.com/repo", {});
-    await adapter.startProcess("sleep 1");
-    await adapter.renewActivityTimeout();
-    await adapter.runtimeFetch("/api/process/id");
-    expect(agents.every((agent) => JSON.stringify(agent.options).includes('"headersTimeout":120000'))).toBe(true);
+    for (const operation of [
+      () => adapter.readFile("/workspace/file"),
+      () => adapter.writeFile("/workspace/file", "hello"),
+      () => adapter.gitCheckout("https://example.com/repo", {}),
+      () => adapter.startProcess("sleep 1"),
+      () => adapter.renewActivityTimeout(),
+      () => adapter.runtimeFetch("/api/process/id"),
+    ]) {
+      await operation();
+      expect(agents.at(-1)!.options).toEqual({ headersTimeout: 120_000, bodyTimeout: 120_000 });
+    }
     await adapter.runtimeFetch("/api/execute", { method: "POST", body: JSON.stringify({ timeoutMs: 600_000 }) });
     expect(agents.at(-1)!.options).toMatchObject({ headersTimeout: 630_000, bodyTimeout: 630_000 });
   });
@@ -139,4 +143,120 @@ describe("Belljar shell recovery", () => {
     expect(executions[2]!.body.sessionId).not.toBe(executions[0]!.body.sessionId);
     expect(executions[3]!.body.sessionId).toBe(executions[2]!.body.sessionId);
   });
+});
+
+describe("Belljar readiness waits", () => {
+  it.each(["create", "wake", "retry"])("does not charge slow %s readiness to the command deadline", async (phase) => {
+    vi.useFakeTimers();
+    let ready!: () => void;
+    const started = new Promise<void>((resolve) => { ready = resolve; });
+    const requests: string[] = [];
+    let delay = false;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      requests.push(url);
+      const gate = phase === "create" ? url.endsWith("/v1/sandboxes")
+        : phase === "retry" ? url.endsWith("/initialization/retry") : url.endsWith("/api/ping");
+      if (delay && gate) {
+        ready();
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 180_000);
+          init.signal!.addEventListener("abort", () => { clearTimeout(timer); reject(init.signal!.reason); }, { once: true });
+        });
+      }
+      if (url.endsWith("/v1/sandboxes")) return Response.json({ sandbox: { lifecycle: { status: "ready" } } });
+      return ok();
+    });
+    const adapter = new BelljarSandbox({ baseUrl: "http://belljar", sessionId: "ready", startupManaged: true, logger: { log() {}, warn() {} } });
+    if (phase !== "create") await adapter.exec("prime", 5_000);
+    requests.length = 0;
+    delay = true;
+    const execution = phase === "retry" ? adapter.retryStartup() : adapter.exec("echo ok", 5_000);
+    const completion = execution.then((value) => ({ value }), (error: unknown) => ({ error }));
+    // Let requests settle without depending on a ping that the old code omits.
+    await vi.advanceTimersByTimeAsync(0);
+    if (phase === "wake") expect(requests.some((url) => url.endsWith("/api/ping"))).toBe(true);
+    await started;
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(await completion).toEqual({ value: phase === "retry" ? undefined : "ok" });
+    if (phase !== "retry") expect(agents.at(-1)!.options).toMatchObject({ headersTimeout: 35_000, bodyTimeout: 35_000 });
+  });
+
+  it("bypasses readiness gating inside the lifecycle callback", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => { urls.push(url); return ok(); });
+    const adapter = new BelljarSandbox({ baseUrl: "http://belljar", sessionId: "initializing", initialization: { bootId: "boot", token: "test-only" } });
+    await adapter.exec("echo ok", 600_000);
+    expect(urls).toHaveLength(1);
+    expect(urls[0]).toMatch(/\/api\/execute$/);
+    expect(agents[0]!.options).toMatchObject({ headersTimeout: 630_000, bodyTimeout: 630_000 });
+  });
+});
+
+it("bounds lifecycle waits with the configured factory budget", async () => {
+  vi.useFakeTimers();
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", (url: string, init: RequestInit) => {
+    urls.push(url);
+    return new Promise<Response>((_resolve, reject) => {
+      init.signal!.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+    });
+  });
+  const adapter = await sandboxFactory({ sessionId: "bounded", workdir: "/workspace" }, {
+    BELLJAR_URL: "http://belljar", BELLJAR_LIFECYCLE_TIMEOUT_MS: "200000",
+  });
+  let settled = false;
+  const execution = adapter.exec("echo ok", 5_000).catch((error: Error) => error).finally(() => { settled = true; });
+  await vi.advanceTimersByTimeAsync(199_999);
+  expect(settled).toBe(false);
+  expect(agents[0]!.options).toEqual({ headersTimeout: 200_000, bodyTimeout: 200_000 });
+  await vi.advanceTimersByTimeAsync(1);
+  expect(String(await execution)).toContain("HTTP wait expired after 200000ms");
+  expect(urls).toEqual(["http://belljar/v1/sandboxes"]);
+  expect(agents.every((agent) => agent.destroyed)).toBe(true);
+});
+
+it("recreates an expired sandbox when the readiness probe discovers it first", async () => {
+  let exists = false;
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", async (url: string) => {
+    calls.push(url);
+    if (url.endsWith("/v1/sandboxes")) { exists = true; return ok(); }
+    if (!exists) return Response.json({ code: "SANDBOX_NOT_FOUND" }, { status: 404 });
+    return ok();
+  });
+  const adapter = new BelljarSandbox({ baseUrl: "http://belljar", sessionId: "expired", logger: { log() {}, warn() {} } });
+  await adapter.exec("prime");
+  exists = false;
+  await expect(adapter.exec("echo ok", 5_000)).resolves.toBe("ok");
+  expect(calls.filter((url) => url.endsWith("/v1/sandboxes"))).toHaveLength(2);
+  expect(calls.slice(-3).map((url) => url.split("/").slice(-2).join("/"))).toEqual(["v1/sandboxes", "api/ping", "api/execute"]);
+});
+
+it.each(["exec", "process"])("does not dispatch %s while readiness reports failed startup", async (operation) => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", async (url: string) => {
+    urls.push(url);
+    return url.endsWith("/api/ping")
+      ? Response.json({ code: "INITIALIZATION_FAILED" }, { status: 503 }) : ok();
+  });
+  const adapter = new BelljarSandbox({ baseUrl: "http://belljar", sessionId: "failed", logger: { log() {}, warn() {} } });
+  await expect(operation === "exec" ? adapter.exec("echo ok", 5_000) : adapter.runtimeFetch("/api/process/id")).rejects.toThrow(/readiness failed: 503/);
+  expect(urls).toEqual(["http://belljar/v1/sandboxes", "http://belljar/v1/sandboxes/oma-failed/api/ping"]);
+});
+
+it("initialization process handles bypass readiness gating", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", async (url: string) => { urls.push(url); return ok(); });
+  const adapter = new BelljarSandbox({ baseUrl: "http://belljar", sessionId: "initializing", initialization: { bootId: "boot", token: "test-only" } });
+  await adapter.runtimeFetch("/api/process/id");
+  expect(urls).toEqual(["http://belljar/v1/sandboxes/oma-initializing/api/process/id"]);
+});
+
+it.each(["not-a-number", "0", "2147483648"])("rejects invalid lifecycle environment value %s before network activity", async (value) => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  await expect(sandboxFactory({ sessionId: "invalid", workdir: "/workspace" }, {
+    BELLJAR_URL: "http://belljar", BELLJAR_LIFECYCLE_TIMEOUT_MS: value,
+  })).rejects.toThrow(/lifecycle timeout must be a positive integer/);
+  expect(fetch).not.toHaveBeenCalled();
 });

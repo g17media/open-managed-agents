@@ -517,6 +517,7 @@ export async function buildTools(
         "Execute a bash command in the sandbox. Returns exit code + stdout/stderr. " +
         "Command timeout defaults to 120s, max 600s. Timeout cancellation and partial output " +
         "depend on the sandbox provider. Belljar allows an additional 30s for the HTTP response; " +
+        "container provisioning/wake has a separate bounded readiness wait. " +
         "after a timeout it switches shells, but the old command may still be running. " +
         "Check processes/output before retrying. For long-running work, run the " +
         "command yourself with `nohup ... &` writing to a file, then poll the file with " +

@@ -88,6 +88,18 @@ describe("Built-in tool execution", () => {
     expect(capturedTimeout).toBe(expected);
   });
 
+  it("bash exposes the uncertain execution warning to the model after an HTTP timeout", async () => {
+    const sandbox = {
+      exec: async () => { throw new Error("Belljar HTTP wait expired. The command MAY STILL BE RUNNING in the sandbox. Subsequent execs use a fresh shell."); },
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.bash.execute({ command: "sleep 999", timeout: 600000 }, TOOL_EXEC_OPTS);
+    expect(result).toContain("MAY STILL BE RUNNING");
+    expect(result).toContain("fresh shell");
+  });
+
   it("bash tool uses bounded exec even when the sandbox exposes background processes", async () => {
     let capturedTimeout: number | undefined;
     let startProcessCalls = 0;

@@ -156,13 +156,24 @@ dir>` on OMA when it runs in a container (see `.env.example`).
 up to 600 seconds. OMA passes that command limit unchanged to the container and
 allows another 30 seconds for the HTTP response, including its body. Both HTTP
 headers and body timeouts are configured explicitly, so Node's default
-five-minute headers timeout does not cut short a ten-minute command. Other
-Belljar requests (files, processes, git checkout and ping) have a 120-second
-HTTP deadline.
+five-minute headers timeout does not cut short a ten-minute command. Once the
+container is ready, file, process, git checkout and keepalive ping requests
+have a 120-second HTTP deadline.
+
+Provisioning and wake/startup use a separate bounded wait, so they cannot
+consume a short command's execution budget. OMA probes readiness before each
+runtime operation; initialization callbacks bypass that probe to avoid waiting
+on their own startup. Creation, startup retry and these readiness probes default
+to 1,350 seconds (600s image pull + 120s readiness + 600s startup + 30s grace).
+Set `BELLJAR_LIFECYCLE_TIMEOUT_MS` on OMA to a positive integer in milliseconds
+if your Belljar limits or resource preparation need a different budget (maximum
+2,147,483,647). This changes OMA's lifecycle wait, not Belljar's server settings
+or the command timeout. A cold/waking operation can therefore take longer than
+its command timeout plus 30 seconds.
 
 OMA uses a named shell and switches to a fresh shell after an execution error
 or transport timeout. Later execs can run in the same workspace without waiting
-behind the stuck shell; OMA does not automatically retry the failed command.
+behind the stuck shell; OMA does not automatically retry a timed-out request.
 The old command **may still be running**: switching shells does not kill it.
 Inspect processes and output before retrying work with side effects. Shell
 state is not preserved across recovery; OMA supplies `/workspace` and the

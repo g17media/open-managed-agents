@@ -1,5 +1,5 @@
 // Exercise the actual extension routes without a live agent or credentials.
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { Hono } from "hono";
 import { buildMemberChatSessionRoutes } from "../src/member-chat-session-routes";
 import { nodeOutputsAdapter } from "../src/lib/node-outputs-adapter";
@@ -40,7 +40,7 @@ test("multipart upload binds scope before returning a receipt and ignores caller
   body.set("scope_id", "foreign");
   const response = await app.request("/v1/sessions/native/input-files", { method: "POST", headers: beta, body });
   expect(response.status).toBe(201);
-  expect(uploads).toEqual([{ scope: { type: "session", id: "native" }, filename: "notes.txt", mimeType: "text/plain;charset=utf-8", content: new TextEncoder().encode("private") }]);
+  expect(uploads).toEqual([{ scope: { type: "session", id: "native" }, filename: "notes.txt", mimeType: "application/octet-stream", content: new TextEncoder().encode("private") }]);
   expect((await app.request("/v1/sessions/foreign/input-files", { method: "POST", headers: beta, body })).status).toBe(404);
   expect(uploads).toHaveLength(1);
 });
