@@ -446,10 +446,16 @@ function managedCoreApplicationFor(context: { var: unknown }) {
   });
 }
 
-const managedAgentsRoutes = buildManagedAgentRoutes((context) => {
-  return managedCoreApplicationFor(context)
-    .port(managedAgentsPortTokens.agents);
-});
+const managedAgentsRoutes = buildManagedAgentRoutes(
+  (context) => managedCoreApplicationFor(context)
+    .port(managedAgentsPortTokens.agents),
+  {
+    skills: (context) => managedSkillsApplicationFor(context as unknown as AppCtx)
+      .port(managedAgentsPortTokens.skills),
+    skillVersions: (context) => managedSkillsApplicationFor(context as unknown as AppCtx)
+      .port(managedAgentsPortTokens.skillVersions),
+  },
+);
 
 const managedEnvironmentsRoutes = buildManagedEnvironmentRoutes((context) => {
   return managedCoreApplicationFor(context)

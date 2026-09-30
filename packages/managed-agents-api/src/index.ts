@@ -41,6 +41,7 @@ export {
   type ManagedSessionOutputView,
 } from "./routes/session-outputs";
 export { buildAgentRoutes } from "./routes/agents";
+export type { AgentSkillBindingSources } from "./routes/agents";
 export { buildCredentialRoutes } from "./routes/credentials";
 export { buildDeploymentRunRoutes } from "./routes/deployment-runs";
 export { buildDeploymentRoutes } from "./routes/deployments";
@@ -77,7 +78,10 @@ export function buildManagedAgentsApi(
   ports: ManagedAgentsApplicationPortSources,
 ): Hono {
   const app = new Hono();
-  app.route("/v1/agents", buildAgentRoutes(ports.agents));
+  app.route("/v1/agents", buildAgentRoutes(ports.agents, {
+    skills: ports.skills,
+    skillVersions: ports.skillVersions,
+  }));
   app.route("/v1/vaults", buildCredentialRoutes(ports.credentials));
   app.route(
     "/v1/deployment_runs",

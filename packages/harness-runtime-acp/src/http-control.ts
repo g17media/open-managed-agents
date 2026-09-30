@@ -53,6 +53,10 @@ export interface ManagedHarnessHttpRecoveryHistoryOptions {
 
 export interface ManagedHarnessHttpSkillSource {
   download(input: { skillId: string; version: string }): Promise<Uint8Array>;
+  resolve(input: { skillId: string; version: string }): Promise<{
+    archive: Uint8Array;
+    version: string;
+  }>;
 }
 
 interface WireEvent {
@@ -355,14 +359,32 @@ export function createManagedHarnessHttpSkillSource(
     scheduler: options.scheduler ?? defaultScheduler,
   });
   const signal = options.signal ?? new AbortController().signal;
-  return {
-    async download(input) {
+  const download = async (input: { skillId: string; version: string }) => {
       const response = await request(
         `/v1/skills/${encodeURIComponent(input.skillId)}/versions/${encodeURIComponent(input.version)}/content`,
         { method: "GET" },
         signal,
       );
       return new Uint8Array(await response.arrayBuffer());
+  };
+  return {
+    download,
+    async resolve(input) {
+      let version = input.version;
+      if (version === "latest") {
+        const response = await request(
+          `/v1/skills/${encodeURIComponent(input.skillId)}/versions?limit=1`,
+          { method: "GET" },
+          signal,
+        );
+        const page = await response.json() as { data?: Array<{ version?: unknown }> };
+        const latest = page.data?.[0]?.version;
+        if (typeof latest !== "string" || latest.length === 0) {
+          throw new Error(`Managed Skill ${input.skillId} has no latest version`);
+        }
+        version = latest;
+      }
+      return { archive: await download({ ...input, version }), version };
     },
   };
 }

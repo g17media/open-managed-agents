@@ -1623,8 +1623,10 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     // managedSessionReminders covers environment context, memory stores and
     // skills (it also mounts the skill archives), so upstream's skill builder
     // would double them up. Appendable prompts are only in upstream's.
+    const managedSkills = managedSkillsPlatform.app({ workspaceId: input.workspaceId });
     const platformReminders = await managedSessionReminders({ ...input,
-      versions: managedSkillsPlatform.app({ workspaceId: input.workspaceId }).port(managedAgentsPortTokens.skillVersions) });
+      skills: managedSkills.port(managedAgentsPortTokens.skills),
+      versions: managedSkills.port(managedAgentsPortTokens.skillVersions) });
     platformReminders.push(...buildNodeManagedAppendablePromptReminders(input.session));
     if (process.env.SANDBOX_PROVIDER === "belljar") platformReminders.push({ source: "sandbox:workspace", text: "The /workspace directory survives container recycling for the sandbox retention period. Store durable results in /mnt/session/outputs and long-term knowledge in /mnt/memory." });
     return {
@@ -2786,12 +2788,20 @@ v1.post("/oma/sessions/:sessionId/runtime-events", async (c) => {
 // Mount route bundles. Same paths CF uses; behavior preserved. Once a tenant
 // has configured model cards, agent model handles must resolve to an active
 // card; an empty card set keeps the legacy ANTHROPIC_API_KEY fallback usable.
-v1.route("/agents", buildManagedAgentRoutes((context) =>
-  managedAgentsPlatform
+v1.route("/agents", buildManagedAgentRoutes(
+  (context) => managedAgentsPlatform
     .app({
       workspaceId: (context.var as { tenant_id: string }).tenant_id,
     })
     .port(managedAgentsPortTokens.agents),
+  {
+    skills: (context) => managedSkillsPlatform.app({
+      workspaceId: (context.var as { tenant_id: string }).tenant_id,
+    }).port(managedAgentsPortTokens.skills),
+    skillVersions: (context) => managedSkillsPlatform.app({
+      workspaceId: (context.var as { tenant_id: string }).tenant_id,
+    }).port(managedAgentsPortTokens.skillVersions),
+  },
 ));
 v1.route("/oma/agents", buildLegacyAgentRoutes({
   services,

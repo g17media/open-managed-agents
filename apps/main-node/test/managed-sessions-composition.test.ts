@@ -49,6 +49,12 @@ CREATE TABLE managed_environments (
   updated_at integer NOT NULL, archived_at integer,
   PRIMARY KEY (workspace_id, id)
 );
+CREATE TABLE managed_skills (
+  workspace_id text NOT NULL, id text NOT NULL, document text NOT NULL,
+  revision integer NOT NULL, source text NOT NULL, created_at integer NOT NULL,
+  updated_at integer NOT NULL,
+  PRIMARY KEY (workspace_id, id)
+);
 `;
 
 const agent: Agent = {
@@ -136,6 +142,72 @@ describe("SqlManagedSessionsComposition", () => {
     expect(second.sessions).toBe(first.sessions);
     expect(other).not.toBe(first);
     expect(other.sessions).not.toBe(first.sessions);
+  });
+
+  it("pins latest custom Skill bindings in the Session snapshot", async () => {
+    const boundAgent = {
+      ...agent,
+      skills: [{ type: "custom" as const, skillId: "skill_01", version: "latest" }],
+    };
+    const skill = {
+      id: "skill_01",
+      displayTitle: null,
+      latestVersion: "1790780609696000",
+      source: "custom",
+      createdAt: agent.createdAt,
+      updatedAt: agent.updatedAt,
+    };
+    await client.prepare("UPDATE managed_agents SET document = ? WHERE workspace_id = ? AND id = ?")
+      .bind(JSON.stringify(boundAgent), "workspace_01", agent.id).run();
+    await client.prepare(
+      `INSERT INTO managed_skills
+        (workspace_id, id, document, revision, source, created_at, updated_at)
+       VALUES (?, ?, ?, 1, ?, ?, ?)`,
+    ).bind(
+      "workspace_01",
+      skill.id,
+      JSON.stringify(skill),
+      skill.source,
+      Date.parse(skill.createdAt),
+      Date.parse(skill.updatedAt),
+    ).run();
+    const composition = new SqlManagedSessionsComposition({
+      client,
+      environments: new SqlSessionEnvironmentSource(client),
+      lifecycle: {
+        sessionStarted: async () => {},
+        sessionStopped: async () => {},
+      },
+      runtime: {
+        sessionEventsAccepted: async () => {},
+        sessionThreadArchived: async () => {},
+        subscribe: () => (async function* () {})(),
+      },
+      sealer: { seal: async (value) => `sealed:${value}` },
+      clock: { now: () => new Date("2026-08-26T01:00:00.000Z") },
+      ids: {
+        nextSessionId: () => "session_skill",
+        nextEventId: () => "sevt_01",
+        nextOutcomeId: () => "outc_01",
+        nextResourceId: () => "sesrsc_01",
+      },
+    });
+
+    await expect(composition.portsFor("workspace_01").sessions.createSession({
+      agent: { type: "latest", agentId: agent.id },
+      environmentId: environment.id,
+    })).resolves.toMatchObject({
+      type: "created",
+      session: {
+        agent: {
+          skills: [{
+            type: "custom",
+            skillId: "skill_01",
+            version: "1790780609696000",
+          }],
+        },
+      },
+    });
   });
 
   it("uses an explicitly composed event stream independently from runtime dispatch", async () => {

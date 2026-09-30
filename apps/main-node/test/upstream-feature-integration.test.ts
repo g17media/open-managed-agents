@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { unzipSync } from "fflate";
+import { unzipSync, zipSync } from "fflate";
 import { SqlCredentialStore } from "@open-managed-agents/credential-store-sql";
 import { SqlDeploymentStore } from "@open-managed-agents/deployment-store-sql";
 import { SqlDeploymentRunStore } from "@open-managed-agents/deployment-run-store-sql";
@@ -22,7 +22,7 @@ import { InMemoryMemoryDocumentStore } from "../../../packages/memory-document-s
 import { credentialCreateBodySchema, credentialUpdateBodySchema } from "../../../packages/managed-agents-api/src/contracts/credentials";
 import { toCreateCredentialCommand, toUpdateCredentialCommand, toCredentialResponse } from "../../../packages/managed-agents-api/src/mappers/credentials";
 import { ManagedMemoryFiles } from "../src/lib/managed-memory-files";
-import { mountManagedSessionResources, promoteManagedSessionOutputs } from "../src/lib/managed-session-preparation";
+import { managedSessionReminders, mountManagedSessionResources, promoteManagedSessionOutputs } from "../src/lib/managed-session-preparation";
 import { bootstrapTestDb, type TestDb } from "./_helpers/bootstrap-test-db";
 
 const workspaceId = "workspace_test";
@@ -157,6 +157,95 @@ describe("fork features using upstream application and SQL stores", () => {
 });
 
 describe("native session filesystem persistence", () => {
+  it("resolves a stored latest Skill binding before preparation", async () => {
+    const writes = new Map<string, Uint8Array>();
+    const sandbox = {
+      exec: async () => "",
+      writeFileBytes: async (path: string, content: Uint8Array) => {
+        writes.set(path, content);
+      },
+    } as unknown as SandboxPort;
+    const session = {
+      agent: {
+        ...agent,
+        skills: [{ type: "custom", skillId: "skill_test", version: "latest" }],
+      },
+      resources: [],
+    } as unknown as Session;
+    const archive = zipSync({
+      "repository-guide/SKILL.md": new TextEncoder().encode("Use rg first."),
+    });
+    const retrieveSkillVersion = vi.fn(async () => ({
+      type: "found" as const,
+      version: {
+        id: "skv_test",
+        skillId: "skill_test",
+        version: "1790780609696000",
+        name: "repository-guide",
+        directory: "repository-guide",
+        description: "Repository guide",
+        createdAt: timestamp,
+      },
+    }));
+    const downloadSkillVersion = vi.fn(async () => ({
+      type: "found" as const,
+      file: { content: archive, filename: "repository-guide.zip", mimeType: "application/zip" },
+    }));
+
+    await expect(managedSessionReminders({
+      session,
+      environment,
+      sandbox,
+      skills: {
+        retrieveSkill: async () => ({
+          type: "found" as const,
+          skill: {
+            id: "skill_test",
+            source: "custom",
+            displayTitle: null,
+            latestVersion: "1790780609696000",
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+        }),
+      },
+      versions: {
+        retrieveSkillVersion,
+        downloadSkillVersion,
+      } as never,
+    })).resolves.toEqual([expect.objectContaining({
+      source: "skill:skill_test",
+      text: expect.stringContaining("Use rg first."),
+    })]);
+    expect(retrieveSkillVersion).toHaveBeenCalledWith({
+      skillId: "skill_test",
+      version: "1790780609696000",
+    });
+    expect(downloadSkillVersion).toHaveBeenCalledWith({
+      skillId: "skill_test",
+      version: "1790780609696000",
+    });
+    expect([...writes.keys()].join("\n")).not.toContain("/latest/");
+  });
+
+  it("reports a Skill deleted after Agent creation during preparation", async () => {
+    const session = {
+      agent: {
+        ...agent,
+        skills: [{ type: "custom", skillId: "skill_deleted", version: "latest" }],
+      },
+      resources: [],
+    } as unknown as Session;
+
+    await expect(managedSessionReminders({
+      session,
+      environment,
+      sandbox: { exec: async () => "" } as unknown as SandboxPort,
+      skills: { retrieveSkill: async () => ({ type: "not_found" as const }) },
+      versions: {} as never,
+    })).rejects.toThrow("Skill skill_deleted metadata is missing");
+  });
+
   it("preserves edits to an attached file between turns and after reconnecting to a restored workspace", async () => {
     const writes = new Map<string, Uint8Array>();
     const downloadFile = vi.fn(async () => ({ type: "found", file: { content: new Uint8Array([0, 255, 128]) } }));

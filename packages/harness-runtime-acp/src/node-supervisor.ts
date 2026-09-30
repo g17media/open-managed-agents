@@ -363,11 +363,12 @@ async function materializeSkills(input: {
 }): Promise<string> {
   const manifests: string[] = [];
   for (const skill of input.skills) {
-    const archive = unzipSync(await input.source.download({
+    const resolved = await input.source.resolve({
       skillId: skill.skill_id,
       version: skill.version,
-    }));
-    const root = `/workspace/.openma/skills/${encodeURIComponent(skill.skill_id)}/${encodeURIComponent(skill.version)}`;
+    });
+    const archive = unzipSync(resolved.archive);
+    const root = `/workspace/.openma/skills/${encodeURIComponent(skill.skill_id)}/${encodeURIComponent(resolved.version)}`;
     let foundManifest = false;
     for (const [rawPath, content] of Object.entries(archive)) {
       if (rawPath.endsWith("/")) continue;
@@ -376,13 +377,13 @@ async function materializeSkills(input: {
       if (posix.basename(path) === "SKILL.md") {
         foundManifest = true;
         manifests.push(
-          `- ${skill.skill_id}@${skill.version}: ${root}/${path}`,
+          `- ${skill.skill_id}@${resolved.version}: ${root}/${path}`,
         );
       }
     }
     if (!foundManifest) {
       throw new Error(
-        `Managed Skill ${skill.skill_id}@${skill.version} archive has no SKILL.md`,
+        `Managed Skill ${skill.skill_id}@${resolved.version} archive has no SKILL.md`,
       );
     }
   }

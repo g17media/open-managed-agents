@@ -475,6 +475,31 @@ describe("Managed harness HTTP control channel", () => {
     expect(request.headers.get("authorization")).toBe("Bearer session-token");
   });
 
+  it("resolves latest before downloading a skill archive", async () => {
+    const fetch = vi.fn(async (
+      input: Parameters<typeof globalThis.fetch>[0],
+      init?: RequestInit,
+    ) => {
+      const request = new Request(input, init);
+      return request.url.includes("?limit=1")
+        ? json({ data: [{ version: "42" }], next_page: null })
+        : new Response(Uint8Array.of(4, 2));
+    });
+    const source = createManagedHarnessHttpSkillSource({
+      apiBaseUrl: "https://api.openma.test/",
+      sessionsToken: "session-token",
+      fetch,
+    });
+
+    await expect(source.resolve({ skillId: "skill-1", version: "latest" }))
+      .resolves.toEqual({ version: "42", archive: Uint8Array.of(4, 2) });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(new Request(fetch.mock.calls[0]![0], fetch.mock.calls[0]![1]).url)
+      .toBe("https://api.openma.test/v1/skills/skill-1/versions?limit=1");
+    expect(new Request(fetch.mock.calls[1]![0], fetch.mock.calls[1]![1]).url)
+      .toBe("https://api.openma.test/v1/skills/skill-1/versions/42/content");
+  });
+
   it("maps every canonical user input shape and ignores an idle interrupt", async () => {
     let eventRequest = 0;
     const fetch = vi.fn(async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
