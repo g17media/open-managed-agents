@@ -15,8 +15,14 @@ export interface ResolveSessionAgent {
   agent: SessionAgent;
 }
 
+export type ResolveSessionAgentResult =
+  | { type: "resolved"; agent: SessionAgent }
+  | { type: "dependency_not_found"; message: string };
+
 export interface SessionAgentSourcePort {
   findCurrent(input: FindSessionAgent): Promise<Agent | null>;
   findVersion(input: FindSessionAgentVersion): Promise<Agent | null>;
-  resolveSessionAgent?(input: ResolveSessionAgent): Promise<SessionAgent>;
+  resolveSessionAgent?(
+    input: ResolveSessionAgent,
+  ): Promise<ResolveSessionAgentResult>;
 }

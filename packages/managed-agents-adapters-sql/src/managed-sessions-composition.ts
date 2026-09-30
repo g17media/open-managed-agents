@@ -6,6 +6,7 @@ import {
   type Session,
   type SessionAgent,
   type Agent,
+  type ResolveSessionAgentResult,
   type SessionAgentSourcePort,
   type SessionEventsApplicationPort,
   type SessionResourcesApplicationPort,
@@ -177,45 +178,85 @@ class ConcreteSkillSessionAgentSource implements SessionAgentSourcePort {
     private readonly skills: SqlSkillStore,
   ) {}
 
-  private resolve<T extends Pick<Agent, "skills">>(
+  private async resolveSkills(
     workspaceId: string,
-    agent: T,
-  ): Promise<T>;
-  private resolve<T extends Pick<Agent, "skills">>(
-    workspaceId: string,
-    agent: T | null,
-  ): Promise<T | null>;
-  private async resolve<T extends Pick<Agent, "skills">>(
-    workspaceId: string,
-    agent: T | null,
-  ): Promise<T | null> {
-    if (agent === null) return null;
-    const skills = await Promise.all(agent.skills.map(async (binding) => {
-      if (binding.type !== "custom" || binding.version !== "latest") return binding;
+    bindings: Agent["skills"],
+  ): Promise<
+    | { type: "resolved"; skills: Agent["skills"] }
+    | { type: "dependency_not_found"; message: string }
+  > {
+    const skills: Agent["skills"] = [];
+    for (const binding of bindings) {
+      if (binding.type !== "custom" || binding.version !== "latest") {
+        skills.push(binding);
+        continue;
+      }
       const skill = await this.skills.findSkill({
         workspaceId,
         skillId: binding.skillId,
       });
-      return skill?.skill.latestVersion === null || skill === null
-        ? binding
-        : { ...binding, version: skill.skill.latestVersion };
-    }));
-    return { ...agent, skills };
+      if (skill === null) {
+        return {
+          type: "dependency_not_found",
+          message: `Skill ${binding.skillId} was not found`,
+        };
+      }
+      if (skill.skill.latestVersion === null) {
+        return {
+          type: "dependency_not_found",
+          message: `Skill ${binding.skillId} has no latest version`,
+        };
+      }
+      skills.push({ ...binding, version: skill.skill.latestVersion });
+    }
+    return { type: "resolved", skills };
   }
 
   findCurrent(input: { workspaceId: string; agentId: string }): Promise<Agent | null> {
-    return this.agents.findCurrent(input).then((agent) => this.resolve(input.workspaceId, agent));
+    return this.agents.findCurrent(input);
   }
 
   findVersion(input: { workspaceId: string; agentId: string; version: number }): Promise<Agent | null> {
-    return this.agents.findVersion(input).then((agent) => this.resolve(input.workspaceId, agent));
+    return this.agents.findVersion(input);
   }
 
   resolveSessionAgent(input: {
     workspaceId: string;
     agent: SessionAgent;
-  }): Promise<SessionAgent> {
-    return this.resolve(input.workspaceId, input.agent);
+  }): Promise<ResolveSessionAgentResult> {
+    return this.resolveSessionAgentSnapshot(input);
+  }
+
+  private async resolveSessionAgentSnapshot(input: {
+    workspaceId: string;
+    agent: SessionAgent;
+  }): Promise<ResolveSessionAgentResult> {
+    const topLevel = await this.resolveSkills(input.workspaceId, input.agent.skills);
+    if (topLevel.type === "dependency_not_found") return topLevel;
+    if (input.agent.multiagent === null) {
+      return {
+        type: "resolved",
+        agent: { ...input.agent, skills: topLevel.skills },
+      };
+    }
+    const roster: NonNullable<SessionAgent["multiagent"]>["agents"] = [];
+    for (const member of input.agent.multiagent.agents) {
+      if (member.type === "advisor") {
+        roster.push(member);
+        continue;
+      }
+      const resolved = await this.resolveSkills(input.workspaceId, member.skills);
+      if (resolved.type === "dependency_not_found") return resolved;
+      roster.push({ ...member, skills: resolved.skills });
+    }
+    return {
+      type: "resolved",
+      agent: {
+        ...input.agent,
+        skills: topLevel.skills,
+        multiagent: { ...input.agent.multiagent, agents: roster },
+      },
+    };
   }
 }
 
