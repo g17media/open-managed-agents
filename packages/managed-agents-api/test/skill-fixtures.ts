@@ -37,6 +37,9 @@ export function makeSkillsPort(
     listSkills: async () => {
       throw new Error("unexpected listSkills application port call");
     },
+    updateSkill: async () => {
+      throw new Error("unexpected updateSkill application port call");
+    },
     deleteSkill: async () => {
       throw new Error("unexpected deleteSkill application port call");
     },

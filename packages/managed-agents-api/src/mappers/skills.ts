@@ -6,6 +6,7 @@ import type {
   RetrieveSkillQuery,
   SkillUploadFileInput,
   SkillView,
+  UpdateSkillCommand,
 } from "../ports/skills";
 
 export function toSkillUploadFiles(
@@ -46,6 +47,13 @@ export function toDeleteSkillCommand(skillId: string): DeleteSkillCommand {
   return { skillId };
 }
 
+export function toUpdateSkillCommand(
+  skillId: string,
+  displayTitle: string | null,
+): UpdateSkillCommand {
+  return { skillId, displayTitle };
+}
+
 export function toSkillResponse(skill: SkillView): object {
   return {
     ...(skill.githubSource !== undefined && { github_source: {
@@ -55,7 +63,7 @@ export function toSkillResponse(skill: SkillView): object {
     } }),
     id: skill.id,
     created_at: skill.createdAt,
-    display_title: skill.displayTitle,
+    display_title: skill.displayTitle?.trim() || skill.id,
     latest_version: skill.latestVersion,
     source: skill.source,
     type: "skill",

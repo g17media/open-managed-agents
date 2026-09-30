@@ -163,6 +163,34 @@ describe("MemorySkillStore", () => {
     })).resolves.toBeNull();
   });
 
+  it("replaces Skill metadata without changing versions", async () => {
+    const store = new MemorySkillStore();
+    const current = skill();
+    const initial = version("1756202400000000", "skv_01", current.createdAt);
+    await store.insertWithInitialVersion({
+      workspaceId: "workspace_01",
+      skill: current,
+      version: initial,
+      archive: archive("first"),
+    });
+    const renamed = { ...current, displayTitle: "Renamed", updatedAt: "2026-08-26T11:00:00.000Z" };
+
+    await expect(store.replaceSkill({
+      workspaceId: "workspace_01",
+      skillId: current.id,
+      expectedSkillRevision: 1,
+      nextSkill: renamed,
+    })).resolves.toEqual({
+      type: "replaced",
+      skill: { skill: renamed, revision: 2 },
+    });
+    await expect(store.listVersions({
+      workspaceId: "workspace_01",
+      skillId: current.id,
+      limit: 10,
+    })).resolves.toHaveLength(1);
+  });
+
   it("deletes a Version with its latest pointer under CAS and cascades Skill deletion", async () => {
     const store = new MemorySkillStore();
     const firstSkill = skill();

@@ -40,6 +40,11 @@ export interface DeleteSkillCommand {
   skillId: string;
 }
 
+export interface UpdateSkillCommand {
+  skillId: string;
+  displayTitle: string | null;
+}
+
 export type CreateSkillResult =
   | { type: "created"; skill: SkillView }
   | { type: "invalid_request"; message: string };
@@ -56,9 +61,15 @@ export type DeleteSkillResult =
   | { type: "deleted"; skillId: string }
   | { type: "not_found" };
 
+export type UpdateSkillResult =
+  | { type: "updated"; skill: SkillView }
+  | { type: "not_found" }
+  | { type: "version_conflict"; message: string };
+
 export interface SkillsApplicationPort {
   createSkill(command: CreateSkillCommand): Promise<CreateSkillResult>;
   retrieveSkill(query: RetrieveSkillQuery): Promise<RetrieveSkillResult>;
   listSkills(query: ListSkillsQuery): Promise<ListSkillsResult>;
+  updateSkill(command: UpdateSkillCommand): Promise<UpdateSkillResult>;
   deleteSkill(command: DeleteSkillCommand): Promise<DeleteSkillResult>;
 }

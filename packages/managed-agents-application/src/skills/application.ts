@@ -10,6 +10,8 @@ import type {
   RetrieveSkillQuery,
   RetrieveSkillResult,
   SkillsApplicationPort,
+  UpdateSkillCommand,
+  UpdateSkillResult,
 } from "../ports/skills";
 import type { SkillPackageCompilerPort } from "./package-compiler";
 
@@ -91,7 +93,7 @@ export class SkillsApplicationService implements SkillsApplicationPort {
       ...(command.githubSource !== undefined && { githubSource: structuredClone(command.githubSource) }),
       id: skillId,
       createdAt: timestamp,
-      displayTitle: command.displayTitle ?? null,
+      displayTitle: command.displayTitle?.trim() || compiled.package.name,
       latestVersion: versionValue,
       source: "custom",
       updatedAt: timestamp,
@@ -123,7 +125,7 @@ export class SkillsApplicationService implements SkillsApplicationPort {
     });
     return record === null
       ? { type: "not_found" }
-      : { type: "found", skill: record.skill };
+      : { type: "found", skill: await this.withDisplayTitle(record.skill) };
   }
 
   async listSkills(query: ListSkillsQuery): Promise<ListSkillsResult> {
@@ -150,10 +152,41 @@ export class SkillsApplicationService implements SkillsApplicationPort {
     return {
       type: "page",
       page: {
-        skills: visible.map((record) => record.skill),
+        skills: await Promise.all(visible.map((record) =>
+          this.withDisplayTitle(record.skill))),
         nextCursor:
           hasMore && last !== undefined ? encodeSkillCursor(last.skill) : null,
       },
+    };
+  }
+
+  async updateSkill(command: UpdateSkillCommand): Promise<UpdateSkillResult> {
+    const current = await this.dependencies.store.findSkill({
+      workspaceId: this.dependencies.workspaceId,
+      skillId: command.skillId,
+    });
+    if (current === null) return { type: "not_found" };
+    const next = {
+      ...current.skill,
+      displayTitle: command.displayTitle,
+      updatedAt: this.dependencies.clock.now().toISOString(),
+    };
+    const result = await this.dependencies.store.replaceSkill({
+      workspaceId: this.dependencies.workspaceId,
+      skillId: command.skillId,
+      expectedSkillRevision: current.revision,
+      nextSkill: next,
+    });
+    if (result.type === "not_found") return result;
+    if (result.type === "revision_conflict") {
+      return {
+        type: "version_conflict",
+        message: `Skill changed concurrently at revision ${result.actualRevision}`,
+      };
+    }
+    return {
+      type: "updated",
+      skill: await this.withDisplayTitle(result.skill.skill),
     };
   }
 
@@ -165,5 +198,20 @@ export class SkillsApplicationService implements SkillsApplicationPort {
     return result.type === "not_found"
       ? result
       : { type: "deleted", skillId: command.skillId };
+  }
+
+  private async withDisplayTitle(skill: Skill): Promise<Skill> {
+    if (skill.displayTitle?.trim()) return skill;
+    const version = skill.latestVersion === null
+      ? null
+      : await this.dependencies.store.findVersion({
+          workspaceId: this.dependencies.workspaceId,
+          skillId: skill.id,
+          version: skill.latestVersion,
+        });
+    return {
+      ...skill,
+      displayTitle: version?.version.name || skill.id,
+    };
   }
 }
