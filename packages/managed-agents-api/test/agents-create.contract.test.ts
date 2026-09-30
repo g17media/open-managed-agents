@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { AgentView } from "../src/index";
 import { agentView, agentWire, makeAgentsPort } from "./fixtures";
+import {
+  makeSkillsPort,
+  makeSkillVersionsPort,
+  skillVersionView,
+  skillView,
+} from "./skill-fixtures";
 import { buildAgentsTestApi } from "./test-api";
 
 describe("Managed Agents API — POST /v1/agents", () => {
@@ -136,6 +142,28 @@ describe("Managed Agents API — POST /v1/agents", () => {
           return { type: "created", agent: agentView };
         },
       }),
+      {
+        skills: makeSkillsPort({
+          retrieveSkill: async () => ({
+            type: "found",
+            skill: {
+              ...skillView,
+              id: "skill_review",
+              latestVersion: "3",
+            },
+          }),
+        }),
+        skillVersions: makeSkillVersionsPort({
+          retrieveSkillVersion: async () => ({
+            type: "found",
+            version: {
+              ...skillVersionView,
+              skillId: "skill_review",
+              version: "3",
+            },
+          }),
+        }),
+      },
     );
 
     const response = await api.request("/v1/agents", {
