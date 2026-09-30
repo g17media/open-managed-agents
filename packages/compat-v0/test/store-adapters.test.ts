@@ -207,6 +207,13 @@ const skillPersistence = {
   }),
   findSkill: async () => null,
   listSkills: async () => [],
+  replaceSkill: async (input) => ({
+    type: "replaced" as const,
+    skill: {
+      skill: input.nextSkill,
+      revision: input.expectedSkillRevision + 1,
+    },
+  }),
   deleteSkill: async () => ({ type: "not_found" as const }),
   findVersion: async () => null,
   listVersions: async () => [],
@@ -239,6 +246,27 @@ const vaultPersistence = {
 } satisfies VaultStore;
 
 describe("v0 Store compatibility", () => {
+  it("forwards Skill metadata replacement through the identity adapter", async () => {
+    const nextSkill = {
+      id: "skill_01",
+      createdAt: "2026-08-26T00:00:00.000Z",
+      displayTitle: "Renamed skill",
+      latestVersion: "1756202400000000",
+      source: "custom" as const,
+      updatedAt: "2026-08-26T01:00:00.000Z",
+    };
+
+    await expect(skillStoreFromV0(skillPersistence).replaceSkill({
+      workspaceId: "workspace_01",
+      skillId: nextSkill.id,
+      expectedSkillRevision: 4,
+      nextSkill,
+    })).resolves.toEqual({
+      type: "replaced",
+      skill: { skill: nextSkill, revision: 5 },
+    });
+  });
+
   it("adapts old structural persistence implementations without copying", () => {
     expect(agentStoreFromV0(agentPersistence)).toBe(agentPersistence);
     expect(credentialStoreFromV0(credentialPersistence)).toBe(
