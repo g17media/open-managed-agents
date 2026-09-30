@@ -927,6 +927,11 @@ export function createManagedApiClient(
           "/v1/skills",
           multipart(params.files, { display_title: params.display_title }),
         ),
+      update: (skillId: string, params: { display_title: string | null }) =>
+        request<SkillRetrieveResponse>(
+          `/v1/skills/${id(skillId)}`,
+          json(params),
+        ),
       delete: (skillId: string) =>
         request<SkillDeleteResponse>(`/v1/skills/${id(skillId)}`, {
           method: "DELETE",

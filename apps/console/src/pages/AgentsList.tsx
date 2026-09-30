@@ -5,6 +5,7 @@ import { ArchiveIcon, PencilIcon } from "lucide-react";
 import { useApi } from "../lib/api";
 import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { useManagedApi } from "../lib/useManagedApi";
+import { skillDisplayName } from "../lib/skills";
 import { DataTable, type ColumnDef } from "../components/DataTable";
 import { FacetedFilter } from "../components/FacetedFilter";
 import { FilterChip, CreatedFilterChip } from "../components/FilterChip";
@@ -102,7 +103,7 @@ export function AgentsList() {
           setCustomSkills(
             (sk.data ?? []).map((skill) => ({
               id: skill.id,
-              name: skill.display_title || skill.id,
+              name: skillDisplayName(skill),
               description: "",
             })),
           );
