@@ -4,6 +4,7 @@ import {
   type Environment,
   type DeploymentSessionLauncherPort,
   type Session,
+  type SessionAgent,
   type Agent,
   type SessionAgentSourcePort,
   type SessionEventsApplicationPort,
@@ -176,7 +177,18 @@ class ConcreteSkillSessionAgentSource implements SessionAgentSourcePort {
     private readonly skills: SqlSkillStore,
   ) {}
 
-  private async resolve(workspaceId: string, agent: Agent | null): Promise<Agent | null> {
+  private resolve<T extends Pick<Agent, "skills">>(
+    workspaceId: string,
+    agent: T,
+  ): Promise<T>;
+  private resolve<T extends Pick<Agent, "skills">>(
+    workspaceId: string,
+    agent: T | null,
+  ): Promise<T | null>;
+  private async resolve<T extends Pick<Agent, "skills">>(
+    workspaceId: string,
+    agent: T | null,
+  ): Promise<T | null> {
     if (agent === null) return null;
     const skills = await Promise.all(agent.skills.map(async (binding) => {
       if (binding.type !== "custom" || binding.version !== "latest") return binding;
@@ -197,6 +209,13 @@ class ConcreteSkillSessionAgentSource implements SessionAgentSourcePort {
 
   findVersion(input: { workspaceId: string; agentId: string; version: number }): Promise<Agent | null> {
     return this.agents.findVersion(input).then((agent) => this.resolve(input.workspaceId, agent));
+  }
+
+  resolveSessionAgent(input: {
+    workspaceId: string;
+    agent: SessionAgent;
+  }): Promise<SessionAgent> {
+    return this.resolve(input.workspaceId, input.agent);
   }
 }
 
