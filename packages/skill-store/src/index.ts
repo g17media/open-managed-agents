@@ -87,12 +87,23 @@ export type DeleteSkillRecordResult =
   | { type: "deleted" }
   | { type: "not_found" };
 
+export interface ReplaceSkillRecord extends SkillLocation {
+  expectedSkillRevision: number;
+  nextSkill: Skill;
+}
+
+export type ReplaceSkillRecordResult =
+  | { type: "replaced"; skill: StoredSkill }
+  | { type: "not_found" }
+  | { type: "revision_conflict"; actualRevision: number };
+
 export interface SkillStore {
   insertWithInitialVersion(
     input: InsertSkillWithInitialVersion,
   ): Promise<InsertedSkillWithInitialVersion>;
   findSkill(input: SkillLocation): Promise<StoredSkill | null>;
   listSkills(input: ListSkillRecords): Promise<StoredSkill[]>;
+  replaceSkill(input: ReplaceSkillRecord): Promise<ReplaceSkillRecordResult>;
   deleteSkill(input: SkillLocation): Promise<DeleteSkillRecordResult>;
   findVersion(input: SkillVersionLocation): Promise<StoredSkillVersion | null>;
   listVersions(input: ListSkillVersionRecords): Promise<StoredSkillVersion[]>;

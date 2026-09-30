@@ -10,6 +10,8 @@ import type {
   InsertSkillWithInitialVersion,
   ListSkillRecords,
   ListSkillVersionRecords,
+  ReplaceSkillRecord,
+  ReplaceSkillRecordResult,
   SkillLocation,
   SkillStore,
   SkillVersionLocation,
@@ -123,6 +125,24 @@ export class MemorySkillStore implements SkillStore {
       if (versionKey.startsWith(prefix)) this.versions.delete(versionKey);
     }
     return { type: "deleted" };
+  }
+
+  async replaceSkill(input: ReplaceSkillRecord): Promise<ReplaceSkillRecordResult> {
+    if (input.nextSkill.id !== input.skillId) {
+      throw new Error("Replacement Skill ID does not match the target");
+    }
+    const key = this.skillKey(input);
+    const current = this.skills.get(key);
+    if (current === undefined) return { type: "not_found" };
+    if (current.revision !== input.expectedSkillRevision) {
+      return { type: "revision_conflict", actualRevision: current.revision };
+    }
+    const skill = {
+      skill: clone(input.nextSkill),
+      revision: current.revision + 1,
+    };
+    this.skills.set(key, skill);
+    return { type: "replaced", skill: clone(skill) };
   }
 
   async findVersion(

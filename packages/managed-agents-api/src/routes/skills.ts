@@ -9,8 +9,9 @@ import {
   skillListQuerySchema,
   skillPageResponseSchema,
   skillResponseSchema,
+  skillUpdateBodySchema,
 } from "../contracts/skills";
-import { apiError, invalidRequest, notFound } from "../errors";
+import { apiError, conflict, invalidRequest, notFound } from "../errors";
 import {
   toCreateSkillCommand,
   toDeleteSkillCommand,
@@ -18,6 +19,7 @@ import {
   toRetrieveSkillQuery,
   toSkillResponse,
   toSkillUploadFiles,
+  toUpdateSkillCommand,
 } from "../mappers/skills";
 import type { SkillsApplicationPort } from "../ports/skills";
 
@@ -104,6 +106,42 @@ export function buildSkillRoutes(
     );
     if (result.type === "not_found") {
       return c.json(notFound(`Skill ${c.req.param("skillId")} was not found`), 404);
+    }
+    const response = skillResponseSchema.safeParse(toSkillResponse(result.skill));
+    if (!response.success) {
+      return c.json(apiError("Application returned an invalid skill"), 500);
+    }
+    return c.json(response.data, 200);
+  });
+
+  app.post("/:skillId", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(invalidRequest("Request body must be valid JSON"), 400);
+    }
+    const parsed = skillUpdateBodySchema.safeParse(body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      return c.json(invalidRequest(
+        `Invalid request field ${issue?.path.join(".") || "body"}: ${issue?.message ?? "invalid value"}`,
+      ), 400);
+    }
+    const displayTitle = parsed.data.display_title?.trim() || null;
+    if (displayTitle !== null && displayTitle.length > 255) {
+      return c.json(invalidRequest(
+        "Request field display_title must contain at most 255 characters",
+      ), 400);
+    }
+    const result = await resolveApplicationPort(source, c).updateSkill(
+      toUpdateSkillCommand(c.req.param("skillId"), displayTitle),
+    );
+    if (result.type === "not_found") {
+      return c.json(notFound(`Skill ${c.req.param("skillId")} was not found`), 404);
+    }
+    if (result.type === "version_conflict") {
+      return c.json(conflict(result.message), 409);
     }
     const response = skillResponseSchema.safeParse(toSkillResponse(result.skill));
     if (!response.success) {

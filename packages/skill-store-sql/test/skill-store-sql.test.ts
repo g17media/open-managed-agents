@@ -162,4 +162,38 @@ describe("SqlSkillStore", () => {
       },
     })).resolves.toMatchObject({ type: "deleted", skill: { revision: 3 } });
   });
+
+  it("replaces metadata with tenant-scoped CAS without changing versions", async () => {
+    const store = new SqlSkillStore(client);
+    const current = skill();
+    const initial = version("1756202400000000", "skv_01", current.createdAt);
+    await store.insertWithInitialVersion({
+      workspaceId: "workspace_01",
+      skill: current,
+      version: initial,
+      archive: archive("first"),
+    });
+    const renamed = { ...current, displayTitle: "Renamed", updatedAt: "2026-08-26T11:00:00.000Z" };
+
+    await expect(store.replaceSkill({
+      workspaceId: "workspace_other",
+      skillId: current.id,
+      expectedSkillRevision: 1,
+      nextSkill: renamed,
+    })).resolves.toEqual({ type: "not_found" });
+    await expect(store.replaceSkill({
+      workspaceId: "workspace_01",
+      skillId: current.id,
+      expectedSkillRevision: 1,
+      nextSkill: renamed,
+    })).resolves.toMatchObject({
+      type: "replaced",
+      skill: { skill: renamed, revision: 2 },
+    });
+    await expect(store.listVersions({
+      workspaceId: "workspace_01",
+      skillId: current.id,
+      limit: 10,
+    })).resolves.toHaveLength(1);
+  });
 });

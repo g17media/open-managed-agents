@@ -17,6 +17,10 @@ export const skillListQuerySchema = z
   })
   .strict();
 
+export const skillUpdateBodySchema = z
+  .object({ display_title: z.string().nullable() })
+  .strict();
+
 export const skillResponseSchema: z.ZodType<
   SkillCreateResponse | SkillRetrieveResponse | SkillListResponse
 > = z

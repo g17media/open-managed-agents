@@ -96,6 +96,59 @@ describe("Skills API — /v1/skills", () => {
     expect(calls).toEqual([{ skillId: "skill_01" }]);
   });
 
+  it("renames and clears a Skill display title", async () => {
+    const calls: unknown[] = [];
+    const client = makeClient(
+      makeSkillsPort({
+        updateSkill: async (command) => {
+          calls.push(command);
+          return {
+            type: "updated",
+            skill: { ...skillView, displayTitle: command.displayTitle ?? "repository-guide" },
+          };
+        },
+      }),
+    );
+
+    const renamed = await client.post(`/v1/skills/${skillView.id}`, {
+      headers: { "anthropic-beta": "skills-2025-10-02" },
+      body: { display_title: "  Research guide  " },
+    }) as typeof skillView & { display_title: string };
+    const cleared = await client.post(`/v1/skills/${skillView.id}`, {
+      headers: { "anthropic-beta": "skills-2025-10-02" },
+      body: { display_title: "   " },
+    }) as typeof skillView & { display_title: string };
+
+    expect(calls).toEqual([
+      { skillId: skillView.id, displayTitle: "Research guide" },
+      { skillId: skillView.id, displayTitle: null },
+    ]);
+    expect(renamed.display_title).toBe("Research guide");
+    expect(cleared.display_title).toBe("repository-guide");
+  });
+
+  it("validates rename length and reports an unknown Skill", async () => {
+    const calls: unknown[] = [];
+    const client = makeClient(
+      makeSkillsPort({
+        updateSkill: async (command) => {
+          calls.push(command);
+          return { type: "not_found" };
+        },
+      }),
+    );
+
+    await expect(client.post(`/v1/skills/${skillView.id}`, {
+      headers: { "anthropic-beta": "skills-2025-10-02" },
+      body: { display_title: "x".repeat(256) },
+    })).rejects.toMatchObject({ status: 400 });
+    await expect(client.post("/v1/skills/skill_missing", {
+      headers: { "anthropic-beta": "skills-2025-10-02" },
+      body: { display_title: "Missing" },
+    })).rejects.toMatchObject({ status: 404 });
+    expect(calls).toEqual([{ skillId: "skill_missing", displayTitle: "Missing" }]);
+  });
+
   it("lists skills using semantic pagination", async () => {
     const calls: unknown[] = [];
     const client = makeClient(
@@ -121,6 +174,22 @@ describe("Skills API — /v1/skills", () => {
     ]);
     expect(page.data[0]?.id).toBe("skill_01");
     expect(page.next_page).toBe("skill_page_02");
+  });
+
+  it("maps a missing display title to the Skill id as the final fallback", async () => {
+    const client = makeClient(
+      makeSkillsPort({
+        retrieveSkill: async () => ({
+          type: "found",
+          skill: { ...skillView, displayTitle: null },
+        }),
+      }),
+    );
+
+    await expect(client.beta.skills.retrieve(skillView.id)).resolves.toMatchObject({
+      id: skillView.id,
+      display_title: skillView.id,
+    });
   });
 
   it("deletes a skill with the official tombstone", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SkillsApplicationService } from "../src/skills/application";
 import { SkillVersionsApplicationService } from "../src/skills/versions-application";
 import type { SkillPackageCompilerPort } from "../src/skills/package-compiler";
@@ -36,6 +36,7 @@ function makePersistence(
     insertWithInitialVersion: unexpected("insertWithInitialVersion"),
     findSkill: unexpected("findSkill"),
     listSkills: unexpected("listSkills"),
+    replaceSkill: unexpected("replaceSkill"),
     deleteSkill: unexpected("deleteSkill"),
     findVersion: unexpected("findVersion"),
     listVersions: unexpected("listVersions"),
@@ -189,6 +190,81 @@ describe("Skills application", () => {
       message: "SKILL.md is required",
     });
     expect(inserted).toBe(false);
+  });
+
+  it("defaults an omitted upload title from SKILL.md frontmatter", async () => {
+    const persistence = makePersistence({
+      insertWithInitialVersion: async (input) => ({
+        skill: { skill: input.skill, revision: 1 },
+        version: { version: input.version, archive: input.archive },
+      }),
+    });
+    const service = new SkillsApplicationService({
+      workspaceId: "workspace_01",
+      store: persistence,
+      compiler: makeCompiler(),
+      clock: { now: () => new Date("2026-08-26T13:00:00.000Z") },
+      ids: {
+        nextSkillId: () => "skill_01",
+        nextSkillVersionId: () => "skv_01",
+        nextSkillVersion: () => "version_01",
+      },
+    });
+
+    await expect(service.createSkill({ files: [] })).resolves.toMatchObject({
+      type: "created",
+      skill: { displayTitle: "repository-guide" },
+    });
+  });
+
+  it("falls back to the latest version name and renames metadata without a new version", async () => {
+    const untitled = { ...skill, displayTitle: null };
+    const replaceSkill = vi.fn(async (input) => ({
+      type: "replaced" as const,
+      skill: { skill: input.nextSkill, revision: 4 },
+    }));
+    const findVersion = vi.fn(async () => ({ version: secondVersion, archive }));
+    const service = new SkillsApplicationService({
+      workspaceId: "workspace_01",
+      store: makePersistence({
+        findSkill: async () => ({ skill: untitled, revision: 3 }),
+        listSkills: async () => [{ skill: untitled, revision: 3 }],
+        findVersion,
+        replaceSkill,
+      }),
+      compiler: makeCompiler(),
+      clock: { now: () => new Date("2026-08-26T15:00:00.000Z") },
+      ids: {
+        nextSkillId: () => "unused",
+        nextSkillVersionId: () => "unused",
+        nextSkillVersion: () => "unused",
+      },
+    });
+
+    await expect(service.retrieveSkill({ skillId: skill.id })).resolves.toMatchObject({
+      type: "found",
+      skill: { displayTitle: secondVersion.name },
+    });
+    await expect(service.listSkills({})).resolves.toMatchObject({
+      type: "page",
+      page: { skills: [{ displayTitle: secondVersion.name }] },
+    });
+    await expect(service.updateSkill({
+      skillId: skill.id,
+      displayTitle: "Renamed guide",
+    })).resolves.toMatchObject({
+      type: "updated",
+      skill: { id: skill.id, displayTitle: "Renamed guide", latestVersion: skill.latestVersion },
+    });
+    expect(replaceSkill).toHaveBeenCalledWith(expect.objectContaining({
+      skillId: skill.id,
+      expectedSkillRevision: 3,
+      nextSkill: expect.objectContaining({
+        id: skill.id,
+        displayTitle: "Renamed guide",
+        latestVersion: skill.latestVersion,
+      }),
+    }));
   });
 
   it("retrieves, paginates, and deletes complete skill aggregates", async () => {

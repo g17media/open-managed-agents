@@ -14,6 +14,8 @@ import type {
   InsertSkillWithInitialVersion,
   ListSkillRecords,
   ListSkillVersionRecords,
+  ReplaceSkillRecord,
+  ReplaceSkillRecordResult,
   SkillLocation,
   SkillStore,
   SkillVersionLocation,
@@ -202,6 +204,37 @@ export class SqlSkillStore implements SkillStore {
       throw new Error(`Skill deletion affected ${changes ?? "missing"} rows`);
     }
     return { type: "deleted" };
+  }
+
+  async replaceSkill(input: ReplaceSkillRecord): Promise<ReplaceSkillRecordResult> {
+    if (input.nextSkill.id !== input.skillId) {
+      throw new Error("Replacement Skill ID does not match the target");
+    }
+    const result = await this.client.prepare(
+      `UPDATE managed_skills
+          SET document = ?, revision = revision + 1,
+              source = ?, updated_at = ?
+        WHERE workspace_id = ? AND id = ? AND revision = ?`,
+    ).bind(
+      JSON.stringify(input.nextSkill),
+      input.nextSkill.source,
+      timestamp(input.nextSkill.updatedAt),
+      input.workspaceId,
+      input.skillId,
+      input.expectedSkillRevision,
+    ).run();
+    if (result.meta.changes === 0) {
+      const current = await this.findSkill(input);
+      return current === null
+        ? { type: "not_found" }
+        : { type: "revision_conflict", actualRevision: current.revision };
+    }
+    if (result.meta.changes !== 1) {
+      throw new Error(`Skill replacement affected ${result.meta.changes} rows`);
+    }
+    const skill = await this.findSkill(input);
+    if (skill === null) throw new Error("Skill vanished after replacement");
+    return { type: "replaced", skill };
   }
 
   async findVersion(
