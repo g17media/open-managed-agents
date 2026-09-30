@@ -156,6 +156,69 @@ describe("Managed Agents API — POST /v1/sessions", () => {
     expect(createCalls).toBe(0);
   });
 
+  it("rejects an empty Skill version in agent_with_overrides", async () => {
+    let createCalls = 0;
+    const api = buildSessionsTestApi(
+      makeSessionsPort({
+        createSession: async () => {
+          createCalls += 1;
+          return { type: "created", session: sessionView };
+        },
+      }),
+    );
+
+    const response = await api.request("http://openma.test/v1/sessions", {
+      method: "POST",
+      headers: {
+        "anthropic-beta": "managed-agents-2026-04-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agent: {
+          id: sessionView.agent.id,
+          type: "agent_with_overrides",
+          skills: [{
+            type: "custom",
+            skill_id: "skill_review",
+            version: "",
+          }],
+        },
+        environment_id: sessionView.environmentId,
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(createCalls).toBe(0);
+  });
+
+  it("maps an unresolved Session Skill dependency to a 404", async () => {
+    const api = buildSessionsTestApi(
+      makeSessionsPort({
+        createSession: async () => ({
+          type: "dependency_not_found",
+          message: "Skill skill_deleted was not found",
+        }),
+      }),
+    );
+
+    const response = await api.request("http://openma.test/v1/sessions", {
+      method: "POST",
+      headers: {
+        "anthropic-beta": "managed-agents-2026-04-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        agent: sessionView.agent.id,
+        environment_id: sessionView.environmentId,
+      }),
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: "Skill skill_deleted was not found" },
+    });
+  });
+
   it("accepts only user.message and user.define_outcome as initial events", async () => {
     let createCalls = 0;
     const api = buildSessionsTestApi(

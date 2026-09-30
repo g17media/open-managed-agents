@@ -103,6 +103,23 @@ describe("Managed Agent custom Skill binding validation", () => {
     expect(fixture.createAgent).not.toHaveBeenCalled();
   });
 
+  it("rejects an empty custom Skill version when creating an Agent", async () => {
+    const fixture = api();
+    const response = await fixture.app.request("/v1/agents", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        name: "Coder",
+        model: "claude-opus-5",
+        skills: [{ type: "custom", skill_id: skillView.id, version: "" }],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(fixture.createAgent).not.toHaveBeenCalled();
+    expect(fixture.retrieveSkill).not.toHaveBeenCalled();
+  });
+
   it("rejects a missing concrete version before updating the Agent", async () => {
     const fixture = api({ versionFound: false });
     const response = await fixture.app.request(`/v1/agents/${agentView.id}`, {
@@ -117,6 +134,21 @@ describe("Managed Agent custom Skill binding validation", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: { message: `Custom skill ${skillView.id} version 404 was not found` },
     });
+    expect(fixture.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty custom Skill version when updating an Agent", async () => {
+    const fixture = api();
+    const response = await fixture.app.request(`/v1/agents/${agentView.id}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        skills: [{ type: "custom", skill_id: skillView.id, version: "" }],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(fixture.retrieveAgent).not.toHaveBeenCalled();
     expect(fixture.updateAgent).not.toHaveBeenCalled();
   });
 
@@ -151,6 +183,85 @@ describe("Managed Agent custom Skill binding validation", () => {
     }));
   });
 
+  it("binds an unchanged-binding comparison to the subsequent write", async () => {
+    const danglingBinding = {
+      type: "custom" as const,
+      skillId: "skill_deleted",
+      version: "latest",
+    };
+    let stored = {
+      ...agentView,
+      skills: [danglingBinding],
+      version: 1,
+    };
+    const retrieveSkill = vi.fn<SkillsApplicationPort["retrieveSkill"]>();
+    const updateAgent = vi.fn<AgentsApplicationPort["updateAgent"]>(async (command) => {
+      if (command.expectedVersion !== stored.version) {
+        return {
+          type: "version_conflict" as const,
+          message: "Agent version does not match the current version",
+        };
+      }
+      return { type: "updated" as const, agent: stored };
+    });
+    const app = buildAgentsTestApi(makeAgentsPort({
+      retrieveAgent: async () => {
+        const compared = structuredClone(stored);
+        stored = { ...stored, skills: [], version: 2 };
+        return { type: "found", agent: compared };
+      },
+      updateAgent,
+    }), {
+      skills: makeSkillsPort({ retrieveSkill }),
+      skillVersions: makeSkillVersionsPort({}),
+    });
+
+    const response = await app.request(`/v1/agents/${agentView.id}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        name: "Renamed agent",
+        skills: [{
+          type: "custom",
+          skill_id: danglingBinding.skillId,
+          version: "latest",
+        }],
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(retrieveSkill).not.toHaveBeenCalled();
+    expect(updateAgent).toHaveBeenCalledWith(expect.objectContaining({
+      expectedVersion: 1,
+    }));
+    expect(stored).toMatchObject({ skills: [], version: 2 });
+  });
+
+  it("does not collide binding identities containing NUL characters", async () => {
+    const fixture = api({
+      skill: null,
+      currentAgent: {
+        ...agentView,
+        skills: [{
+          type: "custom",
+          skillId: "a",
+          version: "b\0c",
+        }],
+      },
+    });
+    const response = await fixture.app.request(`/v1/agents/${agentView.id}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        skills: [{ type: "custom", skill_id: "a\0b", version: "c" }],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(fixture.retrieveSkill).toHaveBeenCalledWith({ skillId: "a\0b" });
+    expect(fixture.updateAgent).not.toHaveBeenCalled();
+  });
+
   it("rejects a newly added binding to a missing Skill on update", async () => {
     const fixture = api({ skill: null });
     const response = await fixture.app.request(`/v1/agents/${agentView.id}`, {
@@ -165,6 +276,24 @@ describe("Managed Agent custom Skill binding validation", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: { message: "Custom skill skill_missing was not found" },
     });
+    expect(fixture.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns unknown-Agent 404 before validating submitted Skills", async () => {
+    const fixture = api({ skill: null, currentAgent: null });
+    const response = await fixture.app.request("/v1/agents/agent_missing", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        skills: [{ type: "custom", skill_id: "skill_missing" }],
+      }),
+    });
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: "Agent agent_missing was not found" },
+    });
+    expect(fixture.retrieveSkill).not.toHaveBeenCalled();
     expect(fixture.updateAgent).not.toHaveBeenCalled();
   });
 
