@@ -190,23 +190,27 @@ async function applyOverrides(
 ): Promise<SessionAgent | null> {
   const snapshot = await snapshotAgent(agent, source, workspaceId);
   if (snapshot === null) return null;
-  if (selector.type !== "overrides") return snapshot;
-  return {
-    ...snapshot,
-    ...(selector.mcpServers !== undefined && {
-      mcpServers: selector.mcpServers,
-    }),
-    ...(selector.model !== undefined && {
-      model: normalizeModel(selector.model),
-    }),
-    ...(selector.skills !== undefined && {
-      skills: resolveAgentSkills(selector.skills),
-    }),
-    ...(selector.system !== undefined && { system: selector.system }),
-    ...(selector.tools !== undefined && {
-      tools: resolveAgentTools(selector.tools),
-    }),
-  };
+  const finalAgent = selector.type !== "overrides"
+    ? snapshot
+    : {
+        ...snapshot,
+        ...(selector.mcpServers !== undefined && {
+          mcpServers: selector.mcpServers,
+        }),
+        ...(selector.model !== undefined && {
+          model: normalizeModel(selector.model),
+        }),
+        ...(selector.skills !== undefined && {
+          skills: resolveAgentSkills(selector.skills),
+        }),
+        ...(selector.system !== undefined && { system: selector.system }),
+        ...(selector.tools !== undefined && {
+          tools: resolveAgentTools(selector.tools),
+        }),
+      };
+  return source.resolveSessionAgent === undefined
+    ? finalAgent
+    : source.resolveSessionAgent({ workspaceId, agent: finalAgent });
 }
 
 function patchMetadata(

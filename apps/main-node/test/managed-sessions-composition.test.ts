@@ -210,6 +210,101 @@ describe("SqlManagedSessionsComposition", () => {
     });
   });
 
+  it.each([undefined, "latest"] as const)(
+    "pins an overridden custom Skill selector with version %s",
+    async (requestedVersion) => {
+      const skill = {
+        id: "skill_override",
+        displayTitle: null,
+        latestVersion: "1790780609696000",
+        source: "custom",
+        createdAt: agent.createdAt,
+        updatedAt: agent.updatedAt,
+      };
+      await client.prepare(
+        `INSERT INTO managed_skills
+          (workspace_id, id, document, revision, source, created_at, updated_at)
+         VALUES (?, ?, ?, 1, ?, ?, ?)`,
+      ).bind(
+        "workspace_01",
+        skill.id,
+        JSON.stringify(skill),
+        skill.source,
+        Date.parse(skill.createdAt),
+        Date.parse(skill.updatedAt),
+      ).run();
+      const composition = new SqlManagedSessionsComposition({
+        client,
+        environments: new SqlSessionEnvironmentSource(client),
+        lifecycle: {
+          sessionStarted: async () => {},
+          sessionStopped: async () => {},
+        },
+        runtime: {
+          sessionEventsAccepted: async () => {},
+          sessionThreadArchived: async () => {},
+          subscribe: () => (async function* () {})(),
+        },
+        sealer: { seal: async (value) => `sealed:${value}` },
+        clock: { now: () => new Date("2026-08-26T01:00:00.000Z") },
+        ids: {
+          nextSessionId: () => "session_override_skill",
+          nextEventId: () => "sevt_01",
+          nextOutcomeId: () => "outc_01",
+          nextResourceId: () => "sesrsc_01",
+        },
+      });
+      const sessions = composition.portsFor("workspace_01").sessions;
+
+      await expect(sessions.createSession({
+        agent: {
+          type: "overrides",
+          agentId: agent.id,
+          skills: [{
+            type: "custom",
+            skillId: skill.id,
+            ...(requestedVersion !== undefined && { version: requestedVersion }),
+          }],
+        },
+        environmentId: environment.id,
+      })).resolves.toMatchObject({
+        type: "created",
+        session: {
+          agent: {
+            skills: [{
+              type: "custom",
+              skillId: skill.id,
+              version: "1790780609696000",
+            }],
+          },
+        },
+      });
+
+      await client.prepare(
+        "UPDATE managed_skills SET document = ?, revision = revision + 1 WHERE workspace_id = ? AND id = ?",
+      ).bind(
+        JSON.stringify({ ...skill, latestVersion: "1790780609697000" }),
+        "workspace_01",
+        skill.id,
+      ).run();
+
+      await expect(sessions.retrieveSession({
+        sessionId: "session_override_skill",
+      })).resolves.toMatchObject({
+        type: "found",
+        session: {
+          agent: {
+            skills: [{
+              type: "custom",
+              skillId: skill.id,
+              version: "1790780609696000",
+            }],
+          },
+        },
+      });
+    },
+  );
+
   it("uses an explicitly composed event stream independently from runtime dispatch", async () => {
     const streamCalls: object[] = [];
     const composition = new SqlManagedSessionsComposition({
