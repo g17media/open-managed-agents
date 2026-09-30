@@ -1250,10 +1250,14 @@ function SkillsTab({
       {form.skills.length > 0 && (
         <div className="border border-border rounded-lg p-3 space-y-2">
           <Label className="text-sm font-medium text-fg block">Pinned skill versions</Label>
-          {form.skills.map((skill, index) => (
+          {form.skills.map((skill, index) => {
+            const label = skill.type === "custom"
+              ? customSkills.find((candidate) => candidate.id === skill.skill_id)?.name
+              : ANTHROPIC_SKILLS.find((candidate) => candidate.id === skill.skill_id)?.label;
+            return (
             <div key={`${skill.type}:${skill.skill_id}`} className="flex items-center gap-2">
               <span className="flex-1 min-w-0 truncate font-mono text-xs text-fg-muted">
-                {skill.skill_id}
+                {label || skill.skill_id}
               </span>
               <Input
                 value={skill.version ?? ""}
@@ -1272,7 +1276,8 @@ function SkillsTab({
                 placeholder="latest"
               />
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

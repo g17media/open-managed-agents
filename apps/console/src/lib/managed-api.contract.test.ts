@@ -131,6 +131,17 @@ describe("Console Managed Agents client", () => {
     expect((init.body as FormData).get("display_title")).toBe("Research");
   });
 
+  it("builds the Skill display-title update extension", async () => {
+    const client = createManagedApiClient(request);
+
+    await client.skills.update("skill/1", { display_title: "Research" });
+
+    expect(request).toHaveBeenCalledWith("/v1/skills/skill%2F1", {
+      method: "POST",
+      body: JSON.stringify({ display_title: "Research" }),
+    });
+  });
+
   it("covers the complete Deployment and Deployment Run SDK resources", async () => {
     const client = createManagedApiClient(request);
 

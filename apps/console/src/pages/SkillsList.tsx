@@ -2,7 +2,7 @@ import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useMemo, useRef, useState } from "react";
-import { TrashIcon } from "lucide-react";
+import { PencilIcon, TrashIcon } from "lucide-react";
 import type { SkillListResponse } from "@anthropic-ai/sdk/resources/beta/skills/skills";
 import type {
   VersionListResponse,
@@ -12,6 +12,7 @@ import { useApi } from "../lib/api";
 import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { useManagedApi } from "../lib/useManagedApi";
 import { extractManagedSkillFiles, previewManagedSkillFiles } from "../lib/skill-upload";
+import { skillDisplayName } from "../lib/skills";
 import { Modal } from "../components/Modal";
 import { Button } from "@/components/ui/button";
 import { PopoverContent } from "@/components/ui/popover";
@@ -132,6 +133,10 @@ export function SkillsList() {
   const [detailFiles, setDetailFiles] = useState<SkillFile[]>([]);
   const [detailVersions, setDetailVersions] = useState<VersionSummary[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameTitle, setRenameTitle] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [renameError, setRenameError] = useState("");
 
   /* new version sub-form inside detail */
   const [showNewVersion, setShowNewVersion] = useState(false);
@@ -232,6 +237,9 @@ export function SkillsList() {
     setShowNewVersion(false);
     setNvError("");
     setNvZip(null);
+    setRenaming(false);
+    setRenameError("");
+    setRenameTitle(skillDisplayName(skill));
     try {
       if (!skill.latest_version) throw new Error("Skill has no versions");
       const [versionDetail, versionsRes, preview] = await Promise.all([
@@ -248,6 +256,7 @@ export function SkillsList() {
         name: versionDetail.name,
         description: versionDetail.description,
       });
+      setRenameTitle(skillDisplayName({ ...skill, name: versionDetail.name }));
       setDetailFiles(preview.files || []);
       setDetailVersions(versionsRes.data || []);
     } catch {
@@ -264,6 +273,27 @@ export function SkillsList() {
     setShowNewVersion(false);
     setNvZip(null);
     setNvError("");
+    setRenaming(false);
+    setRenameError("");
+  };
+
+  const renameSkill = async () => {
+    if (!detail) return;
+    setRenameSaving(true);
+    setRenameError("");
+    try {
+      const updated = await managedApi.skills.update(detail.id, {
+        display_title: renameTitle.trim() || null,
+      });
+      setDetail({ ...detail, ...updated });
+      setRenameTitle(skillDisplayName({ ...detail, ...updated }));
+      setRenaming(false);
+      load();
+    } catch (e: any) {
+      setRenameError(e?.message || "Rename failed");
+    } finally {
+      setRenameSaving(false);
+    }
   };
 
   /* ---- new version ---- */
@@ -328,7 +358,7 @@ export function SkillsList() {
   // the modal's deleteSkill because the row's confirm copy uses the
   // skill's own title and there's no detail dialog to close after.
   const deleteSkillById = async (skill: Skill) => {
-    const name = skill.display_title || skill.name;
+    const name = skillDisplayName(skill);
     if (!confirm(`Delete ${name}? This cannot be undone.`)) return;
     try {
       await managedApi.skills.delete(skill.id);
@@ -354,7 +384,7 @@ export function SkillsList() {
         cell: ({ row }) => (
           <div className="min-w-0">
             <div className="font-medium text-fg truncate">
-              {row.original.display_title || row.original.name || row.original.id}
+              {skillDisplayName(row.original)}
             </div>
             <div className="text-xs text-fg-subtle font-mono truncate">
               {row.original.source === "anthropic"
@@ -656,7 +686,7 @@ export function SkillsList() {
       <Modal
         open={!!detail}
         onClose={closeDetail}
-        title={detail?.display_title || detail?.name || detail?.id || ""}
+        title={detail ? skillDisplayName(detail) : ""}
         subtitle={detail ? `${detail.id} · v${detail.latest_version}` : ""}
         maxWidth="max-w-2xl"
         footer={
@@ -672,11 +702,68 @@ export function SkillsList() {
         ) : detail ? (
           <div className="space-y-5">
             {/* Actions */}
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              {detail.source !== "anthropic" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setRenameTitle(skillDisplayName(detail));
+                    setRenameError("");
+                    setRenaming(true);
+                  }}
+                >
+                  <PencilIcon className="size-4" />
+                  Rename
+                </Button>
+              )}
               <Button variant="destructive" size="sm" onClick={deleteSkill}>
                 Delete
               </Button>
             </div>
+
+            {renaming && (
+              <div className="border border-border rounded-lg p-4 space-y-3">
+                <div>
+                  <Label className="text-sm text-fg-muted block mb-1">
+                    Display Title
+                  </Label>
+                  <Input
+                    value={renameTitle}
+                    onChange={(event) => setRenameTitle(event.target.value)}
+                    maxLength={255}
+                    className={inputCls}
+                    placeholder={detail.name || detail.id}
+                    disabled={renameSaving}
+                  />
+                  <p className="text-xs text-fg-subtle mt-1">
+                    Leave blank to use the SKILL.md name.
+                  </p>
+                </div>
+                {renameError && (
+                  <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">
+                    {renameError}
+                  </div>
+                )}
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="ghost"
+                    disabled={renameSaving}
+                    onClick={() => setRenaming(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={renameSkill}
+                    disabled={renameSaving}
+                    loading={renameSaving}
+                    loadingLabel="Saving..."
+                  >
+                    Save
+                  </Button>
+                </div>
+              </div>
+            )}
 
             {/* Metadata */}
             <div className="grid grid-cols-2 gap-4">
@@ -685,7 +772,7 @@ export function SkillsList() {
                   Display Title
                 </Label>
                 <p className="text-sm font-medium">
-                  {detail.display_title || "—"}
+                  {skillDisplayName(detail)}
                 </p>
               </div>
               <div>

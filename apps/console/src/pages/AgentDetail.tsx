@@ -4,6 +4,7 @@ import { useParams, Link, useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useApiQuery, useQueryClient } from "../lib/useApiQuery";
 import { useManagedApi } from "../lib/useManagedApi";
+import { skillDisplayName } from "../lib/skills";
 import { FeishuIcon, GitHubIcon, LinearIcon, SlackIcon } from "../components/icons";
 import { Page } from "../components/Page";
 import { PageHeader } from "../components/PageHeader";
@@ -98,7 +99,7 @@ export function AgentDetail() {
             setCustomSkills(
               (sk.data ?? []).map((skill) => ({
                 id: skill.id,
-                name: skill.display_title || skill.id,
+                name: skillDisplayName(skill),
                 description: "",
               })),
             );
