@@ -285,7 +285,12 @@ export function SkillsList() {
       const updated = await managedApi.skills.update(detail.id, {
         display_title: renameTitle.trim() || null,
       });
-      setDetail({ ...detail, ...updated });
+      // The dialog may have been closed (or moved to another skill) while the request was in
+      // flight; writing the captured skill back would reopen it, so merge only into a still-open
+      // dialog for the same skill.
+      setDetail((current) =>
+        current !== null && current.id === detail.id ? { ...current, ...updated } : current,
+      );
       setRenameTitle(skillDisplayName({ ...detail, ...updated }));
       setRenaming(false);
       load();
