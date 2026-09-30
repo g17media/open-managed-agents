@@ -69,7 +69,7 @@ describe("NodeManagedSessionInputPreparer", () => {
 
     expect(buildReminders(managedSession())).toEqual([{
       source: "skill:skill_inputs",
-      text: "Custom skill skill_inputs is mounted at /workspace/.openma/skills/skill_inputs/latest/. Locate and read its SKILL.md before applying it.",
+      text: "Custom skill skill_inputs is mounted under /workspace/.openma/skills/skill_inputs/. Locate and read its SKILL.md before applying it.",
     }]);
   });
 
@@ -194,11 +194,11 @@ describe("NodeManagedSessionInputPreparer", () => {
       version: "123",
     });
     expect(writeFileBytes).toHaveBeenCalledWith(
-      "/workspace/.openma/skills/skill_inputs/latest/certification-skill/SKILL.md",
+      "/workspace/.openma/skills/skill_inputs/123/certification-skill/SKILL.md",
       expect.any(Uint8Array),
     );
     expect(writeFileBytes).toHaveBeenCalledWith(
-      "/workspace/.openma/skills/skill_inputs/latest/certification-skill/reference.txt",
+      "/workspace/.openma/skills/skill_inputs/123/certification-skill/reference.txt",
       expect.any(Uint8Array),
     );
   });

@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import {
   resolveApplicationPort,
   type ApplicationPortResolver,
@@ -22,13 +22,55 @@ import {
   toListAgentVersionsQuery,
   toUpdateAgentCommand,
 } from "../mappers/agents";
-import type { AgentView, AgentsApplicationPort, ListAgentsPage } from "../ports";
+import type {
+  AgentView,
+  AgentsApplicationPort,
+  ListAgentsPage,
+  SkillsApplicationPort,
+  SkillVersionsApplicationPort,
+} from "../ports";
 
 export type AgentsApplicationPortResolver =
   ApplicationPortResolver<AgentsApplicationPort>;
 
 export type AgentsApplicationPortSource =
   ApplicationPortSource<AgentsApplicationPort>;
+
+export interface AgentSkillBindingSources {
+  skills: ApplicationPortSource<Pick<SkillsApplicationPort, "retrieveSkill">>;
+  skillVersions: ApplicationPortSource<Pick<SkillVersionsApplicationPort, "retrieveSkillVersion">>;
+}
+
+async function invalidCustomSkillBinding(
+  context: Context,
+  bindings: ReadonlyArray<{ skill_id: string; type: string; version?: string | null }> | null | undefined,
+  sources: AgentSkillBindingSources | undefined,
+): Promise<string | null> {
+  if (sources === undefined || bindings == null) return null;
+  const skills = resolveApplicationPort(sources.skills, context);
+  const versions = resolveApplicationPort(sources.skillVersions, context);
+  for (const binding of bindings) {
+    if (binding.type !== "custom") continue;
+    const found = await skills.retrieveSkill({ skillId: binding.skill_id });
+    if (found.type === "not_found") {
+      return `Custom skill ${binding.skill_id} was not found`;
+    }
+    const version = binding.version && binding.version !== "latest"
+      ? binding.version
+      : found.skill.latestVersion;
+    if (version === null) {
+      return `Custom skill ${binding.skill_id} has no latest version`;
+    }
+    const foundVersion = await versions.retrieveSkillVersion({
+      skillId: binding.skill_id,
+      version,
+    });
+    if (foundVersion.type === "not_found") {
+      return `Custom skill ${binding.skill_id} version ${version} was not found`;
+    }
+  }
+  return null;
+}
 
 function serializeAgent(agent: AgentView): object | null {
   try {
@@ -51,7 +93,10 @@ function serializeAgentPage(page: ListAgentsPage): object | null {
   }
 }
 
-export function buildAgentRoutes(source: AgentsApplicationPortSource): Hono {
+export function buildAgentRoutes(
+  source: AgentsApplicationPortSource,
+  skillBindings?: AgentSkillBindingSources,
+): Hono {
   const app = new Hono();
 
   app.use("*", requireBeta(MANAGED_AGENTS_BETA));
@@ -184,6 +229,15 @@ export function buildAgentRoutes(source: AgentsApplicationPortSource): Hono {
       );
     }
 
+    const invalidSkill = await invalidCustomSkillBinding(
+      c,
+      parsed.data.skills,
+      skillBindings,
+    );
+    if (invalidSkill !== null) {
+      return c.json(invalidRequest(invalidSkill), 400);
+    }
+
     const result = await resolveApplicationPort(source, c).updateAgent(
       toUpdateAgentCommand(c.req.param("agentId"), parsed.data),
     );
@@ -222,6 +276,15 @@ export function buildAgentRoutes(source: AgentsApplicationPortSource): Hono {
         ),
         400,
       );
+    }
+
+    const invalidSkill = await invalidCustomSkillBinding(
+      c,
+      parsed.data.skills,
+      skillBindings,
+    );
+    if (invalidSkill !== null) {
+      return c.json(invalidRequest(invalidSkill), 400);
     }
 
     const result = await resolveApplicationPort(source, c).createAgent(

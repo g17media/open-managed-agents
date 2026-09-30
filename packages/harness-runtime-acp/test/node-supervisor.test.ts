@@ -193,11 +193,14 @@ describe("preinstalled Node managed ACP supervisor", () => {
                 env: { MODE: "read-write" },
               },
             ],
-            skills: [{ type: "custom", skill_id: "skill_1", version: "4" }],
+            skills: [{ type: "custom", skill_id: "skill_1", version: "latest" }],
             system: "Inspect the repository before editing.",
             tools: [{ type: "custom", name: "deploy", description: "Deploy", input_schema: { type: "object" } }],
           },
         });
+      }
+      if (request.url.endsWith("/v1/skills/skill_1/versions?limit=1")) {
+        return json({ data: [{ version: "4" }], next_page: null });
       }
       if (request.url.endsWith("/v1/skills/skill_1/versions/4/content")) {
         return new Response(zipSync({
@@ -313,7 +316,7 @@ describe("preinstalled Node managed ACP supervisor", () => {
           agent_id: "agent_managed_1",
           agent_version: 9,
           model: { id: "deepseek-chat", speed: "fast", effort: "low" },
-          skills: [{ type: "custom", skill_id: "skill_1", version: "4" }],
+          skills: [{ type: "custom", skill_id: "skill_1", version: "latest" }],
           tools: [{ type: "custom", name: "deploy", description: "Deploy", input_schema: { type: "object" } }],
         },
       },
@@ -337,6 +340,8 @@ describe("preinstalled Node managed ACP supervisor", () => {
     expect(runtimePosts.every((request) =>
       request.headers.get("authorization") === "Bearer scoped-session-token"
     )).toBe(true);
+    expect(fetch.mock.calls.map(([input, init]) => new Request(input, init).url).join("\n"))
+      .not.toContain("/versions/latest/");
   });
 
   it("fails closed when the supervisor scope is not the claimed Work scope", async () => {

@@ -1,5 +1,7 @@
 import {
   buildManagedAgentsApi,
+  buildAgentRoutes,
+  type AgentSkillBindingSources,
   type ManagedAgentsApplicationPorts,
   type AgentsApplicationPort,
   type CredentialsApplicationPort,
@@ -25,6 +27,7 @@ import {
   type UserProfilesApplicationPort,
   type VaultsApplicationPort,
 } from "../src/index";
+import { Hono } from "hono";
 import { makeAgentsPort } from "./fixtures";
 import { makeCredentialsPort } from "./credential-fixtures";
 import {
@@ -121,7 +124,13 @@ export function buildManagedAgentsTestApi(
   });
 }
 
-export function buildAgentsTestApi(agents: AgentsApplicationPort) {
+export function buildAgentsTestApi(
+  agents: AgentsApplicationPort,
+  skillBindings?: AgentSkillBindingSources,
+) {
+  if (skillBindings !== undefined) {
+    return new Hono().route("/v1/agents", buildAgentRoutes(agents, skillBindings));
+  }
   return buildRequestScopedTestApi({
     agents,
     credentials: makeCredentialsPort({}),

@@ -4,6 +4,8 @@ import {
   type Environment,
   type DeploymentSessionLauncherPort,
   type Session,
+  type Agent,
+  type SessionAgentSourcePort,
   type SessionEventsApplicationPort,
   type SessionResourcesApplicationPort,
   type SessionsApplicationPort,
@@ -85,6 +87,7 @@ import { SqlSessionRuntimeProjectionPersistence } from "./session-runtime-projec
 import { SqlSessionSource } from "./session-sql-source";
 import { SqlSessionThreadContextSource } from "./session-thread-context-sql-source";
 import { SqlSessionThreadStore } from "@open-managed-agents/session-thread-store-sql";
+import { SqlSkillStore } from "@open-managed-agents/skill-store-sql";
 import type { SessionResourceSecretSealer } from "./session-resource-secret-sealer";
 
 export interface SqlManagedSessionsApplicationPorts {
@@ -167,6 +170,36 @@ class ComposedSessionExecutionContextSource
   }
 }
 
+class ConcreteSkillSessionAgentSource implements SessionAgentSourcePort {
+  constructor(
+    private readonly agents: SqlAgentPersistence,
+    private readonly skills: SqlSkillStore,
+  ) {}
+
+  private async resolve(workspaceId: string, agent: Agent | null): Promise<Agent | null> {
+    if (agent === null) return null;
+    const skills = await Promise.all(agent.skills.map(async (binding) => {
+      if (binding.type !== "custom" || binding.version !== "latest") return binding;
+      const skill = await this.skills.findSkill({
+        workspaceId,
+        skillId: binding.skillId,
+      });
+      return skill?.skill.latestVersion === null || skill === null
+        ? binding
+        : { ...binding, version: skill.skill.latestVersion };
+    }));
+    return { ...agent, skills };
+  }
+
+  findCurrent(input: { workspaceId: string; agentId: string }): Promise<Agent | null> {
+    return this.agents.findCurrent(input).then((agent) => this.resolve(input.workspaceId, agent));
+  }
+
+  findVersion(input: { workspaceId: string; agentId: string; version: number }): Promise<Agent | null> {
+    return this.agents.findVersion(input).then((agent) => this.resolve(input.workspaceId, agent));
+  }
+}
+
 /**
  * SQL-backed production composition for the official Sessions API.
  *
@@ -175,6 +208,7 @@ class ComposedSessionExecutionContextSource
  */
 export class SqlManagedSessionsComposition {
   private readonly agents: SqlAgentPersistence;
+  private readonly sessionAgents: ConcreteSkillSessionAgentSource;
   private readonly files: SqlFileMetadataPersistence;
   private readonly sessions: SqlSessionPersistence;
   private readonly sessionSource: SqlSessionSource;
@@ -193,6 +227,10 @@ export class SqlManagedSessionsComposition {
   ) {
     const { client, sealer, environments } = dependencies;
     this.agents = new SqlAgentPersistence(client);
+    this.sessionAgents = new ConcreteSkillSessionAgentSource(
+      this.agents,
+      new SqlSkillStore(client),
+    );
     this.files = new SqlFileMetadataPersistence(client);
     this.sessions = new SqlSessionPersistence(client, sealer, {
       executionOutbox: dependencies.executionOutbox,
@@ -265,7 +303,7 @@ export class SqlManagedSessionsComposition {
           },
         }),
         providePort(sessionStorePort, this.sessions),
-        providePort(sessionAgentSourcePort, this.agents),
+        providePort(sessionAgentSourcePort, this.sessionAgents),
         providePort(sessionEnvironmentSourcePort, environments),
         providePort(sessionResourceResolverPort, resources),
         providePort(sessionLifecyclePort, lifecycle),

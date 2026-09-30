@@ -40,11 +40,9 @@ export function buildNodeManagedSkillReminders(
 ): Array<{ source: string; text: string }> {
   return session.agent.skills.flatMap((skill) => {
     if (skill.type !== "custom") return [];
-    const requestedVersion = skill.version ?? "latest";
-    const mountRoot = `/workspace/.openma/skills/${encodeURIComponent(skill.skillId)}/${encodeURIComponent(requestedVersion)}/`;
     return [{
       source: `skill:${skill.skillId}`,
-      text: `Custom skill ${skill.skillId} is mounted at ${mountRoot}. Locate and read its SKILL.md before applying it.`,
+      text: `Custom skill ${skill.skillId} is mounted under /workspace/.openma/skills/${encodeURIComponent(skill.skillId)}/. Locate and read its SKILL.md before applying it.`,
     }];
   });
 }
@@ -250,7 +248,7 @@ export class NodeManagedSessionInputPreparer {
         if (posix.basename(path) === "SKILL.md") foundManifest = true;
         await writeFileBytes!.call(
           input.sandbox,
-          `/workspace/.openma/skills/${encodeURIComponent(skill.skillId)}/${encodeURIComponent(requestedVersion)}/${path}`,
+          `/workspace/.openma/skills/${encodeURIComponent(skill.skillId)}/${encodeURIComponent(concreteVersion)}/${path}`,
           content,
         );
       }

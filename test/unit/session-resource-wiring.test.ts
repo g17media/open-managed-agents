@@ -434,14 +434,14 @@ describe("in-sandbox Session resource wiring", () => {
     expect(mountedSkills).toEqual([{
       skillId,
       skillName: "repository-guide",
-      requestedVersion: "latest",
+      version,
       files: [
         { filename: "SKILL.md", bytes: markdown },
         { filename: "assets/logo.bin", bytes: binary },
       ],
     }]);
     expect(skillFileMountPaths(mountedSkills[0]!, "assets/logo.bin")).toEqual([
-      "/workspace/.openma/skills/skill-1/latest/assets/logo.bin",
+      `/workspace/.openma/skills/skill-1/${version}/assets/logo.bin`,
       "/home/user/.skills/repository-guide/assets/logo.bin",
     ]);
     expect(bucket.get).toHaveBeenCalledWith(
@@ -461,7 +461,7 @@ describe("in-sandbox Session resource wiring", () => {
     expect(() => skillFileMountPaths({
       skillId: "skill-1",
       skillName: "repository-guide",
-      requestedVersion: "latest",
+      version: "1",
       files: [],
     }, filename)).toThrow(/unsafe skill archive path/i);
   });
@@ -514,7 +514,7 @@ describe("in-sandbox Session resource wiring", () => {
     expect(files).toEqual([{
       skillId: "skill-1",
       skillName: "repository-guide",
-      requestedVersion: "latest",
+      version: "42",
       files: [
         expect.objectContaining({ filename: "repository-guide/SKILL.md" }),
         expect.objectContaining({ filename: "repository-guide/assets/logo.bin" }),

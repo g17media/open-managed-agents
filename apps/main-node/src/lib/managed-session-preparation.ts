@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { ManagedMemoryFiles } from "./managed-memory-files.js";
 import { unzipSync } from "fflate";
 import type { SandboxPort } from "@open-managed-agents/sandbox";
-import type { Environment, Session, FilesApplicationPort, SkillVersionsApplicationPort, MemoriesApplicationPort } from "@open-managed-agents/managed-agents-application";
+import type { Environment, Session, FilesApplicationPort, SkillsApplicationPort, SkillVersionsApplicationPort, MemoriesApplicationPort } from "@open-managed-agents/managed-agents-application";
 
 const mountedResources = new WeakMap<SandboxPort, Set<string>>();
 const mountedSkills = new WeakMap<SandboxPort, Set<string>>();
@@ -62,7 +62,9 @@ export async function mountManagedSessionResources(input: {
 }
 
 export async function managedSessionReminders(input: {
-  session: Session; environment: Environment; sandbox: SandboxPort; versions: SkillVersionsApplicationPort;
+  session: Session; environment: Environment; sandbox: SandboxPort;
+  skills: Pick<SkillsApplicationPort, "retrieveSkill">;
+  versions: SkillVersionsApplicationPort;
 }): Promise<Array<{ source: string; text: string }>> {
   const reminders: Array<{ source: string; text: string }> = [];
   if (input.environment.config.type === "cloud" && input.environment.config.context?.trim()) {
@@ -80,16 +82,32 @@ export async function managedSessionReminders(input: {
   let mounted = mountedSkills.get(input.sandbox);
   if (!mounted) { mounted = new Set(); mountedSkills.set(input.sandbox, mounted); }
   for (const binding of input.session.agent.skills) {
-    const location = { skillId: binding.skillId, version: binding.version };
+    let concreteVersion = binding.version;
+    if (concreteVersion === "latest") {
+      const skill = await input.skills.retrieveSkill({ skillId: binding.skillId });
+      if (skill.type !== "found") {
+        throw new Error(`Skill ${binding.skillId} metadata is missing`);
+      }
+      if (skill.skill.latestVersion === null) {
+        throw new Error(`Skill ${binding.skillId} has no latest version`);
+      }
+      concreteVersion = skill.skill.latestVersion;
+    }
+    const location = { skillId: binding.skillId, version: concreteVersion };
     const version = await input.versions.retrieveSkillVersion(location);
     const archive = await input.versions.downloadSkillVersion(location);
-    if (version.type !== "found" || archive.type !== "found") throw new Error(`Skill ${binding.skillId}@${binding.version} is unavailable`);
+    if (version.type !== "found") {
+      throw new Error(`Skill ${binding.skillId} version ${concreteVersion} metadata is missing`);
+    }
+    if (archive.type !== "found") {
+      throw new Error(`Skill ${binding.skillId} version ${concreteVersion} archive is missing`);
+    }
     const entries = unzipSync(archive.file.content);
     const root = `${version.version.directory}/`;
     const destination = `/home/user/.skills/${version.version.name}`;
     const manifest = entries[`${root}SKILL.md`];
     if (!manifest) throw new Error(`Skill ${binding.skillId} is missing SKILL.md`);
-    const bindingKey = `${binding.skillId}@${binding.version}`;
+    const bindingKey = `${binding.skillId}@${concreteVersion}`;
     if (!mounted.has(bindingKey)) {
       const installed = await input.sandbox.exec(`cat ${quote(`${destination}/.oma-version`)} 2>/dev/null || true`, 5000);
       if (installed.trim() === bindingKey) mounted.add(bindingKey);

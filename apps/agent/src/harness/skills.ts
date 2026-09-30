@@ -15,7 +15,7 @@ export interface SkillFile {
 export interface SkillFilesResult {
   skillId: string;
   skillName: string;
-  requestedVersion: string;
+  version: string;
   files: SkillFile[];
 }
 
@@ -66,7 +66,7 @@ function safeLegacySkillName(value: string, fallback: string): string {
  * use the canonical /workspace path shared by Node and ACP runtimes.
  */
 export function skillFileMountPaths(
-  skill: Pick<SkillFilesResult, "skillId" | "skillName" | "requestedVersion">,
+  skill: Pick<SkillFilesResult, "skillId" | "skillName" | "version">,
   filename: string,
 ): [string, string] {
   const path = safeSkillArchivePath(filename);
@@ -75,7 +75,7 @@ export function skillFileMountPaths(
     ? path.slice(legacyName.length + 1)
     : path;
   return [
-    `/workspace/.openma/skills/${encodeURIComponent(skill.skillId)}/${encodeURIComponent(skill.requestedVersion)}/${path}`,
+    `/workspace/.openma/skills/${encodeURIComponent(skill.skillId)}/${encodeURIComponent(skill.version)}/${path}`,
     `/home/user/.skills/${legacyName}/${legacyPath}`,
   ];
 }
@@ -182,10 +182,11 @@ export async function resolveCustomSkills(
         }
       }
 
-      const requestedVersion = cfg.version ?? "latest";
       const addition = body
         ? `<skill name="${name}">\n${body}\n</skill>`
-        : `[Skill: ${name}] ${description}. Locate its SKILL.md under /workspace/.openma/skills/${encodeURIComponent(cfg.skill_id)}/${encodeURIComponent(requestedVersion)}/.`;
+        : version
+          ? `[Skill: ${name}] ${description}. Locate its SKILL.md under /workspace/.openma/skills/${encodeURIComponent(cfg.skill_id)}/${encodeURIComponent(version)}/.`
+          : `[Skill: ${name}] ${description}.`;
 
       skills.push({
         id: cfg.skill_id,
@@ -272,7 +273,7 @@ export async function getSkillFiles(
     results.push({
       skillId: cfg.skill_id,
       skillName: meta.name || cfg.skill_id,
-      requestedVersion: cfg.version ?? "latest",
+      version,
       files,
     });
   }
@@ -313,7 +314,7 @@ export async function getSkillFilesFromManagedSource(
     results.push({
       skillId: cfg.skill_id,
       skillName: resolved.name || cfg.skill_id,
-      requestedVersion,
+      version: resolved.version,
       files,
     });
   }
