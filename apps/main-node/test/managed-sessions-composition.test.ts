@@ -305,6 +305,98 @@ describe("SqlManagedSessionsComposition", () => {
     },
   );
 
+  it.each([
+    { selector: "base", condition: "missing" },
+    { selector: "base", condition: "no latest version" },
+    { selector: "override", condition: "missing" },
+    { selector: "override", condition: "no latest version" },
+  ] as const)(
+    "rejects a $selector Session selector when its latest Skill is $condition",
+    async ({ selector, condition }) => {
+      const skillId = condition === "missing"
+        ? "skill_missing"
+        : "skill_without_latest";
+      const binding = {
+        type: "custom" as const,
+        skillId,
+        version: "latest",
+      };
+      if (selector === "base") {
+        await client.prepare(
+          "UPDATE managed_agents SET document = ? WHERE workspace_id = ? AND id = ?",
+        ).bind(
+          JSON.stringify({ ...agent, skills: [binding] }),
+          "workspace_01",
+          agent.id,
+        ).run();
+      }
+      if (condition === "no latest version") {
+        const skill = {
+          id: skillId,
+          displayTitle: null,
+          latestVersion: null,
+          source: "custom",
+          createdAt: agent.createdAt,
+          updatedAt: agent.updatedAt,
+        };
+        await client.prepare(
+          `INSERT INTO managed_skills
+            (workspace_id, id, document, revision, source, created_at, updated_at)
+           VALUES (?, ?, ?, 1, ?, ?, ?)`,
+        ).bind(
+          "workspace_01",
+          skill.id,
+          JSON.stringify(skill),
+          skill.source,
+          Date.parse(skill.createdAt),
+          Date.parse(skill.updatedAt),
+        ).run();
+      }
+      const composition = new SqlManagedSessionsComposition({
+        client,
+        environments: new SqlSessionEnvironmentSource(client),
+        lifecycle: {
+          sessionStarted: async () => {},
+          sessionStopped: async () => {},
+        },
+        runtime: {
+          sessionEventsAccepted: async () => {},
+          sessionThreadArchived: async () => {},
+          subscribe: () => (async function* () {})(),
+        },
+        sealer: { seal: async (value) => `sealed:${value}` },
+        clock: { now: () => new Date("2026-08-26T01:00:00.000Z") },
+        ids: {
+          nextSessionId: () => "session_missing_skill",
+          nextEventId: () => "sevt_01",
+          nextOutcomeId: () => "outc_01",
+          nextResourceId: () => "sesrsc_01",
+        },
+      });
+      const sessions = composition.portsFor("workspace_01").sessions;
+      const agentSelector = selector === "base"
+        ? { type: "latest" as const, agentId: agent.id }
+        : {
+            type: "overrides" as const,
+            agentId: agent.id,
+            skills: [binding],
+          };
+
+      await expect(sessions.createSession({
+        agent: agentSelector,
+        environmentId: environment.id,
+      })).resolves.toEqual({
+        type: "dependency_not_found",
+        message: condition === "missing"
+          ? `Skill ${skillId} was not found`
+          : `Skill ${skillId} has no latest version`,
+      });
+      await expect(sessions.retrieveSession({
+        sessionId: "session_missing_skill",
+      })).resolves.toEqual({ type: "not_found" });
+    },
+  );
+
   it("uses an explicitly composed event stream independently from runtime dispatch", async () => {
     const streamCalls: object[] = [];
     const composition = new SqlManagedSessionsComposition({

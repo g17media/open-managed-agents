@@ -187,9 +187,13 @@ async function applyOverrides(
   selector: SessionAgentSelector,
   source: SessionAgentSourcePort,
   workspaceId: string,
-): Promise<SessionAgent | null> {
+): Promise<
+  | { type: "resolved"; agent: SessionAgent }
+  | { type: "roster_not_found" }
+  | { type: "dependency_not_found"; message: string }
+> {
   const snapshot = await snapshotAgent(agent, source, workspaceId);
-  if (snapshot === null) return null;
+  if (snapshot === null) return { type: "roster_not_found" };
   const finalAgent = selector.type !== "overrides"
     ? snapshot
     : {
@@ -209,7 +213,7 @@ async function applyOverrides(
         }),
       };
   return source.resolveSessionAgent === undefined
-    ? finalAgent
+    ? { type: "resolved", agent: finalAgent }
     : source.resolveSessionAgent({ workspaceId, agent: finalAgent });
 }
 
@@ -276,18 +280,22 @@ export class SessionsApplicationService
         message: `Agent ${command.agent.agentId} was not found`,
       };
     }
-    const sessionAgent = await applyOverrides(
+    const resolvedSessionAgent = await applyOverrides(
       agent,
       command.agent,
       this.dependencies.agents,
       this.dependencies.workspaceId,
     );
-    if (sessionAgent === null) {
+    if (resolvedSessionAgent.type === "roster_not_found") {
       return {
         type: "dependency_not_found",
         message: `A multiagent roster member for Agent ${agent.id} was not found`,
       };
     }
+    if (resolvedSessionAgent.type === "dependency_not_found") {
+      return resolvedSessionAgent;
+    }
+    const sessionAgent = resolvedSessionAgent.agent;
 
     const environment = await this.dependencies.environments.find({
       workspaceId: this.dependencies.workspaceId,
