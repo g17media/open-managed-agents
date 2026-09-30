@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentsApplicationPort } from "../src";
+import type {
+  AgentsApplicationPort,
+  AgentView,
+  SkillsApplicationPort,
+} from "../src";
 import { buildAgentsTestApi } from "./test-api";
 import { agentView, makeAgentsPort } from "./fixtures";
 import {
@@ -17,6 +21,7 @@ const headers = {
 function api(overrides: {
   skill?: typeof skillView | null;
   versionFound?: boolean;
+  currentAgent?: AgentView | null;
 } = {}) {
   const createAgent = vi.fn<AgentsApplicationPort["createAgent"]>(async () => ({
     type: "created" as const,
@@ -26,14 +31,30 @@ function api(overrides: {
     type: "updated" as const,
     agent: agentView,
   }));
+  const retrieveAgent = vi.fn<AgentsApplicationPort["retrieveAgent"]>(async () => {
+    const current = overrides.currentAgent === undefined
+      ? agentView
+      : overrides.currentAgent;
+    return current === null
+      ? { type: "not_found" as const }
+      : { type: "found" as const, agent: current };
+  });
+  const retrieveSkill = vi.fn<SkillsApplicationPort["retrieveSkill"]>(async () =>
+    overrides.skill === null
+      ? { type: "not_found" as const }
+      : { type: "found" as const, skill: overrides.skill ?? skillView });
   return {
     createAgent,
+    retrieveAgent,
+    retrieveSkill,
     updateAgent,
-    app: buildAgentsTestApi(makeAgentsPort({ createAgent, updateAgent }), {
+    app: buildAgentsTestApi(makeAgentsPort({
+      createAgent,
+      retrieveAgent,
+      updateAgent,
+    }), {
       skills: makeSkillsPort({
-        retrieveSkill: async () => overrides.skill === null
-          ? { type: "not_found" as const }
-          : { type: "found" as const, skill: overrides.skill ?? skillView },
+        retrieveSkill,
       }),
       skillVersions: makeSkillVersionsPort({
         retrieveSkillVersion: async () => overrides.versionFound === false
@@ -95,6 +116,54 @@ describe("Managed Agent custom Skill binding validation", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
       error: { message: `Custom skill ${skillView.id} version 404 was not found` },
+    });
+    expect(fixture.updateAgent).not.toHaveBeenCalled();
+  });
+
+  it("allows an unchanged binding to a subsequently deleted Skill on update", async () => {
+    const missingBinding = {
+      type: "custom" as const,
+      skillId: "skill_deleted",
+      version: "latest",
+    };
+    const fixture = api({
+      skill: null,
+      currentAgent: { ...agentView, skills: [missingBinding] },
+    });
+    const response = await fixture.app.request(`/v1/agents/${agentView.id}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        name: "Renamed agent",
+        skills: [{
+          type: "custom",
+          skill_id: missingBinding.skillId,
+          version: "latest",
+        }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(fixture.retrieveSkill).not.toHaveBeenCalled();
+    expect(fixture.updateAgent).toHaveBeenCalledWith(expect.objectContaining({
+      name: "Renamed agent",
+      skills: [missingBinding],
+    }));
+  });
+
+  it("rejects a newly added binding to a missing Skill on update", async () => {
+    const fixture = api({ skill: null });
+    const response = await fixture.app.request(`/v1/agents/${agentView.id}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        skills: [{ type: "custom", skill_id: "skill_missing" }],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: "Custom skill skill_missing was not found" },
     });
     expect(fixture.updateAgent).not.toHaveBeenCalled();
   });

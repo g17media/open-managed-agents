@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import type { BetaManagedAgentsSkillParams } from "@anthropic-ai/sdk/resources/beta/agents/agents";
 import {
   resolveApplicationPort,
   type ApplicationPortResolver,
@@ -41,9 +42,38 @@ export interface AgentSkillBindingSources {
   skillVersions: ApplicationPortSource<Pick<SkillVersionsApplicationPort, "retrieveSkillVersion">>;
 }
 
+type SkillBindingInput = BetaManagedAgentsSkillParams;
+
+function bindingKey(binding: SkillBindingInput): string {
+  return `${binding.type}\0${binding.skill_id}\0${binding.version ?? "latest"}`;
+}
+
+function changedCustomBindings(
+  requested: ReadonlyArray<SkillBindingInput>,
+  current: AgentView["skills"],
+): SkillBindingInput[] {
+  const remaining = new Map<string, number>();
+  for (const binding of current) {
+    const key = bindingKey({
+      skill_id: binding.skillId,
+      type: binding.type,
+      version: binding.version,
+    });
+    remaining.set(key, (remaining.get(key) ?? 0) + 1);
+  }
+  return requested.filter((binding) => {
+    if (binding.type !== "custom") return false;
+    const key = bindingKey(binding);
+    const count = remaining.get(key) ?? 0;
+    if (count === 0) return true;
+    remaining.set(key, count - 1);
+    return false;
+  });
+}
+
 async function invalidCustomSkillBinding(
   context: Context,
-  bindings: ReadonlyArray<{ skill_id: string; type: string; version?: string | null }> | null | undefined,
+  bindings: ReadonlyArray<SkillBindingInput> | null | undefined,
   sources: AgentSkillBindingSources | undefined,
 ): Promise<string | null> {
   if (sources === undefined || bindings == null) return null;
@@ -229,16 +259,30 @@ export function buildAgentRoutes(
       );
     }
 
+    const agents = resolveApplicationPort(source, c);
+    let bindingsToValidate = parsed.data.skills;
+    if (bindingsToValidate?.some((binding) => binding.type === "custom")) {
+      const current = await agents.retrieveAgent({
+        agentId: c.req.param("agentId"),
+      });
+      if (current.type === "not_found") {
+        return c.json(notFound(`Agent ${c.req.param("agentId")} was not found`), 404);
+      }
+      bindingsToValidate = changedCustomBindings(
+        bindingsToValidate,
+        current.agent.skills,
+      );
+    }
     const invalidSkill = await invalidCustomSkillBinding(
       c,
-      parsed.data.skills,
+      bindingsToValidate,
       skillBindings,
     );
     if (invalidSkill !== null) {
       return c.json(invalidRequest(invalidSkill), 400);
     }
 
-    const result = await resolveApplicationPort(source, c).updateAgent(
+    const result = await agents.updateAgent(
       toUpdateAgentCommand(c.req.param("agentId"), parsed.data),
     );
     if (result.type === "version_conflict") {
