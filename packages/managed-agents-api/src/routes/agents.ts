@@ -45,7 +45,11 @@ export interface AgentSkillBindingSources {
 type SkillBindingInput = BetaManagedAgentsSkillParams;
 
 function bindingKey(binding: SkillBindingInput): string {
-  return `${binding.type}\0${binding.skill_id}\0${binding.version ?? "latest"}`;
+  return JSON.stringify([
+    binding.type,
+    binding.skill_id,
+    binding.version ?? "latest",
+  ]);
 }
 
 function changedCustomBindings(
@@ -85,9 +89,11 @@ async function invalidCustomSkillBinding(
     if (found.type === "not_found") {
       return `Custom skill ${binding.skill_id} was not found`;
     }
-    const version = binding.version && binding.version !== "latest"
-      ? binding.version
-      : found.skill.latestVersion;
+    const version = binding.version === undefined
+        || binding.version === null
+        || binding.version === "latest"
+      ? found.skill.latestVersion
+      : binding.version;
     if (version === null) {
       return `Custom skill ${binding.skill_id} has no latest version`;
     }
@@ -261,6 +267,7 @@ export function buildAgentRoutes(
 
     const agents = resolveApplicationPort(source, c);
     let bindingsToValidate = parsed.data.skills;
+    let comparisonVersion: number | undefined;
     if (bindingsToValidate?.some((binding) => binding.type === "custom")) {
       const current = await agents.retrieveAgent({
         agentId: c.req.param("agentId"),
@@ -268,6 +275,7 @@ export function buildAgentRoutes(
       if (current.type === "not_found") {
         return c.json(notFound(`Agent ${c.req.param("agentId")} was not found`), 404);
       }
+      comparisonVersion = current.agent.version;
       bindingsToValidate = changedCustomBindings(
         bindingsToValidate,
         current.agent.skills,
@@ -282,9 +290,11 @@ export function buildAgentRoutes(
       return c.json(invalidRequest(invalidSkill), 400);
     }
 
-    const result = await agents.updateAgent(
-      toUpdateAgentCommand(c.req.param("agentId"), parsed.data),
-    );
+    const command = toUpdateAgentCommand(c.req.param("agentId"), parsed.data);
+    if (comparisonVersion !== undefined && command.expectedVersion === undefined) {
+      command.expectedVersion = comparisonVersion;
+    }
+    const result = await agents.updateAgent(command);
     if (result.type === "version_conflict") {
       return c.json(conflict(result.message), 409);
     }

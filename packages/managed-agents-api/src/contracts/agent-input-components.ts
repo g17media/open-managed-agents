@@ -153,14 +153,14 @@ export const agentSkillInputSchema = z.discriminatedUnion("type", [
     .object({
       skill_id: z.string().min(1),
       type: z.literal("anthropic"),
-      version: z.string().nullable().optional(),
+      version: z.string().min(1).nullable().optional(),
     })
     .strict(),
   z
     .object({
       skill_id: z.string().min(1),
       type: z.literal("custom"),
-      version: z.string().nullable().optional(),
+      version: z.string().min(1).nullable().optional(),
     })
     .strict(),
 ]) satisfies z.ZodType<BetaManagedAgentsSkillParams>;
