@@ -533,7 +533,11 @@ Four built-in skills ship ready to attach (no upload): `xlsx`, `pdf`, `docx`, `p
 
 ## Vaults & outbound credentials
 
-**Tools never see your tokens.** When a sandbox makes an HTTP request, an outbound resolver — `oma-vault` sidecar on self-host (mockttp HTTPS proxy with a trusted self-signed CA), the agent worker's `outboundByHost` interceptor on Cloudflare — matches the request hostname against the session's vaults, **strips any inbound `Authorization`/`x-api-key`/`x-goog-api-key`/`xi-api-key`**, injects the real credential, and forwards. A prompt-injected agent has nothing to leak; `env | grep TOKEN` returns nothing inside the sandbox.
+**Tools never see your vault tokens.** On self-host, the `oma-vault` sidecar (mockttp HTTPS proxy with a trusted self-signed CA) matches the request hostname against the session's vaults. For matched credentials it **strips inbound `Authorization`/`x-api-key`/`x-goog-api-key`/`xi-api-key`**, injects the real credential, and forwards. Unmatched destinations keep caller-supplied authentication. Vault tokens are not exported into the sandbox environment.
+
+For ElevenLabs on self-host, register a `static_bearer` credential with `mcp_server_url: "https://api.elevenlabs.io"` and send `xi-api-key: proxy` on the sandbox request. `oma-vault` replaces that placeholder with the stored token in `xi-api-key`. Plaintext HTTP requests to HTTPS-registered credential hosts are rejected before forwarding.
+
+On Cloudflare, the agent worker's `outboundByHost` interceptor injects tokens as `Authorization: Bearer`. Its outbound path does not adapt provider API-key headers or strip/replace `xi-api-key`; the self-host ElevenLabs configuration above does not provide ElevenLabs authentication on Cloudflare.
 
 ```bash
 # Create a vault and add a static bearer bound to api.github.com

@@ -504,7 +504,11 @@ POST /v1/skills
 
 ## Vaults 与出站凭证
 
-**工具看不到你的 token。** 沙箱发起 HTTP 请求时，出站 resolver —— 自部署上是 `oma-vault` sidecar（mockttp HTTPS 代理 + 自签 CA），Cloudflare 上是 agent worker 的 `outboundByHost` 拦截器 —— 按 host 匹配会话的 vault，**剥掉入站的 `Authorization`/`x-api-key`/`x-goog-api-key`/`xi-api-key`**，注入真实凭证，再转发。被 prompt injection 的 agent 拿不到任何东西可泄露；沙箱里 `env | grep TOKEN` 什么都没有。
+**工具看不到你的 vault token。** 自部署的 `oma-vault` sidecar（mockttp HTTPS 代理 + 受信任的自签 CA）按请求 host 匹配会话的 vault。匹配到凭证后，**剥掉入站的 `Authorization`/`x-api-key`/`x-goog-api-key`/`xi-api-key`**，注入真实凭证，再转发。未匹配的目标保留调用方提供的认证信息。Vault token 不会导出到沙箱环境变量中。
+
+自部署使用 ElevenLabs 时，注册 `static_bearer` 凭证，设置 `mcp_server_url: "https://api.elevenlabs.io"`，并在沙箱请求中发送 `xi-api-key: proxy`。`oma-vault` 会将占位值替换成存储的 token，注入 `xi-api-key`。对于注册了 HTTPS 凭证的主机，明文 HTTP 请求会在转发前被拒绝。
+
+Cloudflare 上，agent worker 的 `outboundByHost` 拦截器以 `Authorization: Bearer` 形式注入 token。该出站路径不会适配提供商的 API-key 请求头，也不会剥掉或替换 `xi-api-key`；上述自部署 ElevenLabs 配置无法在 Cloudflare 上完成 ElevenLabs 认证。
 
 ```bash
 # 建一个 vault 并加一条绑到 api.github.com 的 static bearer
