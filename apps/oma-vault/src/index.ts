@@ -55,6 +55,7 @@ import { createNodeLogger } from "@open-managed-agents/observability/logger/node
 import { setRootLogger, type Logger } from "@open-managed-agents/observability";
 import { evaluateEgress, type NetworkingPolicy } from "./egress-policy";
 import { API_KEY_HEADERS, apiKeyHeaderFor } from "./api-key-header";
+import { requestLogFields } from "./request-log";
 
 import { SqlCredentialStore } from "@open-managed-agents/credential-store-sql";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-node";
@@ -709,6 +710,7 @@ const proxy = getLocal({
 // same handler thanks to mockttp's TLS termination.
 proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   const url = req.url;
+  const requestLog = requestLogFields(req.method, url);
   // Session attribution rides in via mockttp socket metadata (proxy auth
   // set by the sandbox adapters). Invalid signature with a configured key
   // means someone inside a sandbox is forging attribution — fail closed:
@@ -719,8 +721,8 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   const forged = Boolean(rawAttr.sessionId && proxyKey && !verifyVaultProxyAttribution(rawAttr, proxyKey));
   if (forged) {
     logger.warn(
-      { op: "oma_vault.bad_attribution", session_id: rawAttr.sessionId, url },
-      `rejecting unverified session attribution for ${url}`,
+      { op: "oma_vault.bad_attribution", session_id: rawAttr.sessionId, ...requestLog },
+      "Rejecting unverified session attribution",
     );
   }
   const attr: VaultProxyAttribution = forged ? {} : rawAttr;
@@ -731,8 +733,8 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   const denial = await checkEgress(url, attr);
   if (denial) {
     logger.warn(
-      { op: "oma_vault.egress_denied", session_id: attr.sessionId, url },
-      `egress denied for ${url}: ${denial}`,
+      { op: "oma_vault.egress_denied", session_id: attr.sessionId, ...requestLog, status: 403 },
+      "Egress denied",
     );
     return {
       statusCode: 403,
@@ -749,13 +751,13 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   try {
     // Do this before resolving/injecting credentials or forwarding any request body.
     if (await deniesPlaintextCredentialHost(url)) {
-      logger.warn({ op: "oma_vault.plaintext_denied", method: req.method, hostname: new URL(url).hostname, status: 403 }, "Plaintext egress to HTTPS credential host denied");
+      logger.warn({ op: "oma_vault.plaintext_denied", ...requestLog, session_id: attr.sessionId, status: 403 }, "Plaintext egress to HTTPS credential host denied");
       return { statusCode: 403, headers: { "content-type": "text/plain" }, body: "oma-vault: plaintext egress denied" };
     }
     matched = forged ? null : await findCredentialForUrl(url, attr, selector, /^basic /i.test(String(req.headers["authorization"] ?? "")));
   }
   catch {
-    logger.warn({ op: "oma_vault.credential_failed", session_id: attr.sessionId }, "Credential resolution failed");
+    logger.warn({ op: "oma_vault.credential_failed", ...requestLog, session_id: attr.sessionId, status: 502 }, "Credential resolution failed");
     return { statusCode: 502, headers: { "content-type": "text/plain" }, body: "oma-vault: credential resolution failed" };
   }
 
@@ -824,24 +826,24 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
       refresh = companion.door.refresh;
       refreshCredentialId = companion.door.credentialId;
       logger.info(
-        { op: "oma_vault.inject", header: companion.header, url, credential_id: matched.credentialId, session_id: attr.sessionId },
-        `inject ${companion.header} for ${url}`,
+        { op: "oma_vault.inject", header: companion.header, ...requestLog, credential_id: matched.credentialId, session_id: attr.sessionId },
+        "Inject companion credential",
       );
       logger.info(
-        { op: "oma_vault.inject", header: "authorization", url, credential_id: companion.door.credentialId, session_id: attr.sessionId },
-        `inject authorization (ingress door) for ${url}`,
+        { op: "oma_vault.inject", header: "authorization", ...requestLog, credential_id: companion.door.credentialId, session_id: attr.sessionId },
+        "Inject ingress credential",
       );
     } else {
       headers[injectName] = useGitBasic ? matched.gitBasicHeader! : bareToken ?? matched.injectHeader.value;
       // Only the plain Bearer shape is retried after a refresh; git Basic and API-key headers are not.
       if (!useGitBasic && bareToken === undefined) refresh = matched.refresh;
       logger.info(
-        { op: "oma_vault.inject", header: injectName, url, credential_id: matched.credentialId, session_id: attr.sessionId },
-        `inject ${injectName} for ${url}`,
+        { op: "oma_vault.inject", header: injectName, ...requestLog, credential_id: matched.credentialId, session_id: attr.sessionId },
+        "Inject credential",
       );
     }
   } else {
-    logger.debug({ op: "oma_vault.passthrough", method: req.method, url }, `passthrough ${req.method} ${url}`);
+    logger.debug({ op: "oma_vault.passthrough", ...requestLog, session_id: attr.sessionId }, "Passthrough request");
   }
 
   // Forward to upstream. Read body as buffer to handle binary uploads.
@@ -857,7 +859,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     upstream = await forward();
     if (upstream.status === 401 && refresh) {
       const fresh = await refresh().catch((err: unknown) => {
-        logger.warn({ error_class: safeErrorClass(err), op: "oma_vault.refresh_failed", url, credential_id: refreshCredentialId }, "Credential refresh failed");
+        logger.warn({ error_class: safeErrorClass(err), op: "oma_vault.refresh_failed", ...requestLog, credential_id: refreshCredentialId, session_id: attr.sessionId, status: upstream.status }, "Credential refresh failed");
         return null;
       });
       if (fresh) {
@@ -865,14 +867,14 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
         headers.authorization = `Bearer ${fresh}`;
         upstream = await forward();
         logger.info(
-          { op: "oma_vault.refreshed", url, credential_id: refreshCredentialId, session_id: attr.sessionId, status: upstream.status },
-          `retried ${url} with a refreshed token`,
+          { op: "oma_vault.refreshed", ...requestLog, credential_id: refreshCredentialId, session_id: attr.sessionId, status: upstream.status },
+          "Retried request with refreshed token",
         );
       }
     }
   } catch (err) {
     // Header-validation errors can contain the injected secret; never log exception payloads.
-    logger.error({ error_class: safeErrorClass(err), op: "oma_vault.forward_failed", url }, "Upstream forwarding failed");
+    logger.error({ error_class: safeErrorClass(err), op: "oma_vault.forward_failed", ...requestLog, credential_id: matched?.credentialId, session_id: attr.sessionId, status: 502 }, "Upstream forwarding failed");
     return {
       statusCode: 502,
       headers: { "content-type": "text/plain" },
