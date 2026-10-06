@@ -131,7 +131,7 @@ beforeAll(async () => {
   const auth = { type: "static_basic", username: "public", token: "password", mcp_server_url: upstreamUrl };
   expect((await apiRequest("", "POST", { auth })).status).toBe(201);
   await sql.prepare("INSERT INTO credentials VALUES (?, ?, ?, ?, 0, 0, NULL)").bind("legacy-basic", "workspace", "vault", JSON.stringify(auth)).run();
-  child = spawn("pnpm", ["exec", "tsx", "src/index.ts"], { cwd: resolve(import.meta.dirname, ".."), detached: true, env: { ...process.env, ...(protocol === "https" && { NODE_EXTRA_CA_CERTS: upstreamCa }), CAP_OVERRIDE_FEEDFORWARD_ENDPOINTS: "localhost 127.0.0.1", DATABASE_URL: "", DATABASE_PATH: dbPath, OMA_VAULT_CA_DIR: join(directory, "ca"), OMA_VAULT_PORT: String(proxyPort), OMA_TENANT: "workspace", OMA_VAULT_PROXY_KEY: proxyKey, OMA_VAULT_UNATTRIBUTED_EGRESS: "allow", PLATFORM_ROOT_SECRET: rootSecret }, stdio: ["ignore", "pipe", "pipe"] });
+  child = spawn("pnpm", ["exec", "tsx", "src/index.ts"], { cwd: resolve(import.meta.dirname, ".."), detached: true, env: { ...process.env, LOG_LEVEL: "debug", ...(protocol === "https" && { NODE_EXTRA_CA_CERTS: upstreamCa }), CAP_OVERRIDE_FEEDFORWARD_ENDPOINTS: "localhost 127.0.0.1", DATABASE_URL: "", DATABASE_PATH: dbPath, OMA_VAULT_CA_DIR: join(directory, "ca"), OMA_VAULT_PORT: String(proxyPort), OMA_TENANT: "workspace", OMA_VAULT_PROXY_KEY: proxyKey, OMA_VAULT_UNATTRIBUTED_EGRESS: "allow", PLATFORM_ROOT_SECRET: rootSecret }, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout!.on("data", (chunk) => { logs += String(chunk); });
   child.stderr!.on("data", (chunk) => { logs += String(chunk); });
   await new Promise<void>((resolve, reject) => {
@@ -269,10 +269,16 @@ describe("real oma-vault Basic injection", () => {
     const credential = page.data.find((item: { auth: { mcp_server_url: string } }) => item.auth.mcp_server_url === registeredUrl);
     try {
       for (const [attributed, forged] of [[false, false], [true, false], [true, true]]) {
-        const response = await callProxyResponse(attributed, null, "", false, forged, `http://127.0.0.1:${sinkPort}/private-body`);
+        const response = await callProxyResponse(attributed, null, "", false, forged, `http://127.0.0.1:${sinkPort}/sentinel-downgrade-path?q=sentinel-downgrade-query`);
         expect(response).toEqual({ status: 403, body: "oma-vault: plaintext egress denied" });
       }
       expect(connections).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(logs).not.toContain("sentinel-downgrade");
+      const entry = logs.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+        .find((item) => item.op === "oma_vault.plaintext_denied");
+      expect(entry).toMatchObject({ method: "POST", scheme: "http", hostname: "127.0.0.1", status: 403 });
+      expect(entry).not.toHaveProperty("url");
     } finally {
       if (managed) await apiRequest(`/${credential.id}`, "DELETE");
       else await sql.prepare("DELETE FROM credentials WHERE id = ?").bind("https-only").run();
@@ -302,6 +308,40 @@ describe("real oma-vault Basic injection", () => {
       if (managed) await apiRequest(`/${credentialId}`, "DELETE");
       else await sql.prepare("DELETE FROM credentials WHERE id = ?").bind(credentialId).run();
       await new Promise<void>((resolve) => sink.close(() => resolve()));
+    }
+  });
+  it("omits URL member material from injection, passthrough, denial and failure logs", async () => {
+    const sentinel = "/sentinel-private-path?q=sentinel-private-query";
+    const start = logs.length;
+    expect(await callProxy(true, placeholder, sentinel)).toBe(204);
+    expectedAuth = placeholder;
+    try { expect(await callProxy(true, placeholder, sentinel, true)).toBe(204); }
+    finally { expectedAuth = authorization; }
+    expect(await callProxy(true, placeholder, sentinel, false, true)).toBe(401);
+    await sql.prepare("UPDATE managed_environments SET document = ? WHERE id = ?")
+      .bind(JSON.stringify({ id: "environment", config: { type: "cloud", networking: { type: "limited", allowedHosts: [], allowMcpServers: false, allowPackageManagers: false } } }), "environment").run();
+    try { expect(await callProxy(true, placeholder, sentinel)).toBe(403); }
+    finally {
+      await sql.prepare("UPDATE managed_environments SET document = ? WHERE id = ?")
+        .bind(JSON.stringify({ id: "environment", config: { type: "cloud", networking: { type: "unrestricted" } } }), "environment").run();
+    }
+    // mockttp rejects userinfo before the callback; the helper also tests this URL shape directly.
+    expect(await callProxy(false, null, "", false, false,
+      `http://sentinel-private-user:sentinel-private-password@unmapped.example.test${sentinel}`)).toBe(400);
+    await sql.prepare("INSERT INTO credentials VALUES (?, ?, ?, ?, 0, 0, NULL)")
+      .bind("sentinel-failure", "workspace", "vault", JSON.stringify({ type: "static_bearer", token: "invalid\r\nheader", mcp_server_url: "http://unmapped.example.test" })).run();
+    try {
+      expect(await callProxy(false, null, "", false, false, `http://unmapped.example.test${sentinel}`)).toBe(502);
+    } finally { await sql.prepare("DELETE FROM credentials WHERE id = ?").bind("sentinel-failure").run(); }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const captured = logs.slice(start);
+    expect(captured).not.toContain("sentinel-private");
+    const entries = captured.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+    for (const op of ["inject", "passthrough", "bad_attribution", "egress_denied", "forward_failed"]) {
+      const entry = entries.find((item) => item.op === `oma_vault.${op}`);
+      expect(entry, op).toBeDefined();
+      expect(entry).toMatchObject({ method: "POST", scheme: expect.any(String), hostname: expect.any(String) });
+      expect(entry).not.toHaveProperty("url");
     }
   });
   it("keeps passwords and encoded credentials out of proxy logs", () => {

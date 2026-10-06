@@ -211,6 +211,35 @@ describe("real service-account vault proxy", () => {
       expect(mints).toBe(before);
     } finally { expectedAuthorization = undefined; }
   });
+  it("omits URL member material on refresh success, refresh failure and resolution failure", async () => {
+    const url = `${upstreamUrl}/sentinel-refresh-path?text=sentinel-refresh-query`;
+    const start = logs.length;
+    const rejectPersistedToken = async () => {
+      const auth = (await store.find(location))!.credential.auth;
+      if (auth.type !== "service_account_jwt") throw new Error("Wrong fixture type");
+      rejectToken = auth.accessToken ?? undefined;
+    };
+    await rejectPersistedToken();
+    try { expect(await callProxy({ url })).toBe(204); }
+    finally { rejectToken = undefined; }
+    await rejectPersistedToken(); failMint = true;
+    try { expect(await callProxy({ url })).toBe(401); }
+    finally { rejectToken = undefined; failMint = false; }
+    await expire(); failMint = true;
+    try { expect(await callProxy({ url })).toBe(502); }
+    finally { failMint = false; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const captured = logs.slice(start);
+    expect(captured).not.toContain("sentinel-refresh");
+    const entries = captured.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+    for (const op of ["refreshed", "refresh_failed", "credential_failed"]) {
+      const entry = entries.find((item) => item.op === `oma_vault.${op}`);
+      expect(entry, op).toMatchObject({ method: "POST", scheme: "http", hostname: "localhost", session_id: "session" });
+      expect(entry).not.toHaveProperty("url");
+      expect(entry).not.toHaveProperty("err");
+    }
+    expect(entries.find((item) => item.op === "oma_vault.refresh_failed")).toMatchObject({ error_class: "Error", status: 401, credential_id: "sa" });
+  });
   it("never logs private keys or minted tokens", () => {
     expect(logs.includes("BEGIN PRIVATE KEY")).toBe(false);
     expect(privateKey.split("\n").filter((line) => line && !line.startsWith("-----")).some((line) => logs.includes(line))).toBe(false);
