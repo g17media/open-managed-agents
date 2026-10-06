@@ -653,6 +653,14 @@ async function checkEgress(url: string, attr: VaultProxyAttribution): Promise<st
   return evaluateEgress(hostname, await networkingForSession(attr.sessionId));
 }
 
+// Classify by trusted built-in classes, not a caller-controlled name/message/cause.
+function safeErrorClass(error: unknown): string {
+  if (error instanceof TypeError) return "TypeError";
+  if (error instanceof RangeError) return "RangeError";
+  if (error instanceof Error) return "Error";
+  return "UnknownError";
+}
+
 // ─── mockttp proxy ───────────────────────────────────────────────────────
 
 const proxy = getLocal({
@@ -807,7 +815,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     upstream = await forward();
     if (upstream.status === 401 && refresh) {
       const fresh = await refresh().catch((err: unknown) => {
-        logger.warn({ err, op: "oma_vault.refresh_failed", url, credential_id: refreshCredentialId }, `refresh failed for ${url}`);
+        logger.warn({ error_class: safeErrorClass(err), op: "oma_vault.refresh_failed", url, credential_id: refreshCredentialId }, "Credential refresh failed");
         return null;
       });
       if (fresh) {
@@ -821,12 +829,12 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
       }
     }
   } catch (err) {
-    const msg = (err as Error).message ?? String(err);
-    logger.error({ err, op: "oma_vault.forward_failed", url }, `forward failed for ${url}: ${msg}`);
+    // Header-validation errors can contain the injected secret; never log exception payloads.
+    logger.error({ error_class: safeErrorClass(err), op: "oma_vault.forward_failed", url }, "Upstream forwarding failed");
     return {
       statusCode: 502,
       headers: { "content-type": "text/plain" },
-      body: `oma-vault: upstream forward failed: ${msg}`,
+      body: "oma-vault: upstream forward failed",
     };
   }
 

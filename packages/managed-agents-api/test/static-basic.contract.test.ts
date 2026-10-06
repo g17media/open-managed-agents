@@ -48,7 +48,7 @@ describe("static Basic credentials API and application", () => {
   });
 
   it.each([
-    { username: undefined }, { username: "" }, { username: "bad:name" }, { username: "bad\nname" },
+    { username: undefined }, { username: "" }, { username: "bad:name" }, { username: "bad\nname" }, { username: "bad\x85name" },
     { token: undefined }, { token: "" }, { mcp_server_url: "not-a-url" },
     { mcp_server_url: "file:///tmp/local" }, { handle: "not-supported" },
   ])("rejects invalid Basic auth input %j", async (patch) => {
@@ -174,5 +174,30 @@ describe("credential metadata editing", () => {
     const after = await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" });
     expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true);
     expect((await (await request("/vcrd_basic")).json()).auth).toEqual({ type: "mcp_oauth", mcp_server_url: "https://oauth.example.test" });
+  });
+});
+
+
+describe("header-safe static credentials (High-1)", () => {
+  it.each(["static_bearer", "static_basic", "cap_cli"])("rejects invalid %s tokens on create and update without echoing or storing them", async (type) => {
+    const { request, store } = setup();
+    const input = { type, token: "safe-token", mcp_server_url: auth.mcp_server_url,
+      ...(type === "static_basic" && { username: "public" }), ...(type === "cap_cli" && { cli_id: "git" }) };
+    for (const character of ["\r\n", "\0", "\x1f", "\x7f", "\x85", "\x9f"]) {
+      const token = `synthetic-invalid-secret${character}second-line`;
+      const response = await request("", "POST", { auth: { ...input, token } });
+      expect(response.status).toBe(400);
+      const body = await response.text();
+      expect(body).toContain("Credential token contains invalid header characters");
+      expect(body).not.toContain("synthetic-invalid-secret");
+      expect(await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" })).toBeNull();
+    }
+    expect((await request("", "POST", { auth: input })).status).toBe(201);
+    for (const character of ["\r", "\n", "\x01", "\x85"]) {
+      const response = await request("/vcrd_basic", "POST", { auth: { type, token: `synthetic-invalid-secret${character}second-line` } });
+      expect(response.status).toBe(400);
+      expect(await response.text()).not.toContain("synthetic-invalid-secret");
+      expect((await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" }))?.credential.auth).toMatchObject({ token: "safe-token" });
+    }
   });
 });

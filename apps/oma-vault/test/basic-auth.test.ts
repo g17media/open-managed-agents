@@ -26,12 +26,13 @@ let logs = "";
 let expectStripped = false;
 let expectPassthrough: boolean | undefined;
 let api: ReturnType<typeof buildCredentialRoutes>;
+let store: SqlCredentialStore;
 const seen: Array<{ matches: boolean; path: string }> = [];
 async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return (server.address() as { port: number }).port;
 }
-async function callProxy(managed: boolean, auth: string | null = placeholder, path = "/api/public/otel/v1/traces", unmatched = false, forged = false): Promise<number> {
+async function callProxyResponse(managed: boolean, auth: string | null = placeholder, path = "/api/public/otel/v1/traces", unmatched = false, forged = false, targetUrl?: string): Promise<{ status: number; body: string }> {
   const headers: Record<string, string> = {};
   if (auth !== null) headers.authorization = auth;
   headers["x-review-marker"] = "preserved";
@@ -43,10 +44,10 @@ async function callProxy(managed: boolean, auth: string | null = placeholder, pa
     const url = new URL(sessionVaultProxyUrl(`http://127.0.0.1:${proxyPort}`, { tenantId: "workspace", sessionId: "session" }, forged ? "wrong-key" : proxyKey));
     headers["proxy-authorization"] = `Basic ${Buffer.from(`${url.username}:${url.password}`).toString("base64")}`;
   }
-  const target = new URL(upstreamUrl + path);
+  const target = new URL(targetUrl ?? upstreamUrl + path);
   if (unmatched) target.hostname = "127.0.0.1";
   let agent: Agent | undefined;
-  if (protocol === "https") {
+  if (target.protocol === "https:") {
     const ca = await readFile(join(directory, "ca", "ca.crt"));
     const socket = await new Promise<import("node:net").Socket>((resolve, reject) => {
       const tunnel = httpRequest({ hostname: "127.0.0.1", port: proxyPort, method: "CONNECT", path: target.host,
@@ -60,15 +61,20 @@ async function callProxy(managed: boolean, auth: string | null = placeholder, pa
     agent.createConnection = () => tlsSocket;
     delete headers["proxy-authorization"];
   }
-  return new Promise<number>((resolve, reject) => {
-    const options = protocol === "https"
+  return new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const options = target.protocol === "https:"
       ? { hostname: target.hostname, port: target.port, path: target.pathname + target.search, agent }
       : { hostname: "127.0.0.1", port: proxyPort, path: target.href };
-    const request = (protocol === "https" ? httpsRequest : httpRequest)({ ...options, method: "POST", headers }, (response) => {
-      response.resume(); response.on("end", () => resolve(response.statusCode!));
+    const request = (target.protocol === "https:" ? httpsRequest : httpRequest)({ ...options, method: "POST", headers }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({ status: response.statusCode!, body: Buffer.concat(chunks).toString() }));
     });
     request.on("error", reject); request.end("test trace body");
   }).finally(() => agent?.destroy());
+}
+async function callProxy(...args: Parameters<typeof callProxyResponse>): Promise<number> {
+  return (await callProxyResponse(...args)).status;
 }
 function apiRequest(path: string, method: string, body?: unknown) {
   return api.request(`/vault/credentials${path}`, { method, headers: { "content-type": "application/json", "anthropic-beta": "managed-agents-2026-04-01" }, ...(body !== undefined && { body: JSON.stringify(body) }) });
@@ -115,7 +121,7 @@ beforeAll(async () => {
   await sql.prepare("INSERT INTO managed_vaults VALUES (?, ?, NULL)").bind("workspace", "vault").run();
   const rootSecret = randomBytes(32).toString("hex");
   const crypto = new WebCryptoAesGcm(rootSecret, "managed.vault.credentials");
-  const store = new SqlCredentialStore(sql, { seal: async ({ plaintext }) => ({ ciphertext: await crypto.encrypt(plaintext) }), open: async ({ ciphertext }) => ({ plaintext: await crypto.decrypt(ciphertext) }) });
+  store = new SqlCredentialStore(sql, { seal: async ({ plaintext }) => ({ ciphertext: await crypto.encrypt(plaintext) }), open: async ({ ciphertext }) => ({ plaintext: await crypto.decrypt(ciphertext) }) });
   let id = 0;
   api = buildCredentialRoutes(new CredentialsApplicationService({ workspaceId: "workspace", store,
     vaults: { find: async () => ({ id: "vault", archivedAt: null, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), metadata: {} }) },
@@ -220,6 +226,32 @@ describe("real oma-vault Basic injection", () => {
     expect(await callProxy(managed, "Bearer placeholder")).toBe(204);
     expect(await callProxy(managed, null)).toBe(204);
     expectedAuth = authorization;
+  });
+  it.each([[false, "unmapped.example.test"], [false, "api.elevenlabs.io"], [true, "unmapped.example.test"], [true, "api.elevenlabs.io"]] as const)("hides a stored CRLF token including provider Authorization fallback (managed=%s, host=%s)", async (managed, host) => {
+    // Bypass API validation to represent credentials persisted before hardening.
+    const token = "synthetic-crlf-secret\r\nsecond-secret-line";
+    const targetUrl = `http://${host}/v1/test`;
+    if (managed) await store.insert({ workspaceId: "workspace", credential: {
+      id: "malformed", vaultId: "vault", auth: { type: "static_bearer", token, mcpServerUrl: targetUrl },
+      metadata: {}, archivedAt: null, createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+    } });
+    else await sql.prepare("INSERT INTO credentials VALUES (?, ?, ?, ?, 0, 0, NULL)")
+      .bind("malformed", "workspace", "vault", JSON.stringify({ type: "static_bearer", token, mcp_server_url: targetUrl })).run();
+    const before = requests;
+    try {
+      const response = await callProxyResponse(managed, null, "", false, false, targetUrl);
+      expect(response).toEqual({ status: 502, body: "oma-vault: upstream forward failed" });
+      expect(requests).toBe(before);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(logs).toContain('"error_class":"TypeError"');
+      for (const secret of [token, "synthetic-crlf-secret", "second-secret-line"]) {
+        expect(response.body).not.toContain(secret);
+        expect(logs).not.toContain(secret);
+      }
+    } finally {
+      if (managed) await store.delete({ workspaceId: "workspace", vaultId: "vault", credentialId: "malformed" });
+      else await sql.prepare("DELETE FROM credentials WHERE id = ?").bind("malformed").run();
+    }
   });
   it("keeps passwords and encoded credentials out of proxy logs", () => {
     expect(["password", "rotated", "cHVibGljOnBhc3N3b3Jk", "cHVibGljOnJvdGF0ZWQ="].some((secret) => logs.includes(secret))).toBe(false);
