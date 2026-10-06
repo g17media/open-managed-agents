@@ -108,7 +108,12 @@ const oauthRefreshResponseSchema = z
   .strict();
 
 const handleSchema = z.string().regex(/^[A-Za-z0-9._-]+$/u).max(128);
-const basicUsernameSchema = z.string().min(1).regex(/^[^:\x00-\x1f\x7f]+$/u);
+const basicUsernameSchema = z.string().min(1).regex(/^[^:\x00-\x1f\x7f-\x9f]+$/u);
+// Preserve spaces, tabs and exact secret bytes, but reject control characters before storage.
+const headerTokenSchema = z.string().min(1).refine(
+  (value) => !/[\x00-\x08\x0a-\x1f\x7f-\x9f]/u.test(value),
+  "Credential token contains invalid header characters",
+);
 const credentialUrlSchema = z.url({ protocol: /^https?$/ });
 // WebCrypto keeps API validation portable; signing remains in the vault runtime.
 function derElement(tag: number, bytes: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -193,11 +198,11 @@ const registryAuthSchema = z.object({
 }).strict();
 const credentialCreateAuthSchema = z.preprocess(normalizeServiceAccountKey, z.discriminatedUnion("type", [
   serviceAccountCreateSchema,
-  z.object({ type: z.literal("static_basic"), username: basicUsernameSchema, token: z.string().min(1), mcp_server_url: credentialUrlSchema }).strict(),
+  z.object({ type: z.literal("static_basic"), username: basicUsernameSchema, token: headerTokenSchema, mcp_server_url: credentialUrlSchema }).strict(),
   registryAuthSchema.refine((auth) => !!auth.token || (!!auth.username && !!auth.password), {
     message: "Provide a registry token or both username and password",
   }),
-  z.object({ type: z.literal("cap_cli"), cli_id: z.string().min(1), token: z.string().min(1),
+  z.object({ type: z.literal("cap_cli"), cli_id: z.string().min(1), token: headerTokenSchema,
     mcp_server_url: credentialUrlSchema.optional(), handle: handleSchema.optional(),
     extras: z.record(z.string(), z.string()).optional() }).strict(),
   z
@@ -213,7 +218,7 @@ const credentialCreateAuthSchema = z.preprocess(normalizeServiceAccountKey, z.di
     .object({
       type: z.literal("static_bearer"),
       handle: handleSchema.optional(),
-      token: z.string().min(1),
+      token: headerTokenSchema,
       mcp_server_url: credentialUrlSchema,
     })
     .strict(),
@@ -230,9 +235,9 @@ const credentialCreateAuthSchema = z.preprocess(normalizeServiceAccountKey, z.di
 
 const credentialUpdateAuthSchema = z.preprocess(normalizeServiceAccountKey, z.discriminatedUnion("type", [
   serviceAccountUpdateSchema,
-  z.object({ type: z.literal("static_basic"), username: basicUsernameSchema.optional(), mcp_server_url: credentialUrlSchema.optional(), token: z.string().min(1).nullable().optional() }).strict(),
+  z.object({ type: z.literal("static_basic"), username: basicUsernameSchema.optional(), mcp_server_url: credentialUrlSchema.optional(), token: headerTokenSchema.nullable().optional() }).strict(),
   registryAuthSchema,
-  z.object({ type: z.literal("cap_cli"), token: z.string().min(1).nullable().optional(),
+  z.object({ type: z.literal("cap_cli"), token: headerTokenSchema.nullable().optional(),
     mcp_server_url: credentialUrlSchema.optional(), handle: handleSchema.nullable().optional(),
     extras: z.record(z.string(), z.string()).optional() }).strict(),
   z
@@ -248,7 +253,7 @@ const credentialUpdateAuthSchema = z.preprocess(normalizeServiceAccountKey, z.di
       type: z.literal("static_bearer"),
       mcp_server_url: credentialUrlSchema.optional(),
       handle: handleSchema.nullable().optional(),
-      token: z.string().min(1).nullable().optional(),
+      token: headerTokenSchema.nullable().optional(),
     })
     .strict(),
   z
