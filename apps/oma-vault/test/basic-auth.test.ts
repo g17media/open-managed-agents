@@ -253,6 +253,57 @@ describe("real oma-vault Basic injection", () => {
       else await sql.prepare("DELETE FROM credentials WHERE id = ?").bind("malformed").run();
     }
   });
+  it.each([false, true])("rejects plaintext before any upstream connection for HTTPS registrations (managed registration=%s)", async (managed) => {
+    // Listen for TCP connections, not just HTTP requests: even a TLS/plaintext mismatch must not connect.
+    const sink = createServer();
+    let connections = 0;
+    sink.on("connection", (socket) => { connections++; socket.destroy(); });
+    const sinkPort = await listen(sink);
+    const registeredUrl = "https://127.0.0.1"; // Different port must not bypass hostname protection.
+    if (managed) {
+      const response = await apiRequest("", "POST", { auth: { type: "static_bearer", token: "https-only-key", mcp_server_url: registeredUrl } });
+      expect(response.status).toBe(201);
+    } else await sql.prepare("INSERT INTO credentials VALUES (?, ?, ?, ?, 0, 0, NULL)")
+      .bind("https-only", "workspace", "vault", JSON.stringify({ type: "static_bearer", token: "https-only-key", mcp_server_url: registeredUrl })).run();
+    const page = await (await apiRequest("", "GET")).json();
+    const credential = page.data.find((item: { auth: { mcp_server_url: string } }) => item.auth.mcp_server_url === registeredUrl);
+    try {
+      for (const [attributed, forged] of [[false, false], [true, false], [true, true]]) {
+        const response = await callProxyResponse(attributed, null, "", false, forged, `http://127.0.0.1:${sinkPort}/private-body`);
+        expect(response).toEqual({ status: 403, body: "oma-vault: plaintext egress denied" });
+      }
+      expect(connections).toBe(0);
+    } finally {
+      if (managed) await apiRequest(`/${credential.id}`, "DELETE");
+      else await sql.prepare("DELETE FROM credentials WHERE id = ?").bind("https-only").run();
+      await new Promise<void>((resolve) => sink.close(() => resolve()));
+    }
+  });
+  it.each([false, true])("does not reintroduce HTTPS credentials through CAP hostname fallback (managed=%s)", async (managed) => {
+    let receivedAuth: string | undefined;
+    const sink = createServer((request, response) => {
+      receivedAuth = request.headers.authorization;
+      request.resume(); response.writeHead(204); response.end();
+    });
+    const sinkPort = await listen(sink);
+    const targetUrl = `http://127.0.0.1:${sinkPort}/internal`;
+    const registeredUrl = "https://other-registered.example.test";
+    let credentialId = "https-cap";
+    if (managed) {
+      const response = await apiRequest("", "POST", { auth: { type: "cap_cli", cli_id: "feedforward", token: "https-cap-secret", mcp_server_url: registeredUrl } });
+      expect(response.status).toBe(201);
+      credentialId = (await response.json()).id;
+    } else await sql.prepare("INSERT INTO credentials VALUES (?, ?, ?, ?, 0, 0, NULL)")
+      .bind(credentialId, "workspace", "vault", JSON.stringify({ type: "cap_cli", cli_id: "feedforward", token: "https-cap-secret", mcp_server_url: registeredUrl })).run();
+    try {
+      expect(await callProxy(managed, "Bearer caller", "", false, false, targetUrl)).toBe(204);
+      expect(receivedAuth).toBe("Bearer caller");
+    } finally {
+      if (managed) await apiRequest(`/${credentialId}`, "DELETE");
+      else await sql.prepare("DELETE FROM credentials WHERE id = ?").bind(credentialId).run();
+      await new Promise<void>((resolve) => sink.close(() => resolve()));
+    }
+  });
   it("keeps passwords and encoded credentials out of proxy logs", () => {
     expect(["password", "rotated", "cHVibGljOnBhc3N3b3Jk", "cHVibGljOnJvdGF0ZWQ="].some((secret) => logs.includes(secret))).toBe(false);
   });

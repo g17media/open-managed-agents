@@ -296,8 +296,9 @@ async function findCredentialForUrl(
 ): Promise<MatchedCred | null> {
   let host: string;
   let hostname: string;
+  let protocol: string;
   try {
-    ({ host, hostname } = new URL(url));
+    ({ host, hostname, protocol } = new URL(url));
   } catch {
     return null;
   }
@@ -334,7 +335,7 @@ async function findCredentialForUrl(
       const records = await listManagedVaultCredentials(managedCredentials, attr.tenantId, activeVaults);
       const credentials = records.map((record) => record.credential);
       const primary = matchManagedCredential(credentials, url, selector, incomingBasic);
-      const door = matchManagedCapCredential(credentials, hostname);
+      const door = matchManagedCapCredential(credentials, hostname, protocol);
       const credential = primary ?? door;
       if (!credential) return null;
       const matched = await toManagedMatched(credential, records, attr.tenantId);
@@ -386,7 +387,7 @@ async function findCredentialForUrl(
       .bind(row.tenant_id, ...vaultIds)
       .all<Row>();
     const rows = result.results ?? [];
-    return matchRowsByHost(rows, host, selector, incomingBasic) ?? matchRowsByCapSpec(rows, hostname);
+    return matchRowsByHost(rows, host, protocol, selector, incomingBasic) ?? matchRowsByCapSpec(rows, hostname, protocol);
   }
 
   // Legacy host-wide lookup. When OMA_TENANT="*" we accept any tenant;
@@ -404,7 +405,7 @@ async function findCredentialForUrl(
     .bind(scopeTenantId, scopeTenantId)
     .all<Row>();
   const rows = result.results ?? [];
-  return matchRowsByHost(rows, host, selector, incomingBasic) ?? matchRowsByCapSpec(rows, hostname);
+  return matchRowsByHost(rows, host, protocol, selector, incomingBasic) ?? matchRowsByCapSpec(rows, hostname, protocol);
 }
 
 type Row = {
@@ -420,13 +421,14 @@ type Row = {
  * Newest managed cap_cli credential for the CLI that cap maps `hostname` to.
  * Fallback for credentials the device flow wrote without an mcp_server_url.
  */
-function matchManagedCapCredential(credentials: Credential[], hostname: string): Credential | null {
+function matchManagedCapCredential(credentials: Credential[], hostname: string, protocol: string): Credential | null {
   const spec = capRegistry.byHostname(hostname);
   if (!spec) return null;
   let best: Credential | null = null;
   for (const credential of credentials) {
     const auth = credential.auth;
     if (credential.archivedAt || auth.type !== "cap_cli" || auth.cliId !== spec.cli_id || !auth.token) continue;
+    if (protocol === "http:" && isHttpsBinding(auth.mcpServerUrl)) continue;
     if (best === null || Date.parse(credential.updatedAt) > Date.parse(best.updatedAt)) best = credential;
   }
   return best;
@@ -470,7 +472,7 @@ async function toManagedMatched(
 }
 
 /** Legacy-row counterpart of matchManagedCapCredential. */
-function matchRowsByCapSpec(rows: Row[], hostname: string): MatchedCred | null {
+function matchRowsByCapSpec(rows: Row[], hostname: string, protocol: string): MatchedCred | null {
   const spec = capRegistry.byHostname(hostname);
   if (!spec) return null;
   let best: { ts: number; match: MatchedCred } | null = null;
@@ -478,6 +480,7 @@ function matchRowsByCapSpec(rows: Row[], hostname: string): MatchedCred | null {
     let auth: CredentialAuth;
     try { auth = JSON.parse(row.auth) as CredentialAuth; } catch { continue; }
     if (auth.type !== "cap_cli" || auth.cli_id !== spec.cli_id) continue;
+    if (protocol === "http:" && isHttpsBinding(auth.mcp_server_url)) continue;
     const headerSpec = authToHeader(auth);
     if (!headerSpec) continue;
     const ts = row.updated_at ?? row.created_at;
@@ -499,15 +502,15 @@ function matchRowsByCapSpec(rows: Row[], hostname: string): MatchedCred | null {
  * otherwise), then the other unhandled kind, then unmatched handled credentials.
  * Existing git selectors retain priority over static_basic on the same host.
  */
-function matchRowsByHost(rows: Row[], host: string, selector?: string, incomingBasic = selector !== undefined): MatchedCred | null {
+function matchRowsByHost(rows: Row[], host: string, protocol: string, selector?: string, incomingBasic = selector !== undefined): MatchedCred | null {
   let best: { rank: number; match: MatchedCred } | null = null;
   for (const row of rows) {
     let auth: CredentialAuth;
     try { auth = JSON.parse(row.auth) as CredentialAuth; } catch { continue; }
     if (!auth.mcp_server_url) continue;
-    let credHost: string;
-    try { credHost = new URL(auth.mcp_server_url).host; } catch { continue; }
-    if (credHost !== host) continue;
+    let credentialUrl: URL;
+    try { credentialUrl = new URL(auth.mcp_server_url); } catch { continue; }
+    if (credentialUrl.host !== host || (protocol === "http:" && credentialUrl.protocol === "https:")) continue;
     const headerSpec = authToHeader(auth);
     if (!headerSpec) continue;
     const handle = typeof auth.handle === "string" && auth.handle.length > 0 ? auth.handle : undefined;
@@ -661,6 +664,38 @@ function safeErrorClass(error: unknown): string {
   return "UnknownError";
 }
 
+/** HTTPS registrations protect the whole hostname, including requests to another port. */
+function isHttpsBinding(registeredUrl: string | undefined, hostname?: string): boolean {
+  if (!registeredUrl) return false;
+  try {
+    const target = new URL(registeredUrl);
+    return target.protocol === "https:" && (hostname === undefined || target.hostname === hostname);
+  } catch { return false; }
+}
+
+/** Check all active registrations in the operator's tenant scope, even for forged/unattributed traffic. */
+async function deniesPlaintextCredentialHost(url: string): Promise<boolean> {
+  const request = new URL(url);
+  if (request.protocol !== "http:") return false;
+  const legacy = await sql.prepare(
+    "SELECT auth FROM credentials WHERE archived_at IS NULL AND (? = '*' OR tenant_id = ?)",
+  ).bind(scopeTenantId, scopeTenantId).all<{ auth: string }>();
+  for (const row of legacy.results ?? []) {
+    let auth: CredentialAuth;
+    try { auth = JSON.parse(row.auth) as CredentialAuth; } catch { continue; }
+    if (isHttpsBinding(auth.mcp_server_url, request.hostname)) return true;
+  }
+  const managed = await sql.prepare(
+    "SELECT workspace_id, vault_id, id FROM managed_credentials WHERE archived_at IS NULL AND (? = '*' OR workspace_id = ?)",
+  ).bind(scopeTenantId, scopeTenantId).all<{ workspace_id: string; vault_id: string; id: string }>();
+  for (const row of managed.results ?? []) {
+    const record = await managedCredentials.find({ workspaceId: row.workspace_id, vaultId: row.vault_id, credentialId: row.id });
+    const auth = record?.credential.auth;
+    if (auth && "mcpServerUrl" in auth && isHttpsBinding(auth.mcpServerUrl, request.hostname)) return true;
+  }
+  return false;
+}
+
 // ─── mockttp proxy ───────────────────────────────────────────────────────
 
 const proxy = getLocal({
@@ -711,7 +746,14 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   // wants when several match the host (see matchRowsByHost).
   const selector = basicAuthUsername(req.headers["authorization"]);
   let matched: MatchedCred | null;
-  try { matched = forged ? null : await findCredentialForUrl(url, attr, selector, /^basic /i.test(String(req.headers["authorization"] ?? ""))); }
+  try {
+    // Do this before resolving/injecting credentials or forwarding any request body.
+    if (await deniesPlaintextCredentialHost(url)) {
+      logger.warn({ op: "oma_vault.plaintext_denied", method: req.method, hostname: new URL(url).hostname, status: 403 }, "Plaintext egress to HTTPS credential host denied");
+      return { statusCode: 403, headers: { "content-type": "text/plain" }, body: "oma-vault: plaintext egress denied" };
+    }
+    matched = forged ? null : await findCredentialForUrl(url, attr, selector, /^basic /i.test(String(req.headers["authorization"] ?? "")));
+  }
   catch {
     logger.warn({ op: "oma_vault.credential_failed", session_id: attr.sessionId }, "Credential resolution failed");
     return { statusCode: 502, headers: { "content-type": "text/plain" }, body: "oma-vault: credential resolution failed" };
