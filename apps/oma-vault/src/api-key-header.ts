@@ -1,3 +1,4 @@
+// Select the fixed provider API-key header for eligible self-host static bearer requests.
 type ApiKeyHeader = "x-goog-api-key" | "x-api-key" | "xi-api-key";
 
 /**
@@ -27,9 +28,13 @@ export function apiKeyHeaderFor(
   requestHeaders: Record<string, string | string[] | undefined>,
   matched: { apiKeyCapable?: boolean },
 ): ApiKeyHeader | undefined {
+  // Other credential types need their existing Authorization shape and refresh behavior.
   if (matched.apiKeyCapable !== true) return undefined;
   let host: string;
-  try { host = new URL(url).hostname; } catch { return undefined; }
+  try { host = new URL(url).hostname; } catch {
+    // An invalid URL cannot establish the trusted provider hostname for adaptation.
+    return undefined;
+  }
   const name = API_KEY_HEADER_BY_HOST.get(host);
   return name !== undefined && requestHeaders[name] !== undefined ? name : undefined;
 }

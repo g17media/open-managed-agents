@@ -1,3 +1,4 @@
+// Verify provider header selection preserves credential eligibility and exact hostname boundaries.
 import { describe, expect, it } from "vitest";
 import { apiKeyHeaderFor } from "../src/api-key-header";
 
