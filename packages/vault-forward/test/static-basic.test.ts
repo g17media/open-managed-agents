@@ -23,6 +23,12 @@ describe("static Basic vault forwarding", () => {
     expect(matchManagedCredential([basic], "https://example.test:8443")).toBeNull();
     expect(matchManagedCredential([{ ...basic, archivedAt: basic.createdAt }], "https://example.test")).toBeNull();
   });
+  it.each([basic, bearer, { ...bearer, auth: { type: "cap_cli" as const, cliId: "git", token: "pat", mcpServerUrl: "https://example.test" } }])("does not match an HTTPS credential to plaintext requests ($auth.type)", (credential) => {
+    expect(matchManagedCredential([credential], "http://example.test/path")).toBeNull();
+    const internal = { ...credential, auth: { ...credential.auth, mcpServerUrl: "http://example.test" } };
+    expect(matchManagedCredential([internal], "http://example.test/path")?.id).toBe(credential.id);
+    expect(matchManagedCredential([credential], "https://example.test/path")?.id).toBe(credential.id);
+  });
   it.each([
     ["brain", true, "handled"], ["placeholder", true, "basic"],
     [undefined, true, "basic"], [undefined, false, "bearer"],

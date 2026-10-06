@@ -53,12 +53,15 @@ export function matchManagedRepositoryResource(session: Session, url: string) {
 export function matchManagedCredential(
   credentials: Credential[], url: string, selector?: string, incomingBasic = selector !== undefined,
 ): Credential | null {
-  const host = new URL(url).host;
+  const request = new URL(url);
   let best: { rank: number; credential: Credential } | undefined;
   for (const credential of credentials) {
     const auth = credential.auth;
     if (credential.archivedAt || !("mcpServerUrl" in auth) || !auth.mcpServerUrl || (auth.type !== "service_account_jwt" && !credentialAuthorization(auth))) continue;
-    try { if (new URL(auth.mcpServerUrl).host !== host) continue; } catch { continue; }
+    try {
+      const target = new URL(auth.mcpServerUrl);
+      if (target.host !== request.host || (target.protocol === "https:" && request.protocol === "http:")) continue;
+    } catch { continue; }
     const handle = "handle" in auth ? auth.handle : undefined;
     const rank = credentialMatchRank(auth.type, handle, selector, incomingBasic);
     if (best === undefined || rank < best.rank) best = { rank, credential };
