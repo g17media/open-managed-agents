@@ -504,7 +504,7 @@ POST /v1/skills
 
 ## Vaults 与出站凭证
 
-**工具看不到你的 token。** 沙箱发起 HTTP 请求时，出站 resolver —— 自部署上是 `oma-vault` sidecar（mockttp HTTPS 代理 + 自签 CA），Cloudflare 上是 agent worker 的 `outboundByHost` 拦截器 —— 按 host 匹配会话的 vault，**剥掉入站的 `Authorization`/`x-api-key`/`x-goog-api-key`**，注入真实凭证，再转发。被 prompt injection 的 agent 拿不到任何东西可泄露；沙箱里 `env | grep TOKEN` 什么都没有。
+**工具看不到你的 token。** 沙箱发起 HTTP 请求时，出站 resolver —— 自部署上是 `oma-vault` sidecar（mockttp HTTPS 代理 + 自签 CA），Cloudflare 上是 agent worker 的 `outboundByHost` 拦截器 —— 按 host 匹配会话的 vault，**剥掉入站的 `Authorization`/`x-api-key`/`x-goog-api-key`/`xi-api-key`**，注入真实凭证，再转发。被 prompt injection 的 agent 拿不到任何东西可泄露；沙箱里 `env | grep TOKEN` 什么都没有。
 
 ```bash
 # 建一个 vault 并加一条绑到 api.github.com 的 static bearer

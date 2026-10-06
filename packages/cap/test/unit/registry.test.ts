@@ -230,7 +230,7 @@ describe("companion_token_header validation", () => {
   });
 
   it.each([
-    "authorization", "proxy-authorization", "x-api-key", "x-goog-api-key", "cookie",
+    "authorization", "proxy-authorization", "x-api-key", "x-goog-api-key", "xi-api-key", "cookie",
     "host", "content-length", "content-type", "connection", "expect", "keep-alive", "proxy-connection",
     "te", "trailer", "transfer-encoding", "upgrade",
   ])("rejects the vault's own credential slots and transport headers (%s)", (name) => {

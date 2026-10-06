@@ -132,7 +132,7 @@ function validateCompanionHeader(spec: CapSpec): void {
  * on without the caller asking for it.
  */
 const PROTECTED_COMPANION_HEADERS: ReadonlySet<string> = new Set([
-  "authorization", "proxy-authorization", "x-api-key", "x-goog-api-key", "cookie",
+  "authorization", "proxy-authorization", "x-api-key", "x-goog-api-key", "xi-api-key", "cookie",
   "host", "content-length", "content-type", "connection", "expect", "keep-alive", "proxy-connection",
   "te", "trailer", "transfer-encoding", "upgrade",
 ]);

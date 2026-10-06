@@ -54,6 +54,7 @@ import {
 import { createNodeLogger } from "@open-managed-agents/observability/logger/node";
 import { setRootLogger, type Logger } from "@open-managed-agents/observability";
 import { evaluateEgress, type NetworkingPolicy } from "./egress-policy";
+import { API_KEY_HEADERS, apiKeyHeaderFor } from "./api-key-header";
 
 import { SqlCredentialStore } from "@open-managed-agents/credential-store-sql";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-node";
@@ -231,7 +232,7 @@ interface MatchedCred {
   injectHeader: { name: string; value: string };
   /**
    * True only for a plain `static_bearer` credential: the one kind whose token may be placed in a
-   * provider's API-key header (see API_KEY_HEADER_BY_HOST). cap_cli, OAuth and repository
+   * provider's API-key header (see api-key-header.ts). cap_cli, OAuth and repository
    * credentials always stay in `Authorization`, whatever the request carries.
    */
   apiKeyCapable?: boolean;
@@ -546,40 +547,11 @@ function basicAuthUsername(headerValue: string | string[] | undefined): string |
   }
 }
 
-/**
- * Providers whose static API key must travel in a header of their own instead of
- * `Authorization: Bearer`. The mapping is fixed here, per host, so a request can never choose
- * where a token lands: it can only send the provider's own header (with any placeholder value) to
- * ask for that provider's documented shape. A host absent from this map always gets Bearer.
- */
-const API_KEY_HEADER_BY_HOST = new Map<string, "x-goog-api-key" | "x-api-key">([
-  ["generativelanguage.googleapis.com", "x-goog-api-key"],
-  ["api.anthropic.com", "x-api-key"],
-]);
-
 /** The token of an `Authorization: Bearer <token>` injection, or undefined for any other shape. */
 function bearerToken(header: { name: string; value: string }): string | undefined {
   if (header.name !== "authorization") return undefined;
   const match = /^Bearer (.+)$/.exec(header.value);
   return match?.[1];
-}
-
-/**
- * The API-key header to inject into instead of `Authorization`, or undefined to keep Bearer.
- * Requires all three: the host is one whose key header is known, the client sent that header, and
- * the matched credential is a plain static_bearer. Everything else — other hosts, cap_cli/OAuth
- * credentials, git Basic — is untouched by this adaptation.
- */
-function apiKeyHeaderFor(
-  url: string,
-  requestHeaders: Record<string, string | string[] | undefined>,
-  matched: MatchedCred,
-): "x-goog-api-key" | "x-api-key" | undefined {
-  if (matched.apiKeyCapable !== true) return undefined;
-  let host: string;
-  try { host = new URL(url).hostname; } catch { return undefined; }
-  const name = API_KEY_HEADER_BY_HOST.get(host);
-  return name !== undefined && requestHeaders[name] !== undefined ? name : undefined;
 }
 
 function authToHeader(auth: CredentialAuth): { name: string; value: string } | null {
@@ -747,7 +719,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   // strip, fetch() throws "fetch failed" when the inbound `host:
   // oma-vault:14322` clashes with the upstream URL's actual host.
   const STRIP = new Set([
-    ...(matched || forged ? ["authorization", "x-api-key", "x-goog-api-key"] : []),
+    ...(matched || forged ? ["authorization", ...API_KEY_HEADERS] : []),
     "host",
     "content-length",
     "connection",
@@ -782,9 +754,9 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   let refreshCredentialId = matched?.credentialId;
   if (matched) {
     const useGitBasic = matched.gitBasicHeader !== undefined && GIT_SMART_HTTP_RE.test(url);
-    // Gemini reads a static key only from `x-goog-api-key` (Anthropic from `x-api-key`); for those
-    // hosts a static_bearer token goes into that header when the client asked for it by sending
-    // it. The inbound header itself was stripped above like every other credential header, so the
+    // Gemini and Anthropic use their own API-key headers; ElevenLabs requires `xi-api-key`
+    // because it has no Bearer support at all. A static_bearer token goes into the mapped header
+    // when the client sends it. The inbound header was stripped above, so the
     // request supplies the shape only, never the value.
     const keyHeader = useGitBasic ? undefined : apiKeyHeaderFor(url, req.headers, matched);
     const bareToken = keyHeader !== undefined ? bearerToken(matched.injectHeader) : undefined;

@@ -37,6 +37,7 @@ async function callProxy(managed: boolean, auth: string | null = placeholder, pa
   headers["x-review-marker"] = "preserved";
   headers["x-api-key"] = "placeholder";
   headers["x-goog-api-key"] = "placeholder";
+  headers["xi-api-key"] = "placeholder";
   headers["x-agent-token"] = "placeholder";
   if (managed) {
     const url = new URL(sessionVaultProxyUrl(`http://127.0.0.1:${proxyPort}`, { tenantId: "workspace", sessionId: "session" }, forged ? "wrong-key" : proxyKey));
@@ -82,6 +83,7 @@ beforeAll(async () => {
       && request.headers["x-review-marker"] === "preserved"
       && request.headers["x-api-key"] === ((expectPassthrough ?? (unmatched && !expectStripped)) ? "placeholder" : undefined)
       && request.headers["x-goog-api-key"] === ((expectPassthrough ?? (unmatched && !expectStripped)) ? "placeholder" : undefined)
+      && request.headers["xi-api-key"] === ((expectPassthrough ?? (unmatched && !expectStripped)) ? "placeholder" : undefined)
       && request.headers["x-agent-token"] === ((expectPassthrough ?? (unmatched && !expectStripped)) ? "placeholder" : undefined)
       && request.headers["proxy-authorization"] === undefined;
     const chunks: Buffer[] = [];

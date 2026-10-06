@@ -533,7 +533,7 @@ Four built-in skills ship ready to attach (no upload): `xlsx`, `pdf`, `docx`, `p
 
 ## Vaults & outbound credentials
 
-**Tools never see your tokens.** When a sandbox makes an HTTP request, an outbound resolver — `oma-vault` sidecar on self-host (mockttp HTTPS proxy with a trusted self-signed CA), the agent worker's `outboundByHost` interceptor on Cloudflare — matches the request hostname against the session's vaults, **strips any inbound `Authorization`/`x-api-key`/`x-goog-api-key`**, injects the real credential, and forwards. A prompt-injected agent has nothing to leak; `env | grep TOKEN` returns nothing inside the sandbox.
+**Tools never see your tokens.** When a sandbox makes an HTTP request, an outbound resolver — `oma-vault` sidecar on self-host (mockttp HTTPS proxy with a trusted self-signed CA), the agent worker's `outboundByHost` interceptor on Cloudflare — matches the request hostname against the session's vaults, **strips any inbound `Authorization`/`x-api-key`/`x-goog-api-key`/`xi-api-key`**, injects the real credential, and forwards. A prompt-injected agent has nothing to leak; `env | grep TOKEN` returns nothing inside the sandbox.
 
 ```bash
 # Create a vault and add a static bearer bound to api.github.com
