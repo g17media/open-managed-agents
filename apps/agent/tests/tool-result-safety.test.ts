@@ -90,3 +90,48 @@ describe("tool result safety across conversion boundaries", () => {
     expect(result).toMatch(/\.\.\.\(truncated, total \d+ chars\)$/);
   });
 });
+
+describe("read tool binary payloads", () => {
+  const sandboxFor = (output: string, seen: string[] = []) =>
+    ({ exec: async (command: string) => { seen.push(command); return output; }, readFile: async () => "", writeFile: async () => "" }) as never;
+  const read = async (output: string, file_path: string, seen: string[] = []) => {
+    const tools = await buildTools(agent, sandboxFor(output, seen));
+    return tools.read.execute({ file_path }, { toolCallId: "call", messages: [] });
+  };
+
+  // Shell text must never reach the model as image bytes (Anthropic answers 400 "invalid base64
+  // data" for the whole turn), on either exec wrapper shape: the CF sandbox prefixes "exit=N\n",
+  // the node adapters return bare stdout with an "[exit …]" / "[error: …]" suffix on failure.
+  it.each([
+    ["bare node output of a missing file", "base64: /workspace/out/grid.jpg: No such file or directory", "Error reading file: base64: /workspace/out/grid.jpg: No such file"],
+    ["CF exit=0 with shell text as the body", "exit=0\nbase64: /workspace/out/grid.jpg: No such file or directory", "Error reading file: base64: /workspace/out/grid.jpg"],
+    ["CF nonzero exit", "exit=1\nbase64: /workspace/out/grid.jpg: No such file or directory", "Error reading file (exit=1)"],
+    ["node failure suffix", "[exit 1]", "Error reading file: [exit 1]"],
+    ["node error suffix", "[error: spawn failed]", "Error reading file: [error: spawn failed]"],
+    ["URL-safe alphabet is not what base64 prints", "AAH-_w==", "Error reading file: AAH-_w=="],
+    ["a body whose length is not a multiple of four", "AAH+/w=", "Error reading file: AAH+/w="],
+  ])("%s is returned as an error string", async (_name, output, expected) => {
+    const result = await read(output, "/workspace/out/grid.jpg");
+    expect(typeof result).toBe("string");
+    expect(result).toContain(expected);
+  });
+
+  it.each([
+    ["bare node output", "AAH+/w==", "/workspace/out/grid.jpg", { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "AAH+/w==" } }],
+    ["CF exit=0 prefix", "exit=0\nAAH+/w==", "/workspace/out/grid.png", { type: "image", source: { type: "base64", media_type: "image/png", data: "AAH+/w==" } }],
+    ["trailing newline from the fallback encoder", "AAH+/w==\n", "/workspace/out/grid.jpg", { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "AAH+/w==" } }],
+    ["a PDF document", "JVBERi0=", "/workspace/out/brief.pdf", { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" } }],
+  ])("a well-formed payload (%s) becomes a content block", async (_name, output, file_path, expected) => {
+    expect(await read(output, file_path)).toEqual(expected);
+  });
+
+  it("silences stderr on both encoder attempts", async () => {
+    const seen: string[] = [];
+    await read("AAH+/w==", "/workspace/out/grid.jpg", seen);
+    const command = seen.find((c) => c.includes("base64"));
+    expect(command).toBeDefined();
+    const attempts = command!.split("||");
+    expect(attempts).toHaveLength(2);
+    for (const attempt of attempts) expect(attempt).toContain("2>/dev/null");
+  });
+});
