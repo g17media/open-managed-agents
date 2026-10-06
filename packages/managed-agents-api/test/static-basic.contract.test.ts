@@ -179,11 +179,20 @@ describe("credential metadata editing", () => {
 
 
 describe("header-safe static credentials (High-1)", () => {
+  it("preserves Unicode Basic passwords because they are encoded before injection", async () => {
+    const { request, store } = setup();
+    const token = "exact-🔑-password";
+    expect((await request("", "POST", { auth: { ...auth, token } })).status).toBe(201);
+    expect((await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" }))?.credential.auth).toMatchObject({ token });
+    expect((await request("/vcrd_basic", "POST", { auth: { type: "static_basic", token: `${token}-rotated` } })).status).toBe(200);
+    expect((await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" }))?.credential.auth).toMatchObject({ token: `${token}-rotated` });
+  });
   it.each(["static_bearer", "static_basic", "cap_cli"])("rejects invalid %s tokens on create and update without echoing or storing them", async (type) => {
     const { request, store } = setup();
     const input = { type, token: "safe-token", mcp_server_url: auth.mcp_server_url,
       ...(type === "static_basic" && { username: "public" }), ...(type === "cap_cli" && { cli_id: "git" }) };
-    for (const character of ["\r\n", "\0", "\x1f", "\x7f", "\x85", "\x9f"]) {
+    const invalidCharacters = ["\r\n", "\0", "\x1f", "\x7f", "\x85", "\x9f", ...(type !== "static_basic" ? ["\u0100", "\u2028", "🔑"] : [])];
+    for (const character of invalidCharacters) {
       const token = `synthetic-invalid-secret${character}second-line`;
       const response = await request("", "POST", { auth: { ...input, token } });
       expect(response.status).toBe(400);
@@ -193,7 +202,7 @@ describe("header-safe static credentials (High-1)", () => {
       expect(await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: "vcrd_basic" })).toBeNull();
     }
     expect((await request("", "POST", { auth: input })).status).toBe(201);
-    for (const character of ["\r", "\n", "\x01", "\x85"]) {
+    for (const character of invalidCharacters) {
       const response = await request("/vcrd_basic", "POST", { auth: { type, token: `synthetic-invalid-secret${character}second-line` } });
       expect(response.status).toBe(400);
       expect(await response.text()).not.toContain("synthetic-invalid-secret");
