@@ -58,6 +58,11 @@ export const ALL_TOOLS = [...DEFAULT_TOOLS, ...OPT_IN_TOOLS];
 // them — over this ceiling the read tool refuses with an error instead.
 // Scales with the text cap so one env var governs both.
 const binaryResultMaxChars = () => Math.max(toolResultMaxChars() * 40, 2_000_000);
+
+/** Standard base64 (RFC 4648 §4, no whitespace): what `base64 -w0` prints for a readable file. */
+function isBase64Body(text: string): boolean {
+  return text.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(text);
+}
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
 // Cap MCP client init + tools/list. Without this, a hung upstream
@@ -571,8 +576,12 @@ export async function buildTools(
           // Binary file (image or PDF): base64-encode via shell, return as
           // Anthropic-shape ContentBlock (image or document). toModelOutput below
           // converts to AI SDK content shape for the model.
+          // Both encoders silence stderr: on the node adapters a failed read ("base64: …: No such
+          // file or directory") otherwise arrives on the same stream as the payload and would be
+          // shipped to the model as image bytes (seen live 2026-10-06: Anthropic 400 "invalid base64
+          // data" from a read of a file the agent never managed to create).
           const raw = await sandbox.exec(
-            `(base64 -w0 ${shellQuote(file_path)} 2>/dev/null || base64 ${shellQuote(file_path)} | tr -d '\\n')`,
+            `(base64 -w0 ${shellQuote(file_path)} 2>/dev/null || base64 ${shellQuote(file_path)} 2>/dev/null | tr -d '\\n')`,
           );
           // Exec output format differs per runtime: the CF sandbox prefixes
           // "exit=N\n"; node adapters return bare stdout with an
@@ -596,6 +605,10 @@ export async function buildTools(
           if (code !== 0) return `Error reading file (exit=${code}): ${payload.slice(0, 200)}`;
           const data = payload.trim();
           if (!data) return "Error: file is empty or unreadable";
+          // Only a well-formed base64 body may become an image/document block: anything else is
+          // shell or runtime text (a missing file, a permission error, a wrapper message) and the
+          // provider would reject the whole turn as "invalid base64 data" rather than this one call.
+          if (!isBase64Body(data)) return `Error reading file: ${data.slice(0, 200)}`;
           if (data.length > binaryResultMaxChars()) {
             return (
               `Error: file is too large to inline (${Math.round(data.length / 1024)}KB base64, ` +
