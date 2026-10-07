@@ -323,6 +323,7 @@ export class DefaultHarness implements HarnessInterface {
       ? instrumented.tools
       : sequenceTools(instrumented.tools);
     const completedToolCalls = new Set<string>();
+    const persistedToolCalls = new Map<string, Promise<void>>();
     const harnessName = agent.harness ?? "default";
 
     // Resolve compaction params from agent config. Strategy class is
@@ -469,6 +470,45 @@ export class DefaultHarness implements HarnessInterface {
       // canonical event landing is what tells the client to swap.
       const liveThinking = new Set<string>();
       const liveToolInput = new Set<string>();
+      type ToolCallPart = ContentPart<any> & { type: "tool-call" };
+      type ToolOutputPart = ContentPart<any> & { type: "tool-result" | "tool-error" };
+      const capturedToolCalls = new Map<string, ToolCallPart>();
+      const settledToolOutputs = new Map<string, ToolOutputPart>();
+      let attemptFailed = false;
+
+      const persistToolCall = async (part: ToolCallPart) => {
+        const id = part.toolCallId;
+        if (!persistedToolCalls.has(id)) {
+          // Register before awaiting stream closure so a late step callback
+          // shares the same write, and cannot put the result before the call.
+          persistedToolCalls.set(id, Promise.resolve().then(async () => {
+            if (liveToolInput.has(id)) {
+              await runtime.broadcastToolInputEnd(id, "completed");
+              liveToolInput.delete(id);
+            }
+            emitToolCallEvent(runtime, ctx.agent, timedTools, part, toolTimings, harnessName);
+          }));
+        }
+        await persistedToolCalls.get(id);
+      };
+      const persistToolOutput = (part: ToolOutputPart) => {
+        if (completedToolCalls.has(part.toolCallId)) return;
+        completedToolCalls.add(part.toolCallId);
+        // SDK tool errors bypass toModelOutput. If persistence capped
+        // them, rebuild subsequent steps from those bounded events.
+        if (emitToolResultEvent(runtime, part, toolTimings, harnessName)) contextRebased = true;
+      };
+      const persistSettledTools = async () => {
+        // Failed assistant output is excluded, but genuine settled work must
+        // survive. Keep calls in model order, then outputs in settlement order,
+        // just as the SDK's step content does. Never persist an unmatched call.
+        for (const [id, call] of capturedToolCalls) {
+          if (settledToolOutputs.has(id)) await persistToolCall(call);
+        }
+        for (const [id, output] of settledToolOutputs) {
+          if (capturedToolCalls.has(id)) persistToolOutput(output);
+        }
+      };
 
       // Per-step model_request span pair. We hook ai-sdk's
       // `experimental_onStepStart` (fires before each provider call) to mint
@@ -558,6 +598,13 @@ export class DefaultHarness implements HarnessInterface {
       abortSignal: runtime.abortSignal,
 
       onChunk: ({ chunk }) => {
+        if (chunk.type === "tool-call") {
+          capturedToolCalls.set(chunk.toolCallId, chunk);
+        } else if (chunk.type === "tool-error" || chunk.type === "tool-result" && !chunk.preliminary) {
+          // Also capture provider-executed results, which have no client
+          // execution hook. Preliminary outputs do not settle a call.
+          settledToolOutputs.set(chunk.toolCallId, chunk);
+        }
         // First chunk of this step → emit span.model_first_token. Pair via
         // model_request_start_id so consumers can split TTFT (start →
         // first_token) from generation (first_token → end). Any chunk
@@ -610,6 +657,16 @@ export class DefaultHarness implements HarnessInterface {
         }
       },
 
+      onToolExecutionEnd: ({ toolCall, toolOutput }) => {
+        // This hook runs when execute settles, before the SDK enqueues the
+        // result. A rejected provider body can bypass both that enqueue and
+        // onStepFinish's flush; retaining the pair here survives either path.
+        if (!capturedToolCalls.has(toolCall.toolCallId)) {
+          capturedToolCalls.set(toolCall.toolCallId, toolCall);
+        }
+        settledToolOutputs.set(toolOutput.toolCallId, toolOutput);
+      },
+
       // experimental_: vercel-ai may rename / change signature without
       // notice. Pin ai-sdk version on dep upgrade. The stable alternative
       // (consume `result.fullStream` for `start-step` chunks) requires
@@ -625,7 +682,7 @@ export class DefaultHarness implements HarnessInterface {
       },
 
       onStepFinish: async (step) => {
-        const failedStep = step.finishReason === "error";
+        const failedStep = attemptFailed || step.finishReason === "error";
         const settledCalls = new Set(step.content
           .filter(part => part.type === "tool-result" || part.type === "tool-error")
           .map(part => part.toolCallId));
@@ -697,22 +754,12 @@ export class DefaultHarness implements HarnessInterface {
               break;
             }
             case "tool-call": {
-              const partTC = part as { type: "tool-call"; toolCallId: string };
-              if (liveToolInput.has(partTC.toolCallId)) {
-                await runtime.broadcastToolInputEnd(partTC.toolCallId, "completed");
-                liveToolInput.delete(partTC.toolCallId);
-              }
-              emitToolCallEvent(runtime, ctx.agent, timedTools, part, toolTimings, harnessName);
+              await persistToolCall(part);
               break;
             }
             case "tool-result":
             case "tool-error":
-              completedToolCalls.add(part.toolCallId);
-              // SDK tool errors bypass toModelOutput. If persistence capped
-              // them, rebuild subsequent steps from those bounded events.
-              if (emitToolResultEvent(runtime, part, toolTimings, harnessName)) {
-                contextRebased = true;
-              }
+              persistToolOutput(part);
               break;
             // source / file / tool-approval-request: not produced by current
             // tool surface; intentionally skipped. Add cases here if those
@@ -899,7 +946,9 @@ export class DefaultHarness implements HarnessInterface {
       return { finishReason, text: finalText, toolCalls, toolResults, usage };
       } catch (err) {
         // Also handle request/result rejection paths without onStepFinish.
+        attemptFailed = true;
         await abortLiveStreams(runtime.abortSignal?.aborted ? "interrupted_mid_stream" : "stream_error");
+        await persistSettledTools();
         // Boundary: streamText + the read awaits above (finishReason /
         // text / toolCalls / usage) are the LLM-provider edge. Native
         // SDK errors (Anthropic 401/429/5xx, the `silent_stop` Error we
