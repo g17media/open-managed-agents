@@ -12,6 +12,7 @@ import { capToolResultContent } from "./mcp-output";
 import { sequenceTools } from "./tool-execution";
 import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
 import { modelCallOptions } from "./provider";
+import { isTransientProviderError, providerErrorLabel, readProviderRetryConfig, retryDelayMs, waitForProviderRetry } from "./provider-retry";
 import {
   instrumentToolTimings,
   toolTimingMetadata,
@@ -450,14 +451,15 @@ export class DefaultHarness implements HarnessInterface {
     // broadcast stream_end with the same id and finalize the stream
     // row. The same id lands on the `agent.message` event so clients
     // can swap chunk display for canonical content.
-      // General retry/keepAlive logic lives in runtime/turn-runtime.ts.
-      // This loop owns one context-length recovery retry because it must
-      // persist elisions and rebuild the prompt before another request.
+      // Provider retries belong inside the turn, outside context-length
+      // recovery. Both rebuild the prompt from persisted step events so
+      // completed tool calls are not replayed on a new streamText attempt.
       // Stale-chunk detection stays here
       // because it needs direct access to streamText's onChunk timing —
       // turn-runtime would need a chunk-arrival callback to do it from
       // outside, which is more plumbing for marginal gain.
       let retryingContextLength = false;
+      let retryingProvider = false;
       const runAttempt = async () => {
       let currentMessageId: string | null = null;
       // Per-step thinking and tool-input streams keyed by the AI SDK
@@ -488,6 +490,7 @@ export class DefaultHarness implements HarnessInterface {
       // diagnostic (e.g. a 400 "prompt is too long") survives to the
       // post-stream finishReason check below.
       let lastStreamErrorMessage: string | null = null;
+      let lastStreamError: unknown;
       let stepSawFirstChunk = false;
 
       const streamStartedAt = Date.now();
@@ -534,7 +537,7 @@ export class DefaultHarness implements HarnessInterface {
       ...modelCallOptions(model, agent.model),
       prepareStep: async ({ stepNumber }) => {
         const changed = await compactBeforeRequest();
-        contextRebased ||= changed || retryingContextLength && stepNumber === 0;
+        contextRebased ||= changed || (retryingContextLength || retryingProvider) && stepNumber === 0;
         if (!contextRebased) return undefined;
         const nextMessages = await this.deriveModelContext(runtime.history.getEvents(), { fileFetcher: ctx.fileFetcher });
         const next = applyProviderCacheStrategy(model, systemPrompt, timedTools, nextMessages);
@@ -749,6 +752,7 @@ export class DefaultHarness implements HarnessInterface {
       },
 
       onError: ({ error }) => {
+        lastStreamError = error;
         // streamText aborts the stream on error before onStepFinish can fire
         // for the failing step. Without closing here, the span.model_request_start
         // we emitted in the start-step chunk hangs unpaired. Mirror the
@@ -878,13 +882,16 @@ export class DefaultHarness implements HarnessInterface {
       // sess-k6ouq0bukadsb27u: prompt-too-long 400 recorded only as a
       // span, session looked frozen). Throw so processUserMessage /
       // the runtime shell surfaces a session.error the user can see.
-      if (finishReason === "error") {
+      // A failed follow-up request can leave finishReason at the preceding
+      // successful tool step. onError is authoritative in that case too.
+      if (finishReason === "error" || lastStreamErrorMessage !== null) {
         if (currentMessageId) {
           await runtime.broadcastStreamEnd(currentMessageId, "aborted", "stream_error");
           currentMessageId = null;
         }
         throw new ModelError(
           lastStreamErrorMessage ?? "model stream errored (no diagnostic captured)",
+          { cause: lastStreamError },
         );
       }
 
@@ -931,7 +938,7 @@ export class DefaultHarness implements HarnessInterface {
         // cause. Restore the onError diagnostic so context recovery (and
         // auth/billing classification) sees the actual failure.
         const diagnostic = NoOutputGeneratedError.isInstance(err) && lastStreamErrorMessage
-          ? new Error(lastStreamErrorMessage, { cause: err })
+          ? new Error(lastStreamErrorMessage, { cause: lastStreamError ?? err })
           : err;
         throw classifyExternalError(diagnostic);
       } finally {
@@ -939,18 +946,31 @@ export class DefaultHarness implements HarnessInterface {
         console.log(`[stream] streamText END elapsed=${totalElapsed}ms`);
       }
     };
+    const retryConfig = readProviderRetryConfig(ctx.env);
     let result;
-    try {
-      result = await runAttempt();
-    } catch (error) {
-      if (!isContextLengthError(error)) throw error;
-      emergency(true);
-      retryingContextLength = true;
+    for (let retries = 0; ; retries++) {
       try {
-        result = await runAttempt();
-      } catch (retryError) {
-        if (!isContextLengthError(retryError)) throw retryError;
-        throw new ModelError("context exceeded the model window after emergency compaction; session must be reset");
+        try {
+          result = await runAttempt();
+        } catch (error) {
+          if (!isContextLengthError(error)) throw error;
+          emergency(true);
+          retryingContextLength = true;
+          try {
+            result = await runAttempt();
+          } catch (retryError) {
+            if (!isContextLengthError(retryError)) throw retryError;
+            throw new ModelError("context exceeded the model window after emergency compaction; session must be reset");
+          }
+        }
+        break;
+      } catch (error) {
+        if (runtime.abortSignal?.aborted || retries >= retryConfig.attempts || !isTransientProviderError(error)) throw error;
+        const attempt = retries + 1;
+        const delay = retryDelayMs(attempt, error, retryConfig);
+        console.warn(`[stream] transient provider error (${providerErrorLabel(error)}) — retry ${attempt}/${retryConfig.attempts} in ${delay}ms`);
+        await waitForProviderRetry(delay, runtime.abortSignal);
+        retryingProvider = true;
       }
     }
 

@@ -258,6 +258,10 @@ export interface HarnessContext {
 
   env: {
     ANTHROPIC_API_KEY: string;
+    /** Extra in-turn provider attempts (default 4); zero disables retries. */
+    OMA_MODEL_RETRY_ATTEMPTS?: string;
+    /** Comma-separated backoff in ms (default 5000,15000,45000,90000). */
+    OMA_MODEL_RETRY_BACKOFF_MS?: string;
     ANTHROPIC_BASE_URL?: string;
     /** Official Environment Work secret (base64url JSON). Only its
      * sessions_token/api_base_url fields are decoded by ACP projection. */
