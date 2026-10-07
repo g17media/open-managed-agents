@@ -690,6 +690,9 @@ export class DefaultHarness implements HarnessInterface {
           // A protocol error chunk can still flush finish-step. Its partial
           // assistant output and calls that never ran must not enter history.
           // Preserve any real completed tool work, without inventing results.
+          // Rebuild the next SDK step from history rather than its discarded
+          // assistant response messages.
+          contextRebased = true;
           await abortLiveStreams("stream_error");
         } else {
           // Providers may emit an error chunk and then successfully finish

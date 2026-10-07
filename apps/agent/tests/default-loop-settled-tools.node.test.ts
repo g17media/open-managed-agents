@@ -163,6 +163,40 @@ describe.each(["legacy", "managed"] as const)("settled tools on the %s Node runt
     expect(fx.events().filter(e => e.type === "agent.tool_result")).toHaveLength(1);
   });
 
+  it("rebuilds the actual next provider prompt after failed output with a settled tool", async () => {
+    const chunks = [
+      ...partialChunks,
+      ...toolCallChunks({ id: "protocol-pair", toolName: "read", inputDeltas: ["{}"] }).slice(1),
+      finishChunk("tool-calls"),
+    ];
+    const scripted = createScriptedLanguageModel([
+      streamStep(chunks, { errorAfterChunks: chunks.length, error: rejection() }), answer(),
+    ]);
+    const fx = await fixture(kind, scripted.model);
+    const execute = vi.fn(async () => "protocol result");
+    fx.ctx.tools = { read: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }) };
+    await fx.run();
+    await fx.flush();
+
+    expect(scripted.calls).toHaveLength(2);
+    expect(execute).toHaveBeenCalledTimes(1);
+    const nextPrompt = JSON.stringify(scripted.calls[1]);
+    expect(nextPrompt).toContain("Be helpful");
+    expect(nextPrompt).toContain("Read and finish");
+    expect(nextPrompt).toContain("protocol-pair");
+    expect(nextPrompt).toContain("protocol result");
+    expect(nextPrompt).not.toMatch(/Partial thinking|Incomplete answer/);
+    const canonical = fx.events().filter(e =>
+      ["agent.thinking", "agent.message", "agent.tool_use", "agent.tool_result"].includes(e.type));
+    expect(canonical.map(e => e.type)).toEqual(["agent.tool_use", "agent.tool_result", "agent.message"]);
+    const finalContext = JSON.stringify(await new DefaultHarness().deriveModelContext(fx.events()));
+    expect(finalContext).toContain("protocol-pair");
+    expect(finalContext).toContain("protocol result");
+    expect(finalContext).toContain("Done");
+    expect(finalContext).not.toMatch(/Partial thinking|Incomplete answer/);
+    expect(fx.published.some(e => e.type === "session.error")).toBe(false);
+  });
+
   it.each(["tool-result", "tool-error"] as const)(
     "retains settled %s after body rejection and ignores a late step flush", async outcome => {
       const chunks = toolStep("settled-body").chunks;
@@ -339,6 +373,70 @@ describe.each(["legacy", "managed"] as const)("settled tools on the %s Node runt
       expect(fx.published.some(e => e.type === "session.error")).toBe(false);
     } finally {
       clearTimeout(resetTimer);
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
+  it("excludes failed text from the real Anthropic follow-up body with a settled tool", async () => {
+    const start = { type: "message_start", message: {
+      id: "msg", type: "message", role: "assistant", content: [], model: "claude-sonnet-4-6",
+      stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 },
+    } };
+    const text = (value: string, index = 0) => [
+      { type: "content_block_start", index, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index, delta: { type: "text_delta", text: value } },
+      { type: "content_block_stop", index },
+    ];
+    const end = (reason: string) => [
+      { type: "message_delta", delta: { stop_reason: reason, stop_sequence: null }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+    const frames = [start, ...text("Failed provider preface"),
+      { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "adapter-settled", name: "read", input: {} } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{}" } },
+      { type: "content_block_stop", index: 1 }, ...end("tool_use"),
+      { type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
+    ];
+    const frameText = (values: Array<{ type: string }>) =>
+      values.map(f => `event: ${f.type}\ndata: ${JSON.stringify(f)}\n\n`).join("");
+    const bodies: string[] = [];
+    const server = http.createServer((req, res) => {
+      const index = bodies.length;
+      bodies.push("");
+      req.on("data", data => { bodies[index] += data.toString(); });
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(frameText(index === 0 ? frames : [start, ...text("Done"), ...end("end_turn")]));
+      });
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as { port: number };
+    try {
+      const model = createAnthropic({ apiKey: "test", baseURL: `http://127.0.0.1:${address.port}/v1` })("claude-sonnet-4-6");
+      const fx = await fixture(kind, model);
+      const execute = vi.fn(async () => "adapter settled result");
+      fx.ctx.tools = { read: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }) };
+      await fx.run();
+      await fx.flush();
+
+      expect(bodies).toHaveLength(2);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(bodies[1]).toContain("Be helpful");
+      expect(bodies[1]).toContain("Read and finish");
+      expect(bodies[1]).toContain("adapter-settled");
+      expect(bodies[1]).toContain("adapter settled result");
+      expect(bodies[1]).not.toContain("Failed provider preface");
+      const canonical = fx.events().filter(e =>
+        ["agent.thinking", "agent.message", "agent.tool_use", "agent.tool_result"].includes(e.type));
+      expect(canonical.map(e => e.type)).toEqual(["agent.tool_use", "agent.tool_result", "agent.message"]);
+      const finalContext = JSON.stringify(await new DefaultHarness().deriveModelContext(fx.events()));
+      expect(finalContext).toContain("adapter-settled");
+      expect(finalContext).toContain("adapter settled result");
+      expect(finalContext).toContain("Done");
+      expect(finalContext).not.toContain("Failed provider preface");
+      expect(fx.published.some(e => e.type === "session.error")).toBe(false);
+    } finally {
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
     }

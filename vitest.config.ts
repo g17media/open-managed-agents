@@ -440,7 +440,7 @@ export default defineConfig({
       "**/.vercel/**",
       "apps/agent/build-*/**",
       // Real Node HTTP/fetch regressions run via vitest.agent-node.config.ts.
-      "apps/agent/tests/*.node.test.ts",
+      "apps/agent/tests/**/*.node.test.ts",
       "apps/console/**",
       "apps/oma-vault/test/**",
       "apps/main-node/**",

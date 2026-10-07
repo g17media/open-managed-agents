@@ -7,7 +7,7 @@ export default defineConfig({
     maxWorkers: 1,
     testTimeout: 15000,
     include: [
-      "apps/agent/tests/default-loop-settled-tools.node.test.ts",
+      "apps/agent/tests/**/*.node.test.ts",
       "apps/agent/tests/default-loop-provider-retry.test.ts",
       "apps/agent/tests/provider-retry.test.ts",
     ],
