@@ -745,7 +745,9 @@ export class SessionDO extends DurableObject<Env> {
         // Mirrors recovery.ts:69-78. Same dedup + placeholder fallback.
         // Done before finalize so a concurrent reader never observes
         // a stream that's both finalized AND missing from history.
-        if (status === "aborted" && !this.broadcastedMessageIds.has(messageId)) {
+        // A failed provider step is discarded, including its partial text.
+        // User interrupts still preserve what was said before the cut.
+        if (status === "aborted" && errorText !== "stream_error" && !this.broadcastedMessageIds.has(messageId)) {
           const row = await this.streams!.get(messageId);
           const partial = row?.chunks?.join("") ?? "";
           const partialEvent = tag({

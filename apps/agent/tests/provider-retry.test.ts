@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthError, BillingError, ModelError, classifyExternalError } from "@open-managed-agents/shared";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { RetryError } from "ai";
 import { isTransientProviderError, readProviderRetryConfig, retryDelayMs, waitForProviderRetry } from "../src/harness/provider-retry";
 
 const httpError = (statusCode: number, extra = {}) => Object.assign(new Error("provider rejected request"), { statusCode, ...extra });
@@ -41,10 +43,27 @@ describe("provider retry classification", () => {
     Object.assign(cycle, { cause: cycle });
     expect(isTransientProviderError(cycle)).toBe(false);
   });
+  it.each(["UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"])("recognizes %s through the SDK's real fetch-error wrapper", async code => {
+    const cause = Object.assign(new Error("Connect Timeout Error"), { code });
+    const raw = new TypeError("fetch failed", { cause });
+    const model = createAnthropic({ apiKey: "test", fetch: async () => { throw raw; } })("claude-sonnet-4-6");
+    const wrapped = await model.doStream({ prompt: [] }).catch(error => error);
+    expect(wrapped).toMatchObject({ name: "AI_APICallError", isRetryable: true, message: "Cannot connect to API: Connect Timeout Error", cause });
+    expect(isTransientProviderError(wrapped)).toBe(true);
+    expect(isTransientProviderError(new ModelError("Failed after 3 attempts", {
+      cause: new RetryError({ message: "Failed after 3 attempts", reason: "maxRetriesExceeded", errors: [wrapped, wrapped, wrapped] }),
+    }))).toBe(true);
+    expect(isTransientProviderError(new Error("Cannot connect to API: connection failed"))).toBe(true);
+  });
+  it("recognizes provider timeouts without rejecting messages containing aborted", () => {
+    expect(isTransientProviderError(new DOMException("The operation was aborted due to timeout", "TimeoutError"))).toBe(true);
+    expect(isTransientProviderError({ code: 23, message: "aborted due to timeout" })).toBe(true);
+    expect(isTransientProviderError(httpError(529, { message: "exchange aborted by provider" }))).toBe(true);
+  });
 });
 
 describe("provider retry delays", () => {
-  const config = { attempts: 4, backoffMs: [5000, 15000, 45000, 90000] };
+  const config = { attempts: 4, backoffMs: [5000, 15000, 45000, 90000], maxWaitMs: 300000 };
   it("uses the default schedule and repeats its last entry (one-based retries)", () => {
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     expect([1, 2, 3, 4, 5].map(attempt => retryDelayMs(attempt, new Error(), config))).toEqual([5000, 15000, 45000, 90000, 90000]);
@@ -71,9 +90,10 @@ describe("provider retry delays", () => {
   });
   it("reads env values, accepts zero attempts/delays, and falls back on malformed config", () => {
     expect(readProviderRetryConfig({})).toEqual(config);
-    expect(readProviderRetryConfig({ OMA_MODEL_RETRY_ATTEMPTS: "0", OMA_MODEL_RETRY_BACKOFF_MS: "0, 20" })).toEqual({ attempts: 0, backoffMs: [0, 20] });
+    expect(readProviderRetryConfig({ OMA_MODEL_RETRY_ATTEMPTS: "0", OMA_MODEL_RETRY_BACKOFF_MS: "0, 20", OMA_MODEL_RETRY_MAX_WAIT_MS: "0" })).toEqual({ attempts: 0, backoffMs: [0, 20], maxWaitMs: 0 });
     for (const invalid of ["-1", "NaN", "1.5", "", "2oops"]) {
       expect(readProviderRetryConfig({ OMA_MODEL_RETRY_ATTEMPTS: invalid }).attempts).toBe(4);
+      expect(readProviderRetryConfig({ OMA_MODEL_RETRY_MAX_WAIT_MS: invalid }).maxWaitMs).toBe(300000);
     }
     for (const invalid of ["", "1,-2", "1,", "invalid"]) {
       expect(readProviderRetryConfig({ OMA_MODEL_RETRY_BACKOFF_MS: invalid }).backoffMs).toEqual(config.backoffMs);

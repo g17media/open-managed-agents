@@ -142,12 +142,16 @@ custom hosts can supply them through the harness environment.
 | --- | --- | --- |
 | `OMA_MODEL_RETRY_ATTEMPTS` | `4` | Extra attempts after the initial attempt. Set `0` to disable. |
 | `OMA_MODEL_RETRY_BACKOFF_MS` | `5000,15000,45000,90000` | Comma-separated delays in milliseconds, with ±20% jitter. The last delay repeats if more attempts are configured. |
+| `OMA_MODEL_RETRY_MAX_WAIT_MS` | `300000` | Total outer backoff budget per turn in milliseconds, including `Retry-After`. Stops retrying if the next wait exceeds the remaining budget. |
 
 A provider's `Retry-After` header or retry-after field overrides the schedule,
 without jitter, capped at 120 seconds. Malformed configuration falls back to
 the defaults. These attempts are in addition to the AI SDK's short request
 retries. The harness rebuilds context from persisted session events, including
 completed tool results, so it continues the turn after the failed request.
+Failed-step partial assistant output and tool calls that never executed are
+discarded from history. The wait budget excludes provider request durations
+and the SDK's internal retry delays; it is not an overall turn deadline.
 User interrupts cancel the wait immediately. No new wire event types are emitted.
 
 Retryable failures include HTTP 408, 409, 429, 500, 502, 503, 504 and 529,

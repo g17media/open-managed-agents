@@ -5,18 +5,21 @@ export interface ProviderRetryConfig {
   /** Extra attempts after the initial request, shared across the turn. */
   attempts: number;
   backoffMs: number[];
+  /** Total outer backoff allowed per turn, including Retry-After. */
+  maxWaitMs: number;
 }
 
 export interface ProviderRetryEnv {
   OMA_MODEL_RETRY_ATTEMPTS?: string;
   OMA_MODEL_RETRY_BACKOFF_MS?: string;
+  OMA_MODEL_RETRY_MAX_WAIT_MS?: string;
 }
 
 const DEFAULT_BACKOFF_MS = [5000, 15000, 45000, 90000];
 const TRANSIENT_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
 const TERMINAL_STATUS = new Set([400, 401, 402, 403, 404, 413, 422]);
 const PROVIDER_TYPE = /\b(overloaded_error|rate_limit_error|api_error)\b/i;
-const NETWORK_FAILURE = /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|UND_ERR_SOCKET)\b|fetch failed|socket hang up|\bterminated\b|other side closed/i;
+const NETWORK_FAILURE = /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT)\b|fetch failed|Cannot connect to API:|socket hang up|\bterminated\b|other side closed/i;
 
 type ErrorRecord = Record<string, unknown>;
 
@@ -62,9 +65,10 @@ export function isTransientProviderError(error: unknown): boolean {
   const records = errorRecords(error);
   // Explicit exclusions win over any transient metadata in the cause chain.
   if (records.some(record => record instanceof BillingError || record instanceof AuthError
-    || record.name === "AbortError" || /\babort(?:ed)?\b|silent_stop/i.test(message(record))
+    || record.name === "AbortError" || /silent_stop/i.test(message(record))
     || isContextLengthError(message(record)) || TERMINAL_STATUS.has(status(record) ?? 0))) return false;
   return records.some(record => TRANSIENT_STATUS.has(status(record) ?? 0)
+    || record.name === "TimeoutError" || record.code === 23
     || PROVIDER_TYPE.test(String(record.type ?? "")) || PROVIDER_TYPE.test(message(record))
     || NETWORK_FAILURE.test(message(record)) || NETWORK_FAILURE.test(String(record.code ?? ""))
     || record instanceof ModelError && message(record) === "model stream errored (no diagnostic captured)");
@@ -94,7 +98,10 @@ export function readProviderRetryConfig(env: ProviderRetryEnv = {}): ProviderRet
   const values = backoffRaw?.split(",").map(value => value.trim());
   const backoffMs = values?.length && values.every(value => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)))
     ? values.map(Number) : [...DEFAULT_BACKOFF_MS];
-  return { attempts, backoffMs };
+  const maxWaitRaw = env.OMA_MODEL_RETRY_MAX_WAIT_MS ?? fallback.OMA_MODEL_RETRY_MAX_WAIT_MS ?? "300000";
+  const maxWaitMs = /^\d+$/.test(maxWaitRaw) && Number.isSafeInteger(Number(maxWaitRaw))
+    ? Number(maxWaitRaw) : 300000;
+  return { attempts, backoffMs, maxWaitMs };
 }
 
 function milliseconds(value: unknown, multiplier: number): number | undefined {

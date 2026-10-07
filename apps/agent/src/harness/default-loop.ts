@@ -485,13 +485,24 @@ export class DefaultHarness implements HarnessInterface {
       // TTFT vs generation in the timeline. `stepSawFirstChunk` is the
       // per-step latch; reset on each onStepStart.
       let stepStartId: string | null = null;
-      // Last stream error captured by onError — consumeStream() swallows
+      // Unresolved error for the current request/step — consumeStream() swallows
       // stream failures, so this is the only place the actual provider
       // diagnostic (e.g. a 400 "prompt is too long") survives to the
       // post-stream finishReason check below.
-      let lastStreamErrorMessage: string | null = null;
-      let lastStreamError: unknown;
+      let unresolvedStepErrorMessage: string | null = null;
+      let unresolvedStepError: unknown;
       let stepSawFirstChunk = false;
+
+      const abortLiveStreams = async (reason: string) => {
+        if (currentMessageId) {
+          await runtime.broadcastStreamEnd(currentMessageId, "aborted", reason);
+          currentMessageId = null;
+        }
+        for (const tid of liveThinking) await runtime.broadcastThinkingEnd(tid, "aborted");
+        liveThinking.clear();
+        for (const tid of liveToolInput) await runtime.broadcastToolInputEnd(tid, "aborted");
+        liveToolInput.clear();
+      };
 
       const streamStartedAt = Date.now();
       console.log(`[stream] streamText START model=${modelId} messages=${finalMessages.length} tools=${Object.keys(cached.tools ?? {}).length}`);
@@ -614,6 +625,21 @@ export class DefaultHarness implements HarnessInterface {
       },
 
       onStepFinish: async (step) => {
+        const failedStep = step.finishReason === "error";
+        const settledCalls = new Set(step.content
+          .filter(part => part.type === "tool-result" || part.type === "tool-error")
+          .map(part => part.toolCallId));
+        if (failedStep) {
+          // A protocol error chunk can still flush finish-step. Its partial
+          // assistant output and calls that never ran must not enter history.
+          // Preserve any real completed tool work, without inventing results.
+          await abortLiveStreams("stream_error");
+        } else {
+          // Providers may emit an error chunk and then successfully finish
+          // the same step. Only an unresolved error should fail the attempt.
+          unresolvedStepErrorMessage = null;
+          unresolvedStepError = undefined;
+        }
         // Iterate step.content[] in order to preserve LLM output ordering
         // (reasoning → text → tool-call interleaving). The previous "reasoning
         // first, text next, tool-calls last" loop assumed an ordering AI SDK
@@ -624,6 +650,8 @@ export class DefaultHarness implements HarnessInterface {
         // ModelMessage[] ↔ SessionEvent[] bijection that prompt-cache
         // determinism rests on.
         for (const part of step.content as ReadonlyArray<ContentPart<any>>) {
+          if (failedStep && (part.type === "reasoning" || part.type === "text"
+            || part.type === "tool-call" && !settledCalls.has(part.toolCallId))) continue;
           switch (part.type) {
             case "reasoning": {
               // AI SDK reasoning parts in step.content[] don't carry the
@@ -743,7 +771,7 @@ export class DefaultHarness implements HarnessInterface {
             } : undefined,
             finish_reason: step.finishReason,
             final_text_length: stepText.length,
-            is_error: false,
+            is_error: failedStep,
             ...(bodyR2Key ? { body_r2_key: bodyR2Key } : {}),
           });
           // Clear so onError / onAbort don't double-close.
@@ -752,9 +780,10 @@ export class DefaultHarness implements HarnessInterface {
       },
 
       onError: ({ error }) => {
-        lastStreamError = error;
-        // streamText aborts the stream on error before onStepFinish can fire
-        // for the failing step. Without closing here, the span.model_request_start
+        unresolvedStepError = error;
+        // Request failures may never finish a step; protocol error chunks may
+        // still flush onStepFinish (or even recover in that same step).
+        // Without closing here, the span.model_request_start
         // we emitted in the start-step chunk hangs unpaired. Mirror the
         // shape of the success-path end so consumers can treat is_error as
         // the success/fail discriminator.
@@ -772,10 +801,10 @@ export class DefaultHarness implements HarnessInterface {
           // user as the AI SDK's opaque "No output generated. Check the
           // stream for errors." Log the provider's actual diagnostic.
           console.error(`[stream] model request failed before first step: ${message}`);
-          lastStreamErrorMessage = message;
+          unresolvedStepErrorMessage = message;
           return;
         }
-        lastStreamErrorMessage = message;
+        unresolvedStepErrorMessage = message;
         runtime.broadcast({
           type: "span.model_request_end",
           model: modelId,
@@ -791,12 +820,11 @@ export class DefaultHarness implements HarnessInterface {
         stepStartId = null;
       },
 
-      onAbort: () => {
+      onAbort: async () => {
         // User interrupt or AbortSignal trip. Same dangling-start problem as
         // onError. is_error stays false — abort is a normal control flow,
         // not a model failure.
-        if (!stepStartId) return;
-        runtime.broadcast({
+        if (stepStartId) runtime.broadcast({
           type: "span.model_request_end",
           model: modelId,
           model_request_start_id: stepStartId,
@@ -808,66 +836,15 @@ export class DefaultHarness implements HarnessInterface {
             : {}),
         });
         stepStartId = null;
-        // Drain live chunk-stream registers same way the catch-around-
-        // consumeStream below does. onAbort fires when the model emitted
-        // its content cleanly but a follow-up await (finishReason / text /
-        // step iteration) trips the abort signal — consumeStream itself
-        // doesn't throw in that path, so the catch block doesn't run and
-        // these stream lifecycles would be left half-open without us
-        // emitting the *_stream_end markers here.
-        if (currentMessageId) {
-          void runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
-          currentMessageId = null;
-        }
-        for (const tid of liveThinking) {
-          void runtime.broadcastThinkingEnd(tid, "aborted");
-        }
-        liveThinking.clear();
-        for (const tid of liveToolInput) {
-          void runtime.broadcastToolInputEnd(tid, "aborted");
-        }
-        liveToolInput.clear();
+        // consumeStream can resolve on abort, so close all live streams here
+        // as well as in the request/result rejection handler below.
+        await abortLiveStreams("interrupted_mid_stream");
       },
     });
       // streamText returns a StreamTextResult; consumeStream forces the
       // pipeline to drain so onChunk + onStepFinish fully fire before
       // we read final fields.
-      try {
-        await r.consumeStream();
-      } catch (err) {
-        // Mid-stream abort (user.interrupt, abort signal trip). The
-        // streams table has chunks accumulated so far; if we don't
-        // finalize + persist as agent.message here, the partial text
-        // sits at status='streaming' until cold-start recovery picks
-        // it up. broadcastStreamEnd("aborted") does both: finalizes
-        // the row AND appends agent.message with the partial (see
-        // session-do.ts:broadcastStreamEnd) so the next turn's LLM
-        // context includes what the model said before the cut.
-        //
-        // Re-throw so drainEventQueue's TurnAborted handling still
-        // runs (status_idle, queue flush already happened in the
-        // POST /event handler).
-        //
-        // Drain ALL three live-stream registers, not just the message
-        // one — onStepFinish is the only place that drains thinking +
-        // tool-input streams normally, but it doesn't run on abort. A
-        // half-open thinking_stream_start without a matching
-        // thinking_stream_end leaves the client's "Claude is thinking…"
-        // bubble pulsing forever. Same for tool-input streams.
-        if (currentMessageId) {
-          await runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
-          currentMessageId = null;
-        }
-        for (const tid of liveThinking) {
-          await runtime.broadcastThinkingEnd(tid, "aborted");
-        }
-        liveThinking.clear();
-        for (const tid of liveToolInput) {
-          await runtime.broadcastToolInputEnd(tid, "aborted");
-        }
-        liveToolInput.clear();
-        throw err;
-      }
+      await r.consumeStream();
       const finishReason = await r.finishReason;
       const finalText = await r.text;
       const toolCalls = await r.toolCalls;
@@ -883,15 +860,13 @@ export class DefaultHarness implements HarnessInterface {
       // span, session looked frozen). Throw so processUserMessage /
       // the runtime shell surfaces a session.error the user can see.
       // A failed follow-up request can leave finishReason at the preceding
-      // successful tool step. onError is authoritative in that case too.
-      if (finishReason === "error" || lastStreamErrorMessage !== null) {
-        if (currentMessageId) {
-          await runtime.broadcastStreamEnd(currentMessageId, "aborted", "stream_error");
-          currentMessageId = null;
-        }
+      // successful tool step. An unresolved onError detects that failure;
+      // onStepFinish clears it only when the same step successfully finishes.
+      if (finishReason === "error" || unresolvedStepErrorMessage !== null) {
+        await abortLiveStreams("stream_error");
         throw new ModelError(
-          lastStreamErrorMessage ?? "model stream errored (no diagnostic captured)",
-          { cause: lastStreamError },
+          unresolvedStepErrorMessage ?? "model stream errored (no diagnostic captured)",
+          { cause: unresolvedStepError },
         );
       }
 
@@ -923,6 +898,8 @@ export class DefaultHarness implements HarnessInterface {
       }
       return { finishReason, text: finalText, toolCalls, toolResults, usage };
       } catch (err) {
+        // Also handle request/result rejection paths without onStepFinish.
+        await abortLiveStreams(runtime.abortSignal?.aborted ? "interrupted_mid_stream" : "stream_error");
         // Boundary: streamText + the read awaits above (finishReason /
         // text / toolCalls / usage) are the LLM-provider edge. Native
         // SDK errors (Anthropic 401/429/5xx, the `silent_stop` Error we
@@ -937,8 +914,8 @@ export class DefaultHarness implements HarnessInterface {
         // result promises throw NoOutputGeneratedError without the provider
         // cause. Restore the onError diagnostic so context recovery (and
         // auth/billing classification) sees the actual failure.
-        const diagnostic = NoOutputGeneratedError.isInstance(err) && lastStreamErrorMessage
-          ? new Error(lastStreamErrorMessage, { cause: lastStreamError ?? err })
+        const diagnostic = NoOutputGeneratedError.isInstance(err) && unresolvedStepErrorMessage
+          ? new Error(unresolvedStepErrorMessage, { cause: unresolvedStepError ?? err })
           : err;
         throw classifyExternalError(diagnostic);
       } finally {
@@ -947,6 +924,7 @@ export class DefaultHarness implements HarnessInterface {
       }
     };
     const retryConfig = readProviderRetryConfig(ctx.env);
+    let waitedMs = 0;
     let result;
     for (let retries = 0; ; retries++) {
       try {
@@ -968,8 +946,11 @@ export class DefaultHarness implements HarnessInterface {
         if (runtime.abortSignal?.aborted || retries >= retryConfig.attempts || !isTransientProviderError(error)) throw error;
         const attempt = retries + 1;
         const delay = retryDelayMs(attempt, error, retryConfig);
+        if (delay > retryConfig.maxWaitMs - waitedMs) throw error;
         console.warn(`[stream] transient provider error (${providerErrorLabel(error)}) — retry ${attempt}/${retryConfig.attempts} in ${delay}ms`);
+        const waitStartedAt = Date.now();
         await waitForProviderRetry(delay, runtime.abortSignal);
+        waitedMs += Math.max(delay, Date.now() - waitStartedAt);
         retryingProvider = true;
       }
     }

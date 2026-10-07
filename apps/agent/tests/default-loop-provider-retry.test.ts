@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dynamicTool, jsonSchema } from "ai";
 import { APICallError } from "@ai-sdk/provider";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { ModelError, type SessionEvent } from "@open-managed-agents/shared";
 import { SessionStateMachine, type RuntimeAdapter } from "@open-managed-agents/session-runtime";
 import type { HarnessContext, HarnessRuntime } from "../src/harness/interface";
@@ -108,6 +109,188 @@ describe("DefaultHarness in-turn provider retries", () => {
     expect(scripted.calls).toHaveLength(3);
     expectPairedSpans(ctx.runtime.history.getEvents(), 3);
     expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.message")).toHaveLength(1);
+  });
+
+  it("discards an unexecuted streamed tool call and executes only the retry's call", async () => {
+    const chunks = toolCallChunks({ id: "not-executed", toolName: "read", inputDeltas: ["{}"] });
+    const scripted = createScriptedLanguageModel([
+      streamStep(chunks, { errorAfterChunks: chunks.length, error: rejection() }), toolStep(), answer(),
+    ]);
+    const ctx = context(scripted.model);
+    const execute = vi.fn(async () => "read result");
+    ctx.tools = { read: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }) };
+    await new DefaultHarness().run(ctx);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(scripted.calls).toHaveLength(3);
+    expect(JSON.stringify(scripted.calls[1])).not.toContain("not-executed");
+    expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.tool_use")).toHaveLength(1);
+    expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.tool_result")).toHaveLength(1);
+    expect(ctx.runtime.broadcastToolInputEnd).toHaveBeenCalledWith("not-executed", "aborted");
+    expectPairedSpans(ctx.runtime.history.getEvents(), 3);
+  });
+
+  it("does not commit partial reasoning/text or carry them into a retry prompt", async () => {
+    const chunks = [
+      { type: "stream-start", warnings: [] },
+      { type: "reasoning-start", id: "think" },
+      { type: "reasoning-delta", id: "think", delta: "Partial thinking" },
+      { type: "text-start", id: "text" },
+      { type: "text-delta", id: "text", delta: "Incomplete answer" },
+    ];
+    const scripted = createScriptedLanguageModel([
+      streamStep(chunks, { errorAfterChunks: chunks.length, error: rejection() }), answer(),
+    ]);
+    const ctx = context(scripted.model);
+    await new DefaultHarness().run(ctx);
+    expect(JSON.stringify(scripted.calls[1])).not.toMatch(/Partial thinking|Incomplete answer/);
+    expect(JSON.stringify(await new DefaultHarness().deriveModelContext(ctx.runtime.history.getEvents())))
+      .not.toMatch(/Partial thinking|Incomplete answer/);
+    expect(ctx.runtime.broadcastThinkingEnd).toHaveBeenCalledWith("think", "aborted");
+    expect(ctx.runtime.broadcastStreamEnd).toHaveBeenCalledWith(expect.any(String), "aborted", "stream_error");
+    expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.message")).toHaveLength(1);
+  });
+
+  it("a later user turn remains usable after retries exhaust with an unexecuted call", async () => {
+    const chunks = toolCallChunks({ id: "not-executed", toolName: "read", inputDeltas: ["{}"] });
+    const failed = () => streamStep(chunks, { errorAfterChunks: chunks.length, error: rejection() });
+    const scripted = createScriptedLanguageModel([failed(), failed(), answer()]);
+    const ctx = context(scripted.model);
+    ctx.env.OMA_MODEL_RETRY_ATTEMPTS = "1";
+    const execute = vi.fn(async () => "read result");
+    ctx.tools = { read: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }) };
+    await expect(new DefaultHarness().run(ctx)).rejects.toThrow("Overloaded");
+    const next: SessionEvent = { type: "user.message", content: [{ type: "text", text: "Try again" }] };
+    ctx.runtime.history.getEvents().push(next);
+    ctx.userMessage = next;
+    await new DefaultHarness().run(ctx);
+    expect(execute).not.toHaveBeenCalled();
+    expect(scripted.calls).toHaveLength(3);
+    expect(JSON.stringify(scripted.calls[2])).not.toContain("not-executed");
+    expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.tool_use")).toHaveLength(0);
+  });
+
+  it("clears an error when that step subsequently succeeds and preserves its completed tool", async () => {
+    const scripted = createScriptedLanguageModel([
+      streamStep([{ type: "error", error: rejection() }, ...toolCallChunks({
+        id: "already-completed", toolName: "read", inputDeltas: ["{}"],
+      }), finishChunk("tool-calls")]), answer(),
+    ]);
+    const ctx = context(scripted.model);
+    const execute = vi.fn(async () => "read result");
+    ctx.tools = { read: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }) };
+    await new DefaultHarness().run(ctx);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(scripted.calls).toHaveLength(2);
+    expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.message")).toHaveLength(1);
+    expectPairedSpans(ctx.runtime.history.getEvents(), 2);
+  });
+
+  it("a real Anthropic error SSE frame followed by a successful finish needs no retry", async () => {
+    const frames = [
+      { type: "message_start", message: { id: "msg_test", type: "message", role: "assistant", content: [], model: "claude-sonnet-4-6", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+      { type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Successful final answer" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+    const fetch = vi.fn(async () => new Response(
+      frames.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""),
+      { headers: { "content-type": "text/event-stream" } },
+    ));
+    const ctx = context(createAnthropic({ apiKey: "test", fetch })("claude-sonnet-4-6"));
+    const fx = session(ctx);
+    await fx.run();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fx.events.filter(event => event.type === "agent.message")).toHaveLength(1);
+    expect(fx.events.filter(event => event.type === "session.error")).toHaveLength(0);
+    expectPairedSpans(fx.events, 1);
+  });
+
+  it("retains executed tool work when an error arrives after the model's tool finish", async () => {
+    const chunks = [...toolCallChunks({ id: "executed-before-error", toolName: "read", inputDeltas: ["{}"] }), finishChunk("tool-calls")];
+    const scripted = createScriptedLanguageModel([
+      streamStep(chunks, { errorAfterChunks: chunks.length, error: rejection() }), answer(),
+    ]);
+    const ctx = context(scripted.model);
+    const execute = vi.fn(async () => "completed read result");
+    ctx.tools = { read: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }) };
+    await new DefaultHarness().run(ctx);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(scripted.calls).toHaveLength(2);
+    expect(JSON.stringify(scripted.calls[1])).toContain("completed read result");
+    expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.tool_use")).toHaveLength(1);
+    expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.tool_result")).toHaveLength(1);
+  });
+
+  it("still retries a rejected follow-up after the preceding step recovered its error", async () => {
+    const scripted = createScriptedLanguageModel([
+      streamStep([{ type: "error", error: rejection() }, ...toolCallChunks({
+        id: "recovered-step", toolName: "read", inputDeltas: ["{}"],
+      }), finishChunk("tool-calls")]), requestErrorStep(rejection()), answer(),
+    ]);
+    const ctx = context(scripted.model);
+    const execute = vi.fn(async () => "completed read result");
+    ctx.tools = { read: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }) };
+    await new DefaultHarness().run(ctx);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(scripted.calls).toHaveLength(3);
+    expect(JSON.stringify(scripted.calls[2])).toContain("completed read result");
+    expect(ctx.runtime.history.getEvents().filter(event => event.type === "agent.message")).toHaveLength(1);
+    expectPairedSpans(ctx.runtime.history.getEvents(), 3);
+  });
+
+  it("retries a provider-owned TimeoutError with a live runtime signal", async () => {
+    const scripted = createScriptedLanguageModel([
+      requestErrorStep(new DOMException("The operation was aborted due to timeout", "TimeoutError")), answer(),
+    ]);
+    const ctx = context(scripted.model);
+    const fx = session(ctx);
+    await fx.run();
+    expect(ctx.runtime.abortSignal?.aborted).toBe(false);
+    expect(scripted.calls).toHaveLength(2);
+    expect(fx.events.filter(event => event.type === "session.error")).toHaveLength(0);
+  });
+
+  it("does not retry a provider error after a user interrupt", async () => {
+    const scripted = createScriptedLanguageModel([requestErrorStep(rejection()), answer()]);
+    const ctx = context(scripted.model);
+    const fx = session(ctx);
+    const original = scripted.model.doStream.bind(scripted.model);
+    scripted.model.doStream = async options => { fx.machine.interrupt(); return original(options); };
+    await fx.run();
+    expect(scripted.calls).toHaveLength(1);
+    expect(fx.events.filter(event => event.type === "session.error")).toHaveLength(0);
+    expect(fx.events.filter(event => event.type === "session.status_idle")).toHaveLength(1);
+  });
+
+  it.each([false, true])("caps total outer backoff including Retry-After=%s", async retryAfter => {
+    vi.useFakeTimers();
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const error = rejection(529, retryAfter ? { responseHeaders: { "retry-after": "0.01" } } : {});
+    const scripted = createScriptedLanguageModel([
+      requestErrorStep(error), requestErrorStep(error), requestErrorStep(error), answer(),
+    ]);
+    const ctx = context(scripted.model);
+    ctx.env.OMA_MODEL_RETRY_BACKOFF_MS = "10";
+    ctx.env.OMA_MODEL_RETRY_MAX_WAIT_MS = "20";
+    const run = new DefaultHarness().run(ctx);
+    const rejected = expect(run).rejects.toThrow("Overloaded");
+    await vi.runAllTimersAsync();
+    await rejected;
+    expect(scripted.calls).toHaveLength(3);
+    expect(vi.getTimerCount()).toBe(0);
+    random.mockRestore();
+  });
+
+  it("rejects without waiting when the first delay exceeds the budget", async () => {
+    const scripted = createScriptedLanguageModel([requestErrorStep(rejection()), answer()]);
+    const ctx = context(scripted.model);
+    ctx.env.OMA_MODEL_RETRY_BACKOFF_MS = "1000";
+    ctx.env.OMA_MODEL_RETRY_MAX_WAIT_MS = "0";
+    await expect(new DefaultHarness().run(ctx)).rejects.toThrow("Overloaded");
+    expect(scripted.calls).toHaveLength(1);
   });
 
   it("finds the original status and retry-after through AI SDK retry exhaustion", async () => {

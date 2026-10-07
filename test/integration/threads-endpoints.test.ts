@@ -39,6 +39,7 @@ async function seedSchemaAndState(
       tenant_id: "default",
       agent_id: agentId,
       agent_snapshot: { name: agentName },
+      pending_tool_calls: [],
     };
     (instance as { _ensurePrimaryThread: () => void })._ensurePrimaryThread();
     // Seed two sub-agent threads directly into the SQL table — bypasses
@@ -416,6 +417,22 @@ describe("threads HTTP endpoints", () => {
       };
       expect(parsed.content[0].text).toBe("Hello wor");
       expect(parsed.session_thread_id).toBe("sthr_primary");
+    });
+  });
+
+  it("a failed provider stream closes without canonicalizing its partial text", async () => {
+    const stub = freshDoStub("stream_provider_failure");
+    await seedSchemaAndState(stub);
+    await runInDurableObject(stub, async (instance, state) => {
+      const helpers = instance.buildStreamRuntimeMethods("sthr_primary");
+      const id = "msg_failed_provider";
+      await helpers.broadcastStreamStart(id);
+      await helpers.broadcastChunk(id, "Incomplete provider answer");
+      await helpers.broadcastStreamEnd(id, "aborted", "stream_error");
+      const messages = [...state.storage.sql.exec("SELECT data FROM events WHERE type = 'agent.message'")];
+      expect(messages).toHaveLength(0);
+      const stream = [...state.storage.sql.exec("SELECT status FROM streams WHERE message_id = ?", id)];
+      expect(stream).toEqual([{ status: "aborted" }]);
     });
   });
 
