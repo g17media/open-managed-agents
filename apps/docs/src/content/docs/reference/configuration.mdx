@@ -519,6 +519,37 @@ Required for self-host. Set as Worker secrets via `npx wrangler secret put NAME`
 | `STORE_BACKENDS` | main | JSON config for storage backends (advanced) |
 | `DATABASE_URL` | main | External Postgres URL (advanced) |
 
+### Node rate limits
+
+These settings apply to `apps/main-node` only and are parsed once at boot.
+Each accepts a positive safe integer count per minute; `0` or `off` disables
+that gate (unlimited). Invalid values produce a startup warning and retain
+the default. Restart the process after changing them. Startup logs include
+the effective `apiWrite` and `sessionsTenant` limits.
+
+| Variable | Default per minute | Scope |
+|---|---|---|
+| `OMA_RATE_LIMIT_API_WRITES_PER_MINUTE` | `60` | `/v1/*` POST, PUT and DELETE requests per authenticated principal (API key, user, or fallback IP) |
+| `OMA_RATE_LIMIT_SESSIONS_PER_TENANT_PER_MINUTE` | `30` | Session creation per tenant on `/v1/sessions` and `/v1/oma/sessions` |
+| `OMA_RATE_LIMIT_AUTH_IP_PER_MINUTE` | `60` | `/auth/*` requests per IP |
+| `OMA_RATE_LIMIT_AUTH_SEND_IP_PER_MINUTE` | `10` | Email-triggering auth requests per IP |
+| `OMA_RATE_LIMIT_AUTH_SEND_EMAIL_PER_MINUTE` | `3` | Email-triggering auth requests per email address |
+
+For a single-tenant member portal and probes sharing one API key, start with
+`OMA_RATE_LIMIT_API_WRITES_PER_MINUTE=600`. A transform start costs about
+33 `/v1/*` writes: an agent, a session, 12 topic-video parts with two calls
+each, three guidance files, and the first message. Retirement costs about
+20 more writes. Two starts within a minute cost about 66 writes, exceeding
+the default 60 and causing a 429 partway through staging. Leave the auth
+limits at their defaults unless your usage requires an override.
+
+Reads do not consume the write budget. Session creation consumes both the
+write budget and its separate tenant budget; admission precedes body
+validation. Write and session limit 429 responses retain their JSON error
+body and include `Retry-After` in seconds until the bucket refills.
+These limits are in memory per Node process; multiple replicas require a
+shared limiter backend. Cloudflare bindings and limits are unchanged.
+
 ## Cloudflare bindings
 
 What each Worker needs in its `wrangler.jsonc`:

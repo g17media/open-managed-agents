@@ -23,6 +23,8 @@ export class MemoryRateLimitGate implements RateLimitGate {
   ) {}
 
   async consume(key: string, cost = 1): Promise<RateLimitConsumeResult> {
+    // An explicitly disabled gate needs no per-key bucket state.
+    if (this.points === 0) return { ok: true };
     const now = Date.now();
     let entry = this.buckets.get(key);
     if (!entry || entry.resetAt <= now) {
@@ -37,6 +39,7 @@ export class MemoryRateLimitGate implements RateLimitGate {
   }
 }
 
+/** Each gate accepts zero points to disable its limit (unlimited). */
 export interface MemoryGatesOpts {
   /** Per-IP /auth/* limit. CF default: 60/min. */
   authIp?: { points: number; durationSec: number };

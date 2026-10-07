@@ -9,7 +9,7 @@ import { detachedProcessOptions, killProcessTree } from "../helpers/process-tree
 
 export type ModelReply = { text: string } | { name: string; input: Record<string, unknown> } | null;
 export type OpenAINodeModel = (input: Record<string, any>) => Promise<ModelReply> | ModelReply;
-export interface OpenAINodeOptions { startupTimeoutMs?: number }
+export interface OpenAINodeOptions { startupTimeoutMs?: number; env?: Record<string, string> }
 
 export interface OpenAINodeProcess {
   /** These getters follow the new listening port after restart(). */
@@ -129,6 +129,7 @@ export async function bootOpenAINode(reply: OpenAINodeModel = defaultReply, opti
           DATABASE_PATH: join(directory, "oma.db"), AUTH_DATABASE_PATH: join(directory, "auth.db"), SANDBOX_WORKDIR: join(directory, "sandboxes"), MEMORY_BLOB_DIR: join(directory, "memories"), FILES_BLOB_DIR: join(directory, "files"), SESSION_OUTPUTS_DIR: join(directory, "outputs"),
           AUTH_DISABLED: "1", PLATFORM_ROOT_SECRET: "openai-node-test-configuration-secret", NODE_ENV: "test", DREAM_CURATOR_MODE: "dedup", ANTHROPIC_API_KEY: "local-test-model-key", ANTHROPIC_BASE_URL: `http://127.0.0.1:${modelPort}`,
           MEMORY_S3_ENDPOINT: "", FILES_S3_ENDPOINT: "", SANDBOX_PROVIDER: "litebox",
+          ...options.env,
         }, stdio: ["ignore", "pipe", "pipe"],
       });
       processHandle = child;

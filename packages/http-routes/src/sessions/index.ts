@@ -112,7 +112,7 @@ export interface SessionLifecycleHooks {
   /** Per-session daily-cap + per-minute rate-limit on session create. */
   preCreateRateLimit?: (input: {
     tenantId: string;
-  }) => Promise<{ status: number; body: unknown } | null>;
+  }) => Promise<{ status: number; body: unknown; retryAfter?: number } | null>;
   /** Best-effort daemon dispose forward (CF RuntimeRoom). Called on DELETE. */
   notifyDaemonDispose?: (input: {
     runtimeId: string;
@@ -367,7 +367,10 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
 
     if (deps.lifecycle?.preCreateRateLimit) {
       const r = await deps.lifecycle.preCreateRateLimit({ tenantId: t });
-      if (r) return c.json(r.body as object, r.status as 429);
+      if (r) {
+        if (r.retryAfter !== undefined) c.header("Retry-After", String(r.retryAfter));
+        return c.json(r.body as object, r.status as 429);
+      }
     }
 
     const body = await c.req.json<{

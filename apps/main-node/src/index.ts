@@ -120,6 +120,8 @@ import { createSqliteEnvironmentService } from "@open-managed-agents/environment
 import { createSqliteModelCardService } from "@open-managed-agents/model-cards-store";
 
 import { buildMemoryGates } from "@open-managed-agents/rate-limit/adapters/memory";
+import { rateLimit } from "@open-managed-agents/rate-limit";
+import { parseRateLimitConfig } from "./lib/rate-limit-config.js";
 
 import { createNodeMcpBindings } from "./lib/node-mcp-bindings.js";
 
@@ -528,6 +530,14 @@ const logger: Logger = await createNodeLogger({
   bindings: { service: "main-node", pid: process.pid },
 });
 setRootLogger(logger);
+
+const rateLimitConfig = parseRateLimitConfig(process.env, (name, value, defaultPoints) => {
+  logger.warn(
+    { op: "main-node.rate_limit.invalid", name, value, defaultPoints },
+    `Invalid ${name}; using default ${defaultPoints}/minute`,
+  );
+});
+const rateLimitGates = buildMemoryGates(rateLimitConfig);
 
 const metrics: NodeMetricsHandle = await createNodeMetricsRecorder();
 const tracer: NodeTracerHandle = await createNodeTracer({
@@ -2592,12 +2602,6 @@ app.get("/auth-info", (c) =>
   }),
 );
 
-// In-memory rate-limit gates — same five buckets + limits as CF's
-// Workers Rate Limiting bindings (see apps/main/src/rate-limit.ts).
-// Single-process only; multi-replica deploys need Postgres/Redis-backed
-// gates behind the same interface.
-const rateLimitGates = buildMemoryGates();
-
 function clientIp(c: { req: { header: (n: string) => string | undefined } }): string {
   return c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "anonymous";
 }
@@ -2831,6 +2835,14 @@ const sessionRouter = new NodeSessionRouter({
   registry: sessionRegistry,
   newEventLog,
 });
+// Public managed session creation shares the legacy per-tenant gate.
+// Memory gates are per-process; multiple replicas need a shared backend.
+v1.on("POST", ["/sessions", "/sessions/"], rateLimit({
+  gate: rateLimitGates.sessionsTenant,
+  keyFn: (c) => `tenant:${c.var.tenant_id}`,
+  bypass: () => authDisabled,
+  rejectMessage: "Too many session creations — wait a minute",
+}));
 v1.route("/sessions", buildManagedSessionsApi({
   sessions: (context) =>
     managedSessionsComposition.portsFor(
@@ -2892,7 +2904,7 @@ v1.route("/oma/sessions", buildSessionRoutes({
       const r = await rateLimitGates.sessionsTenant.consume(`tenant:${tenantId}`);
       return r.ok
         ? null
-        : { status: 429, body: { error: "Too many session creations — wait a minute" } };
+        : { status: 429, body: { error: "Too many session creations — wait a minute" }, retryAfter: r.retryAfter };
     },
     onResourceAttached: async ({ tenantId, sessionId }) => {
       await sessionRegistry.syncMemoryMounts(sessionId, tenantId);
@@ -3533,7 +3545,11 @@ if (ownsLongLivedProcesses) {
   managedSessionExecutionWorker.start();
   serve({ fetch: app.fetch, port, hostname: host }, (info) => {
     logger.info(
-      { op: "main-node.listening", address: info.address, port: info.port, db: backendDescription },
+      {
+        op: "main-node.listening", address: info.address, port: info.port, db: backendDescription,
+        apiWrite: rateLimitConfig.apiWrite.points === 0 ? "unlimited" : rateLimitConfig.apiWrite.points,
+        sessionsTenant: rateLimitConfig.sessionsTenant.points === 0 ? "unlimited" : rateLimitConfig.sessionsTenant.points,
+      },
       `listening on http://${info.address}:${info.port}`,
     );
   });
