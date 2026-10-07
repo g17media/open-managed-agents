@@ -120,7 +120,6 @@ import { createSqliteEnvironmentService } from "@open-managed-agents/environment
 import { createSqliteModelCardService } from "@open-managed-agents/model-cards-store";
 
 import { buildMemoryGates } from "@open-managed-agents/rate-limit/adapters/memory";
-import { rateLimit } from "@open-managed-agents/rate-limit";
 import { parseRateLimitConfig } from "./lib/rate-limit-config.js";
 
 import { createNodeMcpBindings } from "./lib/node-mcp-bindings.js";
@@ -2621,12 +2620,16 @@ app.use("/auth/*", async (c, next) => {
   const ip = clientIp(c);
   const path = new URL(c.req.url).pathname;
 
-  if (!(await rateLimitGates.authIp.consume(ip)).ok) {
+  const authIpResult = await rateLimitGates.authIp.consume(ip);
+  if (!authIpResult.ok) {
+    if (authIpResult.retryAfter !== undefined) c.header("Retry-After", String(authIpResult.retryAfter));
     return c.json({ error: "Too many requests" }, 429);
   }
   if (!EMAIL_SEND_PATHS.has(path)) return next();
 
-  if (!(await rateLimitGates.authSendIp.consume(ip)).ok) {
+  const authSendIpResult = await rateLimitGates.authSendIp.consume(ip);
+  if (!authSendIpResult.ok) {
+    if (authSendIpResult.retryAfter !== undefined) c.header("Retry-After", String(authSendIpResult.retryAfter));
     return c.json({ error: "Too many email requests from this IP" }, 429);
   }
   let email = "";
@@ -2634,8 +2637,12 @@ app.use("/auth/*", async (c, next) => {
     const body = (await c.req.raw.clone().json()) as { email?: string };
     email = (body?.email ?? "").toLowerCase().trim();
   } catch { /* no body / not JSON */ }
-  if (email && !(await rateLimitGates.authSendEmail.consume(email)).ok) {
-    return c.json({ error: "Please wait a minute before requesting another email" }, 429);
+  if (email) {
+    const authSendEmailResult = await rateLimitGates.authSendEmail.consume(email);
+    if (!authSendEmailResult.ok) {
+      if (authSendEmailResult.retryAfter !== undefined) c.header("Retry-After", String(authSendEmailResult.retryAfter));
+      return c.json({ error: "Please wait a minute before requesting another email" }, 429);
+    }
   }
   return next();
 });
@@ -2835,14 +2842,6 @@ const sessionRouter = new NodeSessionRouter({
   registry: sessionRegistry,
   newEventLog,
 });
-// Public managed session creation shares the legacy per-tenant gate.
-// Memory gates are per-process; multiple replicas need a shared backend.
-v1.on("POST", ["/sessions", "/sessions/"], rateLimit({
-  gate: rateLimitGates.sessionsTenant,
-  keyFn: (c) => `tenant:${c.var.tenant_id}`,
-  bypass: () => authDisabled,
-  rejectMessage: "Too many session creations — wait a minute",
-}));
 v1.route("/sessions", buildManagedSessionsApi({
   sessions: (context) =>
     managedSessionsComposition.portsFor(
