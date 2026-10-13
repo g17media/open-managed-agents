@@ -107,4 +107,17 @@ describe("OAuth public callback URI", () => {
     expect(error).toContain("http://oma.example/v1/oma/oauth/callback");
     expect(error).not.toContain("does not support Dynamic Client Registration");
   });
+
+  it("escapes a provider error description on the callback page", async () => {
+    const { app } = buildApp({});
+    const payload = "<script>alert(document.cookie)</script>";
+
+    const response = await app.request(
+      `/v1/oma/oauth/callback?${new URLSearchParams({ error: "access_denied", error_description: payload })}`,
+    );
+    expect(response.status).toBe(400);
+    const html = await response.text();
+    expect(html).not.toContain(payload);
+    expect(html).toContain("&lt;script&gt;alert(document.cookie)&lt;/script&gt;");
+  });
 });
