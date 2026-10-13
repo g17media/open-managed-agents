@@ -17,8 +17,9 @@ export interface OAuthCredentialPersistence {
 export interface OAuthRoutesDeps {
   credentialsFor?: (workspaceId: string) => OAuthCredentialPersistence | Promise<OAuthCredentialPersistence>;
   services: RouteServicesArg;
-  /** Provider OAuth client credentials — CF passes worker env, Node passes
-   *  process.env. Only <PROVIDER>_OAUTH_CLIENT_ID/_SECRET keys are read. */
+  /** CF passes worker env, Node passes process.env. Only PUBLIC_BASE_URL
+   *  (the public origin for the callback URI) and the provider OAuth client
+   *  credentials (<PROVIDER>_OAUTH_CLIENT_ID/_SECRET) are read. */
   env: Partial<Record<string, string>>;
 }
 
@@ -43,10 +44,23 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
-  /** Derive the base URL for this worker from the request. */
-  function getBaseUrl(c: { req: { url: string } }): string {
+  /**
+   * Public origin that the browser and the OAuth provider see for this server.
+   *
+   * PUBLIC_BASE_URL wins when set. Self-hosted Node runs behind a proxy that
+   * terminates TLS and forwards plain http://, so the request URL alone hands
+   * the provider an http:// redirect URI — which providers such as StackOne
+   * refuse, first at Dynamic Client Registration and again on their authorize
+   * page. Without the setting, the request URL is used, upgraded to https when
+   * the proxy reports a TLS client connection (X-Forwarded-Proto). Only the
+   * scheme is taken from the header; the host always comes from the request.
+   */
+  function getBaseUrl(c: { req: { url: string; header(name: string): string | undefined } }): string {
+    const configured = deps.env.PUBLIC_BASE_URL?.trim();
+    if (configured) return configured.replace(/\/+$/, "");
     const url = new URL(c.req.url);
-    return `${url.protocol}//${url.host}`;
+    const forwardedProto = c.req.header("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+    return `${forwardedProto === "https" ? "https:" : url.protocol}//${url.host}`;
   }
 
   /**
@@ -223,13 +237,20 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
   }
 
   /**
-   * Attempt Dynamic Client Registration if the auth server supports it.
+   * Attempt Dynamic Client Registration (RFC 7591) with the auth server.
+   *
+   * Registers a public client whose only redirect URI is `redirectUri`.
+   * Returns the issued client on success, or the reason registration failed.
+   * Failure is not fatal — the caller falls back to preset client
+   * credentials — but the reason is kept so the final error names it.
    */
   async function dynamicClientRegistration(
     registrationEndpoint: string,
     redirectUri: string,
-    mcpServerUrl: string,
-  ): Promise<{ client_id: string; client_secret?: string } | null> {
+  ): Promise<
+    | { ok: true; client_id: string; client_secret?: string }
+    | { ok: false; reason: string }
+  > {
     try {
       const res = await fetch(registrationEndpoint, {
         method: "POST",
@@ -242,18 +263,29 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
           token_endpoint_auth_method: "none", // public client
         }),
       });
-      if (!res.ok) return null;
-      const data = (await res.json()) as { client_id: string; client_secret?: string };
-      return { client_id: data.client_id, client_secret: data.client_secret };
+      if (!res.ok) {
+        // Providers explain a refusal in the body (StackOne, for one, rejects
+        // a non-HTTPS redirect URI here). Without it the caller could only
+        // claim the server "does not support Dynamic Client Registration",
+        // which sends the operator after the wrong problem.
+        const body = (await res.text().catch(() => "")).slice(0, 300).trim();
+        logWarn(
+          { op: "oauth.dcr_register", status: res.status, registration_endpoint: registrationEndpoint, redirect_uri: redirectUri, body },
+          "OAuth DCR register rejected; caller will fall back",
+        );
+        return { ok: false, reason: `HTTP ${res.status}${body ? `: ${body}` : ""}` };
+      }
+      const data = (await res.json()) as { client_id?: string; client_secret?: string };
+      if (!data.client_id) return { ok: false, reason: "response carried no client_id" };
+      return { ok: true, client_id: data.client_id, client_secret: data.client_secret };
     } catch (err) {
-      // Dynamic Client Registration is best-effort — caller falls back to a
-      // pre-registered client_id. But persistent failures here block per-server
+      // Network or JSON failure. Persistent failures here block per-server
       // OAuth onboarding entirely, so we want visibility.
       logWarn(
         { op: "oauth.dcr_register", err },
         "OAuth DCR register failed; caller will fall back",
       );
-      return null;
+      return { ok: false, reason: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) };
     }
   }
 
@@ -270,6 +302,8 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     token_endpoint: string;
     authorization_server: string;
     redirect_uri: string;
+    /** The exact redirect_uri sent to the provider's authorize endpoint. */
+    callback_uri?: string;
     resource_uri: string;
     scope?: string;
   }
@@ -361,15 +395,17 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     let clientSecret: string | undefined = callerClientSecret ||
       ((!callerClientId || callerClientId === savedAuthorization?.clientId)
         ? savedAuthorization?.clientSecret : undefined);
+    let registrationFailure: string | null = null;
     if (!clientId && meta.authServer.registration_endpoint) {
       const reg = await dynamicClientRegistration(
         meta.authServer.registration_endpoint,
         callbackUri,
-        mcpServerUrl,
       );
-      if (reg) {
+      if (reg.ok) {
         clientId = reg.client_id;
         clientSecret = reg.client_secret;
+      } else {
+        registrationFailure = reg.reason;
       }
     }
 
@@ -505,6 +541,18 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       }
     }
 
+    // The server offers registration but refused ours: report the provider's
+    // reason and the redirect URI we sent, since "does not support Dynamic
+    // Client Registration" would be false here.
+    if (!clientId && registrationFailure) {
+      return c.json(
+        {
+          error: `Dynamic Client Registration at ${meta.authServer.registration_endpoint} failed (${registrationFailure}) for redirect URI ${callbackUri}, and no preset client_id is configured for issuer ${meta.authServer.issuer}.`,
+        },
+        502,
+      );
+    }
+
     if (!clientId) {
       return c.json(
         {
@@ -545,6 +593,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       token_endpoint: meta.authServer.token_endpoint,
       authorization_server: meta.authServer.issuer,
       redirect_uri: clientRedirectUri || `${baseUrl}/`,
+      callback_uri: callbackUri,
       resource_uri: meta.resource.resource,
       scope: requestedScope || undefined,
     };
@@ -601,12 +650,15 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
 
     const oauthState: OAuthState = JSON.parse(stateData);
 
-    // Exchange code for tokens
-    const baseUrl = getBaseUrl(c);
+    // Exchange code for tokens. The token request must repeat the authorize
+    // step's redirect_uri exactly (RFC 6749 §4.1.3), so reuse the stored one
+    // rather than re-deriving it from this request, whose scheme or host can
+    // differ behind a proxy. States written before callback_uri existed fall
+    // back to the derived value.
     const tokenBody = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      redirect_uri: `${baseUrl}/v1/oma/oauth/callback`,
+      redirect_uri: oauthState.callback_uri ?? `${getBaseUrl(c)}/v1/oma/oauth/callback`,
       client_id: oauthState.client_id,
       code_verifier: oauthState.code_verifier,
       resource: oauthState.resource_uri,
