@@ -28,6 +28,19 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
 
   // ─── Helpers ───
 
+  /** Escape text for an HTML page. The callback's error pages echo
+   *  `error_description` and token-endpoint bodies, which anyone can set
+   *  via a crafted callback URL — unescaped, that is script on the console
+   *  origin running with the visitor's session. */
+  function escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   /** Generate a cryptographically random string for PKCE and state. */
   function randomString(length: number): string {
     const bytes = crypto.getRandomValues(new Uint8Array(length));
@@ -634,7 +647,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
 
     if (error) {
       const desc = c.req.query("error_description") || error;
-      return c.html(`<html><body><h2>Authorization failed</h2><p>${desc}</p><script>window.close()</script></body></html>`, 400);
+      return c.html(`<html><body><h2>Authorization failed</h2><p>${escapeHtml(desc)}</p><script>window.close()</script></body></html>`, 400);
     }
 
     if (!code || !state) {
@@ -683,7 +696,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     if (!tokenRes.ok) {
       const errBody = await tokenRes.text();
       await services.kv.delete(stateKey);
-      return c.html(`<html><body><h2>Token exchange failed</h2><p>${errBody}</p><script>window.close()</script></body></html>`, 502);
+      return c.html(`<html><body><h2>Token exchange failed</h2><p>${escapeHtml(errBody)}</p><script>window.close()</script></body></html>`, 502);
     }
 
     const tokens = (await tokenRes.json()) as {
