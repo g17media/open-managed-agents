@@ -28,10 +28,11 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
 
   // ─── Helpers ───
 
-  /** Escape text for an HTML page. The callback's error pages echo
-   *  `error_description` and token-endpoint bodies, which anyone can set
-   *  via a crafted callback URL — unescaped, that is script on the console
-   *  origin running with the visitor's session. */
+  /** Escape text for an HTML page. The callback pages echo
+   *  `error_description` (anyone can set it through a crafted callback URL)
+   *  and provider-controlled text such as token-endpoint error bodies —
+   *  unescaped, that is script on the console origin running with the
+   *  visitor's session. */
   function escapeHtml(value: string): string {
     return value
       .replace(/&/g, "&amp;")
@@ -39,6 +40,24 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  /** JSON for an inline <script>. JSON.stringify leaves `</script>` and
+   *  `<!--` intact, so a value carrying them (an MCP server's probe error
+   *  body, a crafted return URL) would end the script early and run its own
+   *  markup; writing every `<` as < keeps it inside the string. */
+  function scriptJson(value: unknown): string {
+    return JSON.stringify(value).replace(/</g, "\\u003c");
+  }
+
+  /** True for an absolute http: or https: URL. */
+  function isHttpUrl(value: string): boolean {
+    try {
+      const { protocol } = new URL(value);
+      return protocol === "http:" || protocol === "https:";
+    } catch {
+      return false;
+    }
   }
 
   /** Generate a cryptographically random string for PKCE and state. */
@@ -357,6 +376,13 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       return c.json({ error: "mcp_server_url and vault_id are required" }, 400);
     }
 
+    // The return URI becomes the success page's fallback navigation target,
+    // so only http(s) is accepted: a javascript: or data: URL there would run
+    // on this origin. Plain http stays allowed for the CLI's localhost listener.
+    if (clientRedirectUri && !isHttpUrl(clientRedirectUri)) {
+      return c.json({ error: "redirect_uri must be an http or https URL" }, 400);
+    }
+
     // Verify vault exists. Vaults live in D1 (vaults-store) since the
     // KV → D1 migration; this route was missed in that sweep — every
     // OAuth flow returned 404 "Vault not found" because KV was always
@@ -421,6 +447,11 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
         registrationFailure = reg.reason;
       }
     }
+    // Appended to the preset setup errors below, so a provider that offers
+    // registration but refused ours (Feishu, Lark, ClickUp) still reports why.
+    const registrationNote = registrationFailure
+      ? ` Dynamic Client Registration at ${meta.authServer.registration_endpoint} was refused (${registrationFailure}) for redirect URI ${callbackUri}.`
+      : "";
 
     // Known-provider preset: GitHub OAuth doesn't support DCR. Operator
     // must pre-register an OAuth App at https://github.com/settings/developers
@@ -436,7 +467,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
           {
             error:
               "GitHub OAuth requires a pre-registered OAuth App: visit https://github.com/settings/developers, create an App with callback " +
-              `${callbackUri}, then set GITHUB_OAUTH_CLIENT_ID + GITHUB_OAUTH_CLIENT_SECRET on the main worker.`,
+              `${callbackUri}, then set GITHUB_OAUTH_CLIENT_ID + GITHUB_OAUTH_CLIENT_SECRET on the main worker.${registrationNote}`,
           },
           501,
         );
@@ -458,7 +489,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
           {
             error:
               "Feishu MCP OAuth requires a pre-registered Feishu app: visit https://open.feishu.cn, create a Web App with redirect URL " +
-              `${callbackUri}, then set FEISHU_OAUTH_CLIENT_ID + FEISHU_OAUTH_CLIENT_SECRET on the main worker.`,
+              `${callbackUri}, then set FEISHU_OAUTH_CLIENT_ID + FEISHU_OAUTH_CLIENT_SECRET on the main worker.${registrationNote}`,
           },
           501,
         );
@@ -481,7 +512,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
           {
             error:
               "Lark MCP OAuth requires a pre-registered Lark app: visit https://open.larksuite.com, create a Web App with redirect URL " +
-              `${callbackUri}, then set LARK_OAUTH_CLIENT_ID + LARK_OAUTH_CLIENT_SECRET on the main worker.`,
+              `${callbackUri}, then set LARK_OAUTH_CLIENT_ID + LARK_OAUTH_CLIENT_SECRET on the main worker.${registrationNote}`,
           },
           501,
         );
@@ -501,7 +532,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
           {
             error:
               "Asana MCP OAuth requires a pre-registered Asana app: visit https://app.asana.com/0/my-apps, create an OAuth app with redirect URL " +
-              `${callbackUri}, then set ASANA_OAUTH_CLIENT_ID + ASANA_OAUTH_CLIENT_SECRET on the main worker.`,
+              `${callbackUri}, then set ASANA_OAUTH_CLIENT_ID + ASANA_OAUTH_CLIENT_SECRET on the main worker.${registrationNote}`,
           },
           501,
         );
@@ -523,7 +554,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
           {
             error:
               "ClickUp MCP OAuth requires a pre-registered ClickUp app: visit https://app.clickup.com/settings/apps, create an OAuth app with redirect URL " +
-              `${callbackUri}, then set CLICKUP_OAUTH_CLIENT_ID + CLICKUP_OAUTH_CLIENT_SECRET on the main worker.`,
+              `${callbackUri}, then set CLICKUP_OAUTH_CLIENT_ID + CLICKUP_OAUTH_CLIENT_SECRET on the main worker.${registrationNote}`,
           },
           501,
         );
@@ -547,7 +578,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
           {
             error:
               "Slack MCP OAuth requires a pre-registered Slack app: visit https://api.slack.com/apps, create an app with redirect URL " +
-              `${callbackUri}, then set SLACK_OAUTH_CLIENT_ID + SLACK_OAUTH_CLIENT_SECRET on the main worker.`,
+              `${callbackUri}, then set SLACK_OAUTH_CLIENT_ID + SLACK_OAUTH_CLIENT_SECRET on the main worker.${registrationNote}`,
           },
           501,
         );
@@ -792,18 +823,23 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     // We always try both, then close. The fallback `location.href` only fires
     // if neither transport is available (very old browser, scripts disabled,
     // etc.) — by 2026 this should be unreachable.
+    //
+    // Every value reaches the inline script through scriptJson: the probe
+    // message is the MCP server's own response text and the return URL is
+    // caller-supplied, so either could otherwise close the script tag.
+    const completion = {
+      type: "oauth_complete",
+      service: serverName,
+      vault_id: oauthState.vault_id,
+      probe_ok: probeResult.ok,
+      probe_message: probeResult.message ?? null,
+    };
     return c.html(`
       <html><body>
-      <p>Connected to ${serverName}. Closing…</p>
+      <p>Connected to ${escapeHtml(serverName)}. Closing…</p>
       <script>
         (function(){
-          var msg = {
-            type: "oauth_complete",
-            service: "${serverName}",
-            vault_id: "${oauthState.vault_id}",
-            probe_ok: ${probeResult.ok ? "true" : "false"},
-            probe_message: ${JSON.stringify(probeResult.message ?? null)},
-          };
+          var msg = ${scriptJson(completion)};
           var notified = false;
           try {
             if (window.opener && !window.opener.closed) {
@@ -820,7 +856,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
           if (notified) {
             window.close();
           } else {
-            window.location.href = ${JSON.stringify(redirectUrl.toString())};
+            window.location.href = ${scriptJson(redirectUrl.toString())};
           }
         })();
       </script>
