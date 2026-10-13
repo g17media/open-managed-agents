@@ -5,6 +5,7 @@
 // provider's reason instead of "does not support Dynamic Client Registration".
 // Also pins the callback pages against markup injection from provider text
 // and caller-supplied return URLs.
+import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { buildOAuthRoutes, nativeOAuthCredentials, type RouteServices } from "@open-managed-agents/http-routes";
@@ -87,6 +88,26 @@ function callbackPath(authorize: Response): string {
 }
 
 const registered = () => Response.json({ client_id: "dcr-client" });
+
+/**
+ * Run the success page's inline script against a fake browser window at
+ * `origin`, with or without a live opener, and a BroadcastChannel that —
+ * like the real one — accepts a post with nobody listening. Reports whether
+ * the page closed itself or navigated, and where.
+ */
+function runSuccessScript(html: string, page: { origin: string; opener: boolean }) {
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  if (!script) throw new Error("success page has no script");
+  const result = { closed: false, navigatedTo: null as string | null, posted: 0 };
+  const window = {
+    opener: page.opener ? { closed: false, postMessage: () => { result.posted++; } } : null,
+    location: { origin: page.origin, set href(url: string) { result.navigatedTo = url; } },
+    close: () => { result.closed = true; },
+  };
+  class BroadcastChannel { postMessage() { result.posted++; } close() {} }
+  runInNewContext(script, { window, BroadcastChannel, URL });
+  return result;
+}
 
 describe("OAuth public callback URI", () => {
   it("uses PUBLIC_BASE_URL for registration, authorize and token exchange", async () => {
@@ -190,5 +211,36 @@ describe("OAuth callback page injection", () => {
     // The CLI's plain-http localhost listener stays allowed.
     const cli = await app.request(authorizePath({ redirect_uri: "http://localhost:19500/callback" }));
     expect(cli.status, await cli.clone().text()).toBe(302);
+  });
+});
+
+describe("OAuth success page completion", () => {
+  it("navigates the CLI's browser tab to its localhost listener", async () => {
+    const { app } = buildApp({ PUBLIC_BASE_URL: "https://oma.example" });
+    mockProvider({ register: registered });
+
+    const response = await app.request(authorizePath({ redirect_uri: "http://localhost:19500/callback" }));
+    const callback = await app.request(callbackPath(response));
+    expect(callback.status, await callback.clone().text()).toBe(200);
+
+    // Opened by the OS, not by the console: no opener, but BroadcastChannel
+    // still "delivers". Closing here would leave the CLI waiting to time out.
+    const page = runSuccessScript(await callback.text(), { origin: "https://oma.example", opener: false });
+    expect(page.closed).toBe(false);
+    const target = new URL(page.navigatedTo!);
+    expect(target.origin + target.pathname).toBe("http://localhost:19500/callback");
+    expect(target.searchParams.get("oauth")).toBe("success");
+  });
+
+  it("closes a console popup whose opener was severed, notifying over BroadcastChannel", async () => {
+    const { app } = buildApp({ PUBLIC_BASE_URL: "https://oma.example" });
+    mockProvider({ register: registered });
+
+    const response = await app.request(authorizePath({ redirect_uri: "https://oma.example/vaults/vault_public_callback" }));
+    const callback = await app.request(callbackPath(response));
+    expect(callback.status, await callback.clone().text()).toBe(200);
+
+    const page = runSuccessScript(await callback.text(), { origin: "https://oma.example", opener: false });
+    expect(page).toEqual({ closed: true, navigatedTo: null, posted: 1 });
   });
 });

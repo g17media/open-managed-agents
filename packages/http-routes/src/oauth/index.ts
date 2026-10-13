@@ -820,9 +820,13 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     //      parent are same-origin (app.openma.dev / app.staging.openma.dev),
     //      so the channel is delivered.
     //
-    // We always try both, then close. The fallback `location.href` only fires
-    // if neither transport is available (very old browser, scripts disabled,
-    // etc.) — by 2026 this should be unreachable.
+    // We always try both, then close — but only when the return URL is on
+    // this page's origin, i.e. a console popup that one of the transports can
+    // reach. A posted BroadcastChannel message counts as sent even with no
+    // listener, so a cross-origin return URL (the `oma` CLI's localhost
+    // listener) is always navigated to; closing instead would leave the CLI
+    // waiting until it times out. Navigation is also the fallback when
+    // neither transport is available (very old browser).
     //
     // Every value reaches the inline script through scriptJson: the probe
     // message is the MCP server's own response text and the return URL is
@@ -840,6 +844,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       <script>
         (function(){
           var msg = ${scriptJson(completion)};
+          var returnUrl = ${scriptJson(redirectUrl.toString())};
           var notified = false;
           try {
             if (window.opener && !window.opener.closed) {
@@ -853,10 +858,14 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
             bc.close();
             notified = true;
           } catch (e) {}
-          if (notified) {
+          var sameOrigin = false;
+          try {
+            sameOrigin = new URL(returnUrl).origin === window.location.origin;
+          } catch (e) {}
+          if (notified && sameOrigin) {
             window.close();
           } else {
-            window.location.href = ${scriptJson(redirectUrl.toString())};
+            window.location.href = returnUrl;
           }
         })();
       </script>
