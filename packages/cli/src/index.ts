@@ -2245,9 +2245,11 @@ async function connectMcp(config: Config, mcpServerUrl: string, vaultId: string)
       const url = new URL(req.url || "/", `http://localhost:${port}`);
       if (url.pathname === "/callback") {
         const service = url.searchParams.get("service");
+        const renewalWarning = url.searchParams.get("renewal_warning");
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(`<html><body><h2>Connected${service ? ` to ${service}` : ""}!</h2><script>window.close()</script></body></html>`);
         console.log(`Connected to ${service || mcpServerUrl}`);
+        if (renewalWarning) console.warn(`Warning: ${renewalWarning}`);
         server.close();
         resolve();
       }
