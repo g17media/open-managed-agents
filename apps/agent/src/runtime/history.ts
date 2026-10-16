@@ -102,15 +102,17 @@ function applyMessageElisions(messages: ModelMessage[], events: SessionEvent[]):
  *     resolve toolName even when the matching tool_use lies in a different
  *     "flush window" (the old `pendingToolCalls.find` failed on that case
  *     and produced "unknown" — a permanent cache miss).
- *   - Iterate events strictly by storage order (caller's job to sort by seq).
+ *   - Preserve assistant-part and result order within each model request,
+ *     grouping all calls before results to tolerate older interleaved writes.
+ *     Callers supply storage order; request starts fence separate responses.
  *   - Honor the LAST agent.thread_context_compacted boundary that carries a
  *     `summary` payload: build pre-boundary and post-boundary messages
  *     separately, inject the summary, pick a CC-style tail of the
  *     pre-boundary messages by token budget, then output
  *     `[summary, ...tail, ...post-boundary]`. Boundary events without a
  *     summary are pure UI signals (no effect here).
- *   - Skip lifecycle.* / span.* / notification.* / agent.thread_message_*
- *     and bare compaction notifications. Summary-less boundaries with
+ *   - Lifecycle/span events fence response grouping but add no model parts.
+ *     Skip notification.* / agent.thread_message_* and bare compaction notifications. Summary-less boundaries with
  *     tool_result_elisions metadata replace only the referenced results.
  *
  * Sync API: file_id-source image/document blocks fall back to a placeholder
@@ -286,6 +288,13 @@ export async function eventsToMessagesAsync(
  * assistant + tool state internally, flushes at the end. Used by
  * eventsToMessages on either the full stream, the pre-boundary range, or
  * the post-boundary range.
+ *
+ * Within a known model request, buffer assistant parts and results separately.
+ * SDK validation errors can precede later calls; API-list timestamp ties can
+ * even place results before their calls or after model_request_end. Only the
+ * next request start or a user/turn boundary closes this grouping. Histories
+ * without request spans retain the legacy flush behavior rather than guessing
+ * whether two calls came from the same response.
  */
 function buildMessages(
   events: SessionEvent[],
@@ -296,6 +305,7 @@ function buildMessages(
   const messages: ModelMessage[] = [];
   let pendingAssistantContent: AssistantModelMessage["content"] = [];
   let pendingToolContent: ToolModelMessage["content"] = [];
+  let inModelResponse = false;
 
   const flushAssistant = () => {
     if (pendingAssistantContent.length > 0) {
@@ -324,7 +334,31 @@ function buildMessages(
       continue;
     }
     switch (event.type) {
+      case "span.model_request_start": {
+        // A request fences responses even when the preceding call was
+        // interrupted. Keep text-only histories byte-identical to older reads.
+        if (pendingToolContent.length || pendingAssistantContent.some(part => part.type === "tool-call")) {
+          flushAssistant();
+          flushTools();
+        }
+        inModelResponse = true;
+        break;
+      }
+      case "user.interrupt":
+      case "session.status_running":
+      case "session.status_idle":
+      case "session.status_terminated":
+      case "session.error":
+        // Lifecycle signals must not split legacy text-only histories. Flush
+        // only a known response's buffered tools before closing its window.
+        if (inModelResponse && (pendingToolContent.length || pendingAssistantContent.some(part => part.type === "tool-call"))) {
+          flushAssistant();
+          flushTools();
+        }
+        inModelResponse = false;
+        break;
       case "user.message": {
+        inModelResponse = false;
         flushAssistant();
         flushTools();
         messages.push({
@@ -334,7 +368,7 @@ function buildMessages(
         break;
       }
       case "agent.thinking": {
-        flushTools();
+        if (!inModelResponse) flushTools();
         const e = event as AgentThinkingEvent;
         if (e.text != null) {
           pendingAssistantContent.push({
@@ -346,7 +380,7 @@ function buildMessages(
         break;
       }
       case "agent.message": {
-        flushTools();
+        if (!inModelResponse) flushTools();
         const e = event as AgentMessageEvent;
         for (const block of e.content) {
           if (block.type === "text") {
@@ -358,7 +392,7 @@ function buildMessages(
       case "agent.tool_use":
       case "agent.mcp_tool_use":
       case "agent.custom_tool_use": {
-        flushTools();
+        if (!inModelResponse) flushTools();
         const e = event as AgentToolUseEvent | AgentMcpToolUseEvent | AgentCustomToolUseEvent;
         const toolName = e.name;
         pendingAssistantContent.push({
@@ -371,7 +405,7 @@ function buildMessages(
       }
       case "agent.tool_result":
       case "agent.mcp_tool_result": {
-        flushAssistant();
+        if (!inModelResponse) flushAssistant();
         const e = event as AgentToolResultEvent | AgentMcpToolResultEvent;
         const toolCallId = event.type === "agent.tool_result"
           ? (e as AgentToolResultEvent).tool_use_id
@@ -410,6 +444,7 @@ async function buildMessagesAsync(
   const messages: ModelMessage[] = [];
   let pendingAssistantContent: AssistantModelMessage["content"] = [];
   let pendingToolContent: ToolModelMessage["content"] = [];
+  let inModelResponse = false;
 
   const flushAssistant = () => {
     if (pendingAssistantContent.length > 0) {
@@ -430,7 +465,31 @@ async function buildMessagesAsync(
       continue;
     }
     switch (event.type) {
+      case "span.model_request_start": {
+        // A request fences responses even when the preceding call was
+        // interrupted. Keep text-only histories byte-identical to older reads.
+        if (pendingToolContent.length || pendingAssistantContent.some(part => part.type === "tool-call")) {
+          flushAssistant();
+          flushTools();
+        }
+        inModelResponse = true;
+        break;
+      }
+      case "user.interrupt":
+      case "session.status_running":
+      case "session.status_idle":
+      case "session.status_terminated":
+      case "session.error":
+        // Lifecycle signals must not split legacy text-only histories. Flush
+        // only a known response's buffered tools before closing its window.
+        if (inModelResponse && (pendingToolContent.length || pendingAssistantContent.some(part => part.type === "tool-call"))) {
+          flushAssistant();
+          flushTools();
+        }
+        inModelResponse = false;
+        break;
       case "user.message": {
+        inModelResponse = false;
         flushAssistant();
         flushTools();
         messages.push({
@@ -440,7 +499,7 @@ async function buildMessagesAsync(
         break;
       }
       case "agent.thinking": {
-        flushTools();
+        if (!inModelResponse) flushTools();
         const e = event as AgentThinkingEvent;
         if (e.text != null) {
           pendingAssistantContent.push({
@@ -452,7 +511,7 @@ async function buildMessagesAsync(
         break;
       }
       case "agent.message": {
-        flushTools();
+        if (!inModelResponse) flushTools();
         const e = event as AgentMessageEvent;
         for (const block of e.content) {
           if (block.type === "text") {
@@ -464,7 +523,7 @@ async function buildMessagesAsync(
       case "agent.tool_use":
       case "agent.mcp_tool_use":
       case "agent.custom_tool_use": {
-        flushTools();
+        if (!inModelResponse) flushTools();
         const e = event as AgentToolUseEvent | AgentMcpToolUseEvent | AgentCustomToolUseEvent;
         const toolName = e.name;
         pendingAssistantContent.push({
@@ -477,7 +536,7 @@ async function buildMessagesAsync(
       }
       case "agent.tool_result":
       case "agent.mcp_tool_result": {
-        flushAssistant();
+        if (!inModelResponse) flushAssistant();
         const e = event as AgentToolResultEvent | AgentMcpToolResultEvent;
         const toolCallId = event.type === "agent.tool_result"
           ? (e as AgentToolResultEvent).tool_use_id

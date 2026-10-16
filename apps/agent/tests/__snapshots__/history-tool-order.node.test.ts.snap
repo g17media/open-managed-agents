@@ -1,0 +1,14 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`tool ordering in history projection > keeps healthy projections byte-identical to the pre-fix implementation 1`] = `
+[
+  "d035c48d959db02c56bb3d35bde9d0584bfbdaa7cce865530c4e95673d409031",
+  "0f1877f39c2a017275c0c12344e0b0560c971ecf110e61d4a7b924c005260b1a",
+  "0d04db1f38e2aefc50f928c593011faeae775d518ba0ff0b7022c76a9ab2ea4f",
+  "1a46e133a94adf079fbff0c802cf4dc1c2b350cca64eb04ca82f8734affd0363",
+]
+`;
+
+exports[`tool ordering in history projection > keeps the exact private healthy portion byte-identical 1`] = `"5589f08213102c01b6916da53823576d1e1e001c939e7a589b2bc757fb09c37c"`;
+
+exports[`tool ordering in history projection > retains genuinely unanswered calls across a new user message 1`] = `"50e58ebf4908369a7c7fa53d36532d8ea67193d80f9757211718e313046c55cc"`;
