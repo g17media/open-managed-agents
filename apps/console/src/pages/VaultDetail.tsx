@@ -81,6 +81,17 @@ function credentialTypeView(credential: Credential): {
   }
 }
 
+function OAuthRenewalNote({ auth }: { auth: Credential["auth"] }) {
+  if (auth.type !== "mcp_oauth" || auth.refresh) return null;
+  const expiresAt = auth.expires_at ? Date.parse(auth.expires_at) : NaN;
+  const note = Number.isFinite(expiresAt)
+    ? expiresAt <= Date.now()
+      ? "Expired — reconnect"
+      : `Can't renew — expires ${new Date(expiresAt).toLocaleString()}`
+    : "Can't renew — expiry unknown";
+  return <span className="block mt-1 text-xs text-warning">{note}</span>;
+}
+
 // First-wave cap CLI list. Mirrors @open-managed-agents/cap builtinSpecs.
 // Lifted verbatim from VaultsList — kept here because the Add-credential
 // flow now lives on this page.
@@ -190,6 +201,7 @@ export function VaultDetail() {
       reloadCredentials();
       if (event.data.probe_ok === false) toast.warning("Credential renewed, but the MCP server still rejected it.");
       else toast.success("Credential reconnected");
+      if (event.data.renewal_warning) toast.warning(event.data.renewal_warning);
     };
     window.addEventListener("message", complete);
     let channel: BroadcastChannel | undefined;
@@ -416,6 +428,7 @@ export function VaultDetail() {
                           >
                             {c.archived_at ? "archived" : "active"}
                           </span>
+                          <OAuthRenewalNote auth={c.auth} />
                         </TableCell>
                         <TableCell className="text-fg-muted">
                           {new Date(c.updated_at).toLocaleString()}
@@ -720,6 +733,7 @@ function EditCredentialModal({ vault, credential, onClose, onSaved }: {
           <CredentialField label="Audience" value={auth.audience ?? auth.token_uri} />
         </>}
         {auth.type === "mcp_oauth" && <>
+          <OAuthRenewalNote auth={auth} />
           {auth.refresh && <>
             <CredentialField label="Token endpoint" value={auth.refresh.token_endpoint} />
             <CredentialField label="Auth method" value={auth.refresh.token_endpoint_auth.type} />
@@ -867,6 +881,7 @@ function AddCredentialModal({
             service?: string;
             probe_ok?: boolean;
             probe_message?: string | null;
+            renewal_warning?: string | null;
           };
         }
       ).data;
@@ -886,6 +901,7 @@ function AddCredentialModal({
               : `Connected to ${svc}, but the server rejected our token.`,
           );
         }
+        if (data.renewal_warning) toast.warning(data.renewal_warning);
       }
     },
     [onCreated],

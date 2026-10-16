@@ -823,7 +823,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
 
     // A successful grant can still lack a refresh token; surface its lifetime
     // so the operator knows to reconnect before the credential stops working.
-    const renewalWarning = tokens.refresh_token ? undefined : expiresAt
+    const renewalWarning = tokens.refresh_token ? null : expiresAt
       ? `This connection can't renew itself and will stop working at ${expiresAt}; reconnect before then.`
       : "This connection can't renew itself. The provider did not supply an expiry time; reconnect when the token expires.";
 
@@ -833,6 +833,10 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     redirectUrl.searchParams.set("service", serverName);
     redirectUrl.searchParams.set("probe_ok", probeResult.ok ? "1" : "0");
     if (probeResult.message) redirectUrl.searchParams.set("probe_message", probeResult.message);
+    // The popup closes before its paragraph can be read, so carry the warning
+    // to the console and navigation fallback as well.
+    if (renewalWarning) redirectUrl.searchParams.set("renewal_warning", renewalWarning);
+    else redirectUrl.searchParams.delete("renewal_warning");
 
     // If opened in a popup, close it and notify parent.
     //
@@ -863,6 +867,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       vault_id: oauthState.vault_id,
       probe_ok: probeResult.ok,
       probe_message: probeResult.message ?? null,
+      renewal_warning: renewalWarning,
     };
     return c.html(`
       <html><body>

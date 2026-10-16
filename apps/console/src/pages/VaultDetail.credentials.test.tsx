@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
 import { VaultDetail } from "./VaultDetail";
 
@@ -37,6 +37,8 @@ beforeEach(() => {
   mocks.auth = { type: "static_bearer", mcp_server_url: "https://github.com", handle: "repo-reader" };
 });
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("credential details and updates", () => {
   it.each([
     { type: "static_bearer", mcp_server_url: "https://github.com", handle: "repo-reader" },
@@ -51,6 +53,7 @@ describe("credential details and updates", () => {
     const clipboard = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: clipboard } });
     const dialog = edit();
+    expect(screen.queryByText(/Can.t renew|Expired — reconnect/)).not.toBeInTheDocument();
     const fields: Record<string, string> = { "Display name": "Example credential", Created: vault.created_at, Updated: vault.updated_at, Provider: "example-provider" };
     if (auth.mcp_server_url) fields["Server URL"] = auth.mcp_server_url;
     if (auth.handle) fields.Handle = auth.handle;
@@ -244,5 +247,25 @@ describe("credential selectors", () => {
     expect(within(kind).getByRole("tab", { name: "CLI" })).toHaveAttribute("aria-selected", "true");
     await user.keyboard("{ArrowRight}");
     await waitFor(() => expect(within(kind).getByRole("tab", { name: "Registry" })).toHaveAttribute("aria-selected", "true"));
+  });
+});
+
+
+describe("OAuth renewal status", () => {
+  it.each([
+    { expires: "2026-10-16T13:00:00Z", expired: false },
+    { expires: "2026-10-16T11:00:00Z", expired: true },
+    { expires: "2026-10-16T12:00:00Z", expired: true },
+    { expires: undefined, expired: false },
+    { expires: "invalid", expired: false },
+  ])("shows a persistent renewal note in the row and detail for expiry $expires", ({ expires, expired }) => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-16T12:00:00Z"));
+    mocks.auth = { type: "mcp_oauth", mcp_server_url: "https://mcp.example.com", expires_at: expires };
+    const note = expired ? "Expired — reconnect" : expires && expires !== "invalid"
+      ? `Can't renew — expires ${new Date(expires).toLocaleString()}` : "Can't renew — expiry unknown";
+    show();
+    expect(within(screen.getByTestId("credential-list-surface")).getByText(note)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(within(screen.getByRole("dialog")).getByText(note)).toBeInTheDocument();
   });
 });

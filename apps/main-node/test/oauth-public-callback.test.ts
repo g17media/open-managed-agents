@@ -181,17 +181,17 @@ describe("OAuth offline access scopes", () => {
  * like the real one — accepts a post with nobody listening. Reports whether
  * the page closed itself or navigated, and where.
  */
-function runSuccessScript(html: string, page: { origin: string; opener: boolean }) {
+function runSuccessScript(html: string, page: { origin: string; opener: boolean; broadcast?: boolean }) {
   const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
   if (!script) throw new Error("success page has no script");
-  const result = { closed: false, navigatedTo: null as string | null, posted: 0 };
+  const result = { closed: false, navigatedTo: null as string | null, posted: 0, messages: [] as Array<{ renewal_warning: string | null }> };
   const window = {
-    opener: page.opener ? { closed: false, postMessage: () => { result.posted++; } } : null,
+    opener: page.opener ? { closed: false, postMessage: (msg: { renewal_warning: string | null }) => { result.posted++; result.messages.push(msg); } } : null,
     location: { origin: page.origin, set href(url: string) { result.navigatedTo = url; } },
     close: () => { result.closed = true; },
   };
-  class BroadcastChannel { postMessage() { result.posted++; } close() {} }
-  runInNewContext(script, { window, BroadcastChannel, URL });
+  class BroadcastChannel { postMessage(msg: { renewal_warning: string | null }) { result.posted++; result.messages.push(msg); } close() {} }
+  runInNewContext(script, { window, BroadcastChannel: page.broadcast === false ? undefined : BroadcastChannel, URL });
   return result;
 }
 
@@ -310,11 +310,24 @@ describe("OAuth success page completion", () => {
     mockProvider({ register: registered, tokens: { access_token: "access",
       ...(refresh && { refresh_token: "refresh" }), ...(expiry && { expires_in: 3600 }) } });
 
-    const response = await app.request(authorizePath());
+    const response = await app.request(authorizePath({ redirect_uri: "https://oma.example/vaults/test?renewal_warning=stale" }));
     const callback = await app.request(callbackPath(response));
     expect(callback.status, await callback.clone().text()).toBe(200);
     const html = await callback.text();
     expect(html).toContain("Connected to");
+    const warning = refresh ? null : expiry
+      ? "This connection can't renew itself and will stop working at 2026-10-16T13:00:00.000Z; reconnect before then."
+      : "This connection can't renew itself. The provider did not supply an expiry time; reconnect when the token expires.";
+    const popup = runSuccessScript(html, { origin: "https://oma.example", opener: true });
+    expect(popup.closed).toBe(true);
+    expect(popup.messages).toHaveLength(2);
+    for (const message of popup.messages) expect(message.renewal_warning).toBe(warning);
+    const broadcast = runSuccessScript(html, { origin: "https://oma.example", opener: false });
+    expect(broadcast.closed).toBe(true);
+    expect(broadcast.messages[0]?.renewal_warning).toBe(warning);
+    const fallback = runSuccessScript(html, { origin: "https://oma.example", opener: false, broadcast: false });
+    expect(fallback.closed).toBe(false);
+    expect(new URL(fallback.navigatedTo!).searchParams.get("renewal_warning")).toBe(warning);
     if (refresh) {
       expect(html).not.toContain("This connection can&#39;t renew itself");
       expect(html).not.toContain("reconnect before");
@@ -356,6 +369,6 @@ describe("OAuth success page completion", () => {
     expect(callback.status, await callback.clone().text()).toBe(200);
 
     const page = runSuccessScript(await callback.text(), { origin: "https://oma.example", opener: false });
-    expect(page).toEqual({ closed: true, navigatedTo: null, posted: 1 });
+    expect(page).toMatchObject({ closed: true, navigatedTo: null, posted: 1 });
   });
 });
