@@ -8,8 +8,10 @@ export interface OAuthCredentialPersistence {
   vaultExists(vaultId: string): Promise<boolean>;
   authorizationSettings(vaultId: string, credentialId: string): Promise<{
     scope?: string; clientId?: string; clientSecret?: string;
+    tokenEndpointAuthMethod?: "none" | "client_secret_basic" | "client_secret_post";
   } | null>;
-  saveGrant(input: { vaultId: string; credentialId?: string; displayName: string; auth: CredentialAuth }): Promise<string>;
+  saveGrant(input: { vaultId: string; credentialId?: string; displayName: string; auth: CredentialAuth;
+    tokenEndpointAuthMethod?: "none" | "client_secret_basic" | "client_secret_post" }): Promise<string>;
   saveCliGrant(input: { vaultId: string; cliId: string; auth: CredentialAuth }): Promise<string>;
   refresh(vaultId: string, credentialId: string): Promise<{ expires_at?: string | null }>;
 }
@@ -331,6 +333,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     code_verifier: string;
     client_id: string;
     client_secret?: string;
+    token_endpoint_auth_method?: "none" | "client_secret_basic" | "client_secret_post";
     token_endpoint: string;
     authorization_server: string;
     redirect_uri: string;
@@ -397,18 +400,22 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     // Re-authorization of an existing credential with no explicit scope
     // override: reuse the scopes stored on the credential so user-added
     // scopes survive reconnects.
-    const savedAuthorization = credentialId && native
+    let savedAuthorization = credentialId && native
       ? await native.authorizationSettings(vaultId, credentialId)
       : null;
-    if (credentialId && native && !savedAuthorization) return c.json({ error: "Credential not found" }, 404);
-    if (!extraScope && savedAuthorization) extraScope = savedAuthorization.scope ?? "";
-    if (!extraScope && credentialId && !native) {
+    if (credentialId && !native) {
       const existing = await services.credentials
         .get({ tenantId: t, vaultId, credentialId })
         .catch(() => null);
-      const storedScope = (existing?.auth as { scope?: string } | undefined)?.scope;
-      if (storedScope) extraScope = storedScope;
+      // Legacy credentials already persist the client outside refresh state;
+      // reconnect must reuse it before attempting DCR or provider presets.
+      if (existing?.auth.type === "mcp_oauth" && !existing.archived_at) {
+        savedAuthorization = { scope: existing.auth.scope,
+          clientId: existing.auth.client_id, clientSecret: existing.auth.client_secret };
+      }
     }
+    if (credentialId && !savedAuthorization) return c.json({ error: "Credential not found" }, 404);
+    if (!extraScope && savedAuthorization) extraScope = savedAuthorization.scope ?? "";
 
     const baseUrl = getBaseUrl(c);
     const callbackUri = `${baseUrl}/v1/oma/oauth/callback`;
@@ -634,6 +641,10 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       code_verifier: codeVerifier,
       client_id: clientId,
       client_secret: clientSecret,
+      token_endpoint_auth_method: clientSecret
+        ? (!callerClientSecret && (!callerClientId || callerClientId === savedAuthorization?.clientId)
+          ? savedAuthorization?.tokenEndpointAuthMethod ?? "client_secret_post" : "client_secret_post")
+        : "none",
       token_endpoint: meta.authServer.token_endpoint,
       authorization_server: meta.authServer.issuer,
       redirect_uri: clientRedirectUri || `${baseUrl}/`,
@@ -707,20 +718,22 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
       code_verifier: oauthState.code_verifier,
       resource: oauthState.resource_uri,
     });
-    if (oauthState.client_secret) {
+    // Preserve a saved confidential client's authentication method across
+    // reconnects; putting a Basic-only secret in the body can be rejected.
+    const tokenHeaders = new Headers({
+      "Content-Type": "application/x-www-form-urlencoded",
+      // GitHub defaults to form-encoded responses without this JSON opt-in.
+      Accept: "application/json",
+    });
+    if (oauthState.client_secret && oauthState.token_endpoint_auth_method === "client_secret_basic") {
+      tokenHeaders.set("Authorization", `Basic ${btoa(`${encodeURIComponent(oauthState.client_id)}:${encodeURIComponent(oauthState.client_secret)}`)}`);
+    } else if (oauthState.client_secret && oauthState.token_endpoint_auth_method !== "none") {
       tokenBody.set("client_secret", oauthState.client_secret);
     }
 
     const tokenRes = await fetch(oauthState.token_endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        // GitHub's token endpoint defaults to application/x-www-form-urlencoded
-        // response bodies (`access_token=xxx&scope=&token_type=bearer`); Accept
-        // header is the documented opt-in to JSON. Other providers default to
-        // JSON regardless, so the header is harmless for them.
-        Accept: "application/json",
-      },
+      headers: tokenHeaders,
       body: tokenBody.toString(),
     });
 
@@ -766,7 +779,8 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     const native = await deps.credentialsFor?.(oauthState.tenant_id);
     if (native) {
       await native.saveGrant({ vaultId: oauthState.vault_id, credentialId: oauthState.credential_id,
-        displayName: `${serverName} (OAuth)`, auth: credAuth });
+        displayName: `${serverName} (OAuth)`, auth: credAuth,
+        tokenEndpointAuthMethod: oauthState.token_endpoint_auth_method });
     } else if (oauthState.credential_id) {
       // Update existing credential — refresh on a known credential row. If the
       // row vanished mid-flow (race with delete/archive), swallow: the OAuth

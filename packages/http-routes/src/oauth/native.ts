@@ -33,20 +33,25 @@ export function nativeOAuthCredentials(input: {
       const record = await input.store.find({ workspaceId: input.workspaceId, vaultId, credentialId });
       const auth = record?.credential.auth;
       if (!record || record.credential.archivedAt || auth?.type !== "mcp_oauth") return null;
+      const tokenEndpointAuth = auth.tokenEndpointAuth ?? auth.refresh?.tokenEndpointAuth;
       return {
         scope: auth.scope ?? auth.refresh?.scope ?? undefined,
-        clientId: auth.refresh?.clientId,
-        clientSecret: auth.refresh?.tokenEndpointAuth.type === "none" ? undefined : auth.refresh?.tokenEndpointAuth.clientSecret ?? undefined,
+        clientId: auth.clientId ?? auth.refresh?.clientId,
+        clientSecret: tokenEndpointAuth?.type === "none" ? undefined : tokenEndpointAuth?.clientSecret ?? undefined,
+        tokenEndpointAuthMethod: tokenEndpointAuth?.type,
       };
     },
-    async saveGrant({ vaultId, credentialId, displayName, auth }) {
+    async saveGrant({ vaultId, credentialId, displayName, auth, tokenEndpointAuthMethod }) {
       if (!auth.access_token || !auth.mcp_server_url) throw new Error("OAuth grant is incomplete");
+      const type = tokenEndpointAuthMethod ?? (auth.client_secret ? "client_secret_post" : "none");
+      const tokenEndpointAuth = type === "none" ? { type } : { type, clientSecret: auth.client_secret ?? null };
       return save(vaultId, displayName, { type: "mcp_oauth", mcpServerUrl: auth.mcp_server_url,
         accessToken: auth.access_token, expiresAt: auth.expires_at, scope: auth.scope,
+        clientId: auth.client_id, tokenEndpointAuth,
         ...(auth.refresh_token && auth.token_endpoint && { refresh: {
           clientId: auth.client_id ?? "open-managed-agents", refreshToken: auth.refresh_token,
           tokenEndpoint: auth.token_endpoint, scope: auth.scope,
-          tokenEndpointAuth: auth.client_secret ? { type: "client_secret_post", clientSecret: auth.client_secret } : { type: "none" },
+          tokenEndpointAuth,
         } }),
       }, credentialId);
     },

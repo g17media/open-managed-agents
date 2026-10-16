@@ -59,6 +59,19 @@ describe("SqlCredentialStore", () => {
     await client.exec(SCHEMA_SQL);
   });
 
+  it("round-trips OAuth client settings without a refresh token through the sealed document", async () => {
+    const store = new SqlCredentialStore(client, new TestCipher());
+    const value: Credential = { ...credential("vcrd_oauth", "2026-10-16T18:22:00.000Z"), auth: {
+      type: "mcp_oauth", mcpServerUrl: "https://mcp.example.com", accessToken: "oauth-access",
+      clientId: "registered-client", tokenEndpointAuth: { type: "client_secret_basic", clientSecret: "oauth-client-secret" },
+    } };
+    await store.insert({ workspaceId: "workspace_01", credential: value });
+    const raw = await client.prepare("SELECT sealed_document FROM managed_credentials WHERE id = ?").bind(value.id).first<{ sealed_document: string }>();
+    expect(raw?.sealed_document).toMatch(/^sealed:/);
+    expect(raw?.sealed_document).not.toContain("oauth-client-secret");
+    expect(await store.find({ workspaceId: "workspace_01", vaultId: "vlt_01", credentialId: value.id })).toEqual({ revision: 1, credential: value });
+  });
+
   it("passes the service account key and cached token through the document cipher", async () => {
     const store = new SqlCredentialStore(client, new TestCipher());
     const value: Credential = { ...credential("vcrd_sa", "2026-08-26T10:00:00.000Z"), auth: {

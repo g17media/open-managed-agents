@@ -62,6 +62,10 @@ export type CredentialAuth =
       scope?: string;
       mcpServerUrl: string;
       expiresAt?: string | null;
+      // Reconnect still needs the registered client when a provider issues
+      // no refresh token. Keep these settings independent of refresh state.
+      clientId?: string;
+      tokenEndpointAuth?: CredentialTokenEndpointAuth | null;
       refresh?: CredentialOAuthRefresh | null;
     }
   | {
