@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dynamicTool, jsonSchema } from "ai";
+import { z } from "zod";
 import { APICallError } from "@ai-sdk/provider";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { ModelError, type SessionEvent } from "@open-managed-agents/shared";
@@ -72,6 +73,45 @@ describe("DefaultHarness in-turn provider retries", () => {
   });
   afterAll(() => builtins.mockRestore());
   afterEach(() => { vi.useRealTimers(); });
+
+  it.each(["unavailable", "invalid-input"])("persists all calls before an early %s error", async failure => {
+    const middleName = failure === "unavailable" ? "mcp__dendrite__list_sites" : "read";
+    const scripted = createScriptedLanguageModel([
+      streamStep([
+        { type: "stream-start", warnings: [] },
+        { type: "reasoning-start", id: "thinking" },
+        { type: "reasoning-delta", id: "thinking", delta: "Check the tools" },
+        { type: "reasoning-end", id: "thinking" },
+        ...toolCallChunks({ id: "bash", toolName: "bash", inputDeltas: ["{}"] }).slice(1),
+        ...toolCallChunks({ id: "bad", toolName: middleName, inputDeltas: ["{}"] }).slice(1),
+        ...toolCallChunks({ id: "discord", toolName: "mcp__discord__search_messages", inputDeltas: ["{}"] }).slice(1),
+        finishChunk("tool-calls"),
+      ]), answer(),
+    ]);
+    const ctx = context(scripted.model);
+    ctx.agent.metadata = { tool_execution: "parallel" };
+    const execute = async () => "completed result";
+    ctx.tools = {
+      bash: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }),
+      read: dynamicTool({ inputSchema: z.object({ value: z.string() }), execute }),
+      mcp__discord__search_messages: dynamicTool({ inputSchema: jsonSchema({ type: "object" }), execute }),
+    };
+    await new DefaultHarness().run(ctx);
+    const events = ctx.runtime.history.getEvents();
+    const canonical = events.filter(e => ["agent.thinking", "agent.tool_use", "agent.mcp_tool_use", "agent.tool_result", "agent.mcp_tool_result"].includes(e.type));
+    expect(canonical.map(e => e.type)).toEqual([
+      "agent.thinking", "agent.tool_use", failure === "unavailable" ? "agent.mcp_tool_use" : "agent.tool_use", "agent.mcp_tool_use",
+      failure === "unavailable" ? "agent.mcp_tool_result" : "agent.tool_result", "agent.tool_result", "agent.mcp_tool_result",
+    ]);
+    expect(canonical[4]).toMatchObject({ is_error: true, parent_event_id: "bad" });
+    expect(canonical.slice(1, 4).map(e => e.id)).toEqual(["bash", "bad", "discord"]);
+    expect(canonical.slice(4).map(e => e.parent_event_id)).toEqual(["bad", "bash", "discord"]);
+    const messages = eventsToMessages(events);
+    expect(messages.map(m => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(scripted.calls).toHaveLength(2);
+    expect(JSON.stringify(scripted.calls[1])).toContain("completed result");
+    expectPairedSpans(events, 2);
+  });
 
   it("continues after a completed tool and two 529s with one error-free session outcome", async () => {
     const scripted = createScriptedLanguageModel([toolStep(), requestErrorStep(rejection()), requestErrorStep(rejection()), answer()]);

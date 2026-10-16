@@ -501,7 +501,7 @@ export class DefaultHarness implements HarnessInterface {
       const persistSettledTools = async () => {
         // Failed assistant output is excluded, but genuine settled work must
         // survive. Keep calls in model order, then outputs in settlement order,
-        // just as the SDK's step content does. Never persist an unmatched call.
+        // as onStepFinish does. Never persist an unmatched call.
         for (const [id, call] of capturedToolCalls) {
           if (settledToolOutputs.has(id)) await persistToolCall(call);
         }
@@ -700,15 +700,10 @@ export class DefaultHarness implements HarnessInterface {
           unresolvedStepErrorMessage = null;
           unresolvedStepError = undefined;
         }
-        // Iterate step.content[] in order to preserve LLM output ordering
-        // (reasoning → text → tool-call interleaving). The previous "reasoning
-        // first, text next, tool-calls last" loop assumed an ordering AI SDK
-        // doesn't guarantee, breaking byte-determinism on derive().
-        //
-        // Each part maps to exactly one wire event. The mapping is the inverse
-        // of history.ts eventsToMessages — together they form the
-        // ModelMessage[] ↔ SessionEvent[] bijection that prompt-cache
-        // determinism rests on.
+        // Invalid calls enqueue their errors before later calls in the same
+        // response. Persist assistant parts in model order, then all outputs,
+        // so history cannot split one response into multiple assistant messages
+        // and leave valid parallel results orphaned on the next request.
         for (const part of step.content as ReadonlyArray<ContentPart<any>>) {
           if (failedStep && (part.type === "reasoning" || part.type === "text"
             || part.type === "tool-call" && !settledCalls.has(part.toolCallId))) continue;
@@ -760,15 +755,14 @@ export class DefaultHarness implements HarnessInterface {
               await persistToolCall(part);
               break;
             }
-            case "tool-result":
-            case "tool-error":
-              persistToolOutput(part);
-              break;
             // source / file / tool-approval-request: not produced by current
             // tool surface; intentionally skipped. Add cases here if those
             // become reachable — the bijection requires every part write a
             // matching wire event.
           }
+        }
+        for (const part of step.content as ReadonlyArray<ContentPart<any>>) {
+          if (part.type === "tool-result" || part.type === "tool-error") persistToolOutput(part);
         }
         // Defensive: any thinking/tool-input streams that didn't pair
         // with a step.content entry get aborted so the client doesn't
