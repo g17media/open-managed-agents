@@ -47,27 +47,73 @@ async function completeCallback(warning?: string, service: string | null = "test
   handler({ url: `/callback?${params}` } as any, { writeHead, end } as any);
 
   expect(writeHead).toHaveBeenCalledWith(200, { "Content-Type": "text/html" });
-  expect(end).toHaveBeenCalledWith(`<html><body><h2>Connected${service ? ` to ${service}` : ""}!</h2><script>window.close()</script></body></html>`);
+  expect(end).toHaveBeenCalledOnce();
   expect(close).toHaveBeenCalledOnce();
   expect(fetch).not.toHaveBeenCalled();
-  return output.slice(1);
+  return { output: output.slice(1), html: end.mock.calls[0][0] as string };
 }
 
 describe("CLI OAuth callback", () => {
   it("prints the renewal warning after the connection confirmation", async () => {
     const warning = "This connection can't renew itself; reconnect before 2026-10-16T20:00:00.000Z.";
 
-    expect(await completeCallback(warning)).toEqual([
-      "Connected to test",
-      `Warning: ${warning}`,
-    ]);
+    expect(await completeCallback(warning)).toEqual({
+      output: ["Connected to test", `Warning: ${warning}`],
+      html: "<html><body><h2>Connected to test!</h2><script>window.close()</script></body></html>",
+    });
   });
 
   it("keeps the connection confirmation unchanged without a renewal warning", async () => {
-    expect(await completeCallback()).toEqual(["Connected to test"]);
+    expect(await completeCallback()).toEqual({
+      output: ["Connected to test"],
+      html: "<html><body><h2>Connected to test!</h2><script>window.close()</script></body></html>",
+    });
   });
 
   it("keeps the server URL fallback without a service or renewal warning", async () => {
-    expect(await completeCallback(undefined, null)).toEqual(["Connected to https://mcp.invalid"]);
+    expect(await completeCallback(undefined, null)).toEqual({
+      output: ["Connected to https://mcp.invalid"],
+      html: "<html><body><h2>Connected!</h2><script>window.close()</script></body></html>",
+    });
+  });
+
+  it.each(["service", "renewal_warning"] as const)("neutralizes screen-clear and OSC 52 controls in %s", async (param) => {
+    const payload = "\r\x1b[2K\x1b[2J\x1b[HReadable café 日本語 🚀\n\x1b]52;c;Y2xpcGJvYXJk\x07";
+    const safeText = "[2K[2J[HReadable café 日本語 🚀]52;c;Y2xpcGJvYXJk";
+    const { output } = await completeCallback(
+      param === "renewal_warning" ? payload : "Readable warning",
+      param === "service" ? payload : "test",
+    );
+
+    expect(output).toEqual([
+      `Connected to ${param === "service" ? safeText : "test"}`,
+      `Warning: ${param === "renewal_warning" ? safeText : "Readable warning"}`,
+    ]);
+    for (const line of output) expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+  });
+
+  it("removes every C0, DEL and C1 control from both terminal values", async () => {
+    const controls = Array.from({ length: 160 }, (_, code) => code)
+      .filter((code) => code < 32 || code >= 127)
+      .map((code) => String.fromCharCode(code)).join("");
+    const { output } = await completeCallback(`Renew${controls} soon`, `Café${controls} 日本語 🚀`);
+
+    expect(output).toEqual(["Connected to Café 日本語 🚀", "Warning: Renew soon"]);
+  });
+
+  it("escapes service markup and entities in the HTML response", async () => {
+    const service = '</h2><script>alert("service")</script><h2> & &lt;service&gt;';
+    const { output, html } = await completeCallback(undefined, service);
+
+    expect(output).toEqual([`Connected to ${service}`]);
+    expect(html).toBe('<html><body><h2>Connected to &lt;/h2&gt;&lt;script&gt;alert("service")&lt;/script&gt;&lt;h2&gt; &amp; &amp;lt;service&amp;gt;!</h2><script>window.close()</script></body></html>');
+    expect(html.match(/<h2>(.*?)<\/h2>/)?.[1]).not.toMatch(/[<>]/);
+  });
+
+  it("keeps the existing fallback and omits an empty warning", async () => {
+    expect(await completeCallback("", "")).toEqual({
+      output: ["Connected to https://mcp.invalid"],
+      html: "<html><body><h2>Connected!</h2><script>window.close()</script></body></html>",
+    });
   });
 });

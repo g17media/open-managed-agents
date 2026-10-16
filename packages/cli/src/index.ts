@@ -2246,10 +2246,13 @@ async function connectMcp(config: Config, mcpServerUrl: string, vaultId: string)
       if (url.pathname === "/callback") {
         const service = url.searchParams.get("service");
         const renewalWarning = url.searchParams.get("renewal_warning");
+        // The local callback is unauthenticated, so query text must not control the terminal or inject HTML.
+        const terminalText = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+        const htmlService = service?.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(`<html><body><h2>Connected${service ? ` to ${service}` : ""}!</h2><script>window.close()</script></body></html>`);
-        console.log(`Connected to ${service || mcpServerUrl}`);
-        if (renewalWarning) console.warn(`Warning: ${renewalWarning}`);
+        res.end(`<html><body><h2>Connected${service ? ` to ${htmlService}` : ""}!</h2><script>window.close()</script></body></html>`);
+        console.log(`Connected to ${terminalText(service || mcpServerUrl)}`);
+        if (renewalWarning) console.warn(`Warning: ${terminalText(renewalWarning)}`);
         server.close();
         resolve();
       }
