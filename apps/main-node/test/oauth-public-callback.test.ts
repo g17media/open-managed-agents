@@ -34,7 +34,7 @@ function buildApp(env: Partial<Record<string, string>>) {
       put: async (key: string, value: string) => { state.set(key, value); },
       delete: async (key: string) => { state.delete(key); } } } as unknown as RouteServices,
   }));
-  return { app, store };
+  return { app, store, credentials };
 }
 
 /**
@@ -47,17 +47,24 @@ function mockProvider(options: {
   register: (redirectUris: string[]) => Response;
   probe?: () => Response;
   issuer?: string;
+  scopesSupported?: string[];
+  resourceScopes?: string[];
+  discovery?: "oauth" | "oidc";
+  tokens?: { access_token: string; refresh_token?: string; expires_in?: number; scope?: string };
 }) {
   const issuer = options.issuer ?? "https://oauth.test";
   const seen = { registered: [] as string[], tokenRedirect: null as string | null };
   vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     const path = new URL(String(url));
     if (path.hostname === "mcp.test" && path.pathname.startsWith("/.well-known")) {
-      return Response.json({ resource: mcpServerUrl, authorization_servers: ["https://oauth.test"] });
+      return Response.json({ resource: mcpServerUrl, authorization_servers: ["https://oauth.test"], scopes_supported: options.resourceScopes });
     }
     if (path.hostname === "oauth.test" && path.pathname.startsWith("/.well-known")) {
+      if (options.discovery === "oidc" && path.pathname !== "/.well-known/openid-configuration") {
+        return new Response(null, { status: 404 });
+      }
       return Response.json({ issuer, authorization_endpoint: "https://oauth.test/authorize",
-        token_endpoint: "https://oauth.test/token", registration_endpoint: "https://oauth.test/register" });
+        token_endpoint: "https://oauth.test/token", registration_endpoint: "https://oauth.test/register", scopes_supported: options.scopesSupported });
     }
     if (path.pathname === "/register") {
       const body = JSON.parse(String(init?.body)) as { redirect_uris: string[] };
@@ -66,7 +73,7 @@ function mockProvider(options: {
     }
     if (path.pathname === "/token") {
       seen.tokenRedirect = new URLSearchParams(String(init?.body)).get("redirect_uri");
-      return Response.json({ access_token: "access", refresh_token: "refresh", expires_in: 3600 });
+      return Response.json(options.tokens ?? { access_token: "access", refresh_token: "refresh", expires_in: 3600 });
     }
     if (path.hostname === "mcp.test" && path.pathname === "/mcp") {
       return options.probe?.() ?? Response.json({ jsonrpc: "2.0", id: 1, result: {} });
@@ -88,6 +95,85 @@ function callbackPath(authorize: Response): string {
 }
 
 const registered = () => Response.json({ client_id: "dcr-client" });
+
+describe("OAuth offline access scopes", () => {
+  it.each([
+    { name: "RFC 8414 advertisement", discovery: "oauth", supported: ["openid", "offline_access"], expected: "openid profile email offline_access" },
+    { name: "OpenID fallback advertisement", discovery: "oidc", supported: ["openid", "offline_access"], expected: "openid profile email offline_access" },
+    { name: "caller already requests offline access", supported: ["offline_access"], extra: "offline_access offline_access extra", expected: "openid profile email offline_access extra" },
+    { name: "saved scope already requests offline access", supported: ["offline_access"], saved: "openid offline_access extra", expected: "openid profile email offline_access extra" },
+    { name: "saved scope needs offline access", supported: ["offline_access"], saved: "openid extra", expected: "openid profile email extra offline_access" },
+    { name: "PRM already requests offline access", supported: ["offline_access"], resource: ["openid", "offline_access"], expected: "openid offline_access" },
+    { name: "AS does not advertise offline access", supported: ["openid", "profile", "email"], extra: "extra", expected: "openid profile email extra" },
+    { name: "AS has no scopes metadata", extra: "extra", expected: "openid profile email extra" },
+    { name: "AS advertises an empty scope list", supported: [], expected: "openid profile email" },
+    { name: "no requested scopes retains the provider default", supported: ["unrelated"], resource: [], expected: null },
+    { name: "offline access is the only requested scope", supported: ["offline_access", "unrelated"], resource: [], expected: "offline_access" },
+  ] satisfies { name: string; discovery?: "oauth" | "oidc"; supported?: string[]; extra?: string; saved?: string; resource?: string[]; expected: string | null }[])("$name", async (test) => {
+    const { app, credentials } = buildApp({});
+    const extra: Record<string, string> = {};
+    if ("extra" in test) extra.scope = test.extra!;
+    if ("saved" in test) {
+      extra.credential_id = await credentials.saveGrant({ vaultId: vault.id, displayName: "Saved", auth: {
+        type: "mcp_oauth", mcp_server_url: mcpServerUrl, access_token: "old-access", client_id: "saved-client", scope: test.saved,
+      } });
+    }
+    mockProvider({ register: registered, scopesSupported: "supported" in test ? test.supported : undefined,
+      resourceScopes: "resource" in test ? test.resource : ["openid", "profile", "email"],
+      discovery: "discovery" in test ? test.discovery : undefined });
+
+    const response = await app.request(authorizePath(extra));
+    expect(response.status, await response.clone().text()).toBe(302);
+    const scope = new URL(response.headers.get("location")!).searchParams.get("scope");
+    expect(scope).toBe(test.expected);
+    if (scope?.includes("offline_access")) expect(scope.split(" ").filter(s => s === "offline_access")).toHaveLength(1);
+  });
+
+  it.each([
+    { name: "GitHub", issuer: "https://github.com/login/oauth", env: "GITHUB", registration: "none" },
+    { name: "Slack", issuer: "https://slack.com", env: "SLACK", registration: "none" },
+    { name: "Asana", issuer: "https://app.asana.com", env: "ASANA", registration: "none" },
+    { name: "Feishu", issuer: "https://accounts.feishu.cn/mcp", env: "FEISHU", registration: "refused" },
+    { name: "Lark", issuer: "https://accounts.larksuite.com/mcp", env: "LARK", registration: "refused" },
+    { name: "ClickUp", issuer: "https://mcp.clickup.com", env: "CLICKUP", registration: "refused" },
+    { name: "Linear", issuer: "https://mcp.linear.app", env: "LINEAR", registration: "dcr" },
+  ])("preserves the $name authorize URL without an offline access advertisement", async provider => {
+    const { app } = buildApp({ [`${provider.env}_OAUTH_CLIENT_ID`]: "preset-client", [`${provider.env}_OAUTH_CLIENT_SECRET`]: "preset-secret" });
+    const network = vi.spyOn(globalThis, "fetch").mockImplementation(async url => {
+      const path = new URL(String(url));
+      if (path.hostname === "mcp.test" && path.pathname.startsWith("/.well-known")) {
+        return Response.json({ resource: mcpServerUrl, authorization_servers: [provider.issuer], scopes_supported: ["read", "write"] });
+      }
+      if (path.origin === new URL(provider.issuer).origin && path.pathname.startsWith("/.well-known")) {
+        // GitHub's real discovery path uses hard-coded endpoints after 404s;
+        // the other providers expose metadata, sometimes with unusable DCR.
+        if (provider.name === "GitHub") return new Response(null, { status: 404 });
+        return Response.json({ issuer: provider.issuer, authorization_endpoint: "https://oauth.test/authorize",
+          token_endpoint: "https://oauth.test/token", scopes_supported: ["read", "write"],
+          ...(provider.registration !== "none" && { registration_endpoint: "https://oauth.test/register" }) });
+      }
+      if (path.href === "https://github.com/login/oauth/.well-known/oauth-authorization-server") return new Response(null, { status: 404 });
+      if (path.href === "https://oauth.test/register") {
+        return provider.registration === "dcr" ? registered() : Response.json(refusal, { status: 400 });
+      }
+      throw new Error(`Unexpected offline request ${path.href}`);
+    });
+
+    const response = await app.request(authorizePath());
+    expect(response.status, await response.clone().text()).toBe(302);
+    const actual = new URL(response.headers.get("location")!);
+    expect(actual.searchParams.get("state")).toMatch(/^[a-f0-9]{32}$/);
+    expect(actual.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    actual.searchParams.set("state", "STATE");
+    actual.searchParams.set("code_challenge", "CHALLENGE");
+    const expected = new URL(provider.name === "GitHub" ? "https://github.com/login/oauth/authorize" : "https://oauth.test/authorize");
+    expected.search = new URLSearchParams({ response_type: "code", client_id: provider.registration === "dcr" ? "dcr-client" : "preset-client",
+      redirect_uri: "http://localhost/v1/oma/oauth/callback", state: "STATE", code_challenge: "CHALLENGE",
+      code_challenge_method: "S256", resource: mcpServerUrl, scope: "read write" }).toString();
+    expect(actual.href).toBe(expected.href);
+    expect(network.mock.calls.some(([url]) => String(url) === "https://oauth.test/register")).toBe(provider.registration !== "none");
+  });
+});
 
 /**
  * Run the success page's inline script against a fake browser window at
@@ -215,6 +301,35 @@ describe("OAuth callback page injection", () => {
 });
 
 describe("OAuth success page completion", () => {
+  it.each([
+    { refresh: false, expiry: true }, { refresh: false, expiry: false },
+    { refresh: true, expiry: true }, { refresh: true, expiry: false },
+  ])("reports renewability when refresh=$refresh and expiry=$expiry", async ({ refresh, expiry }) => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-16T12:00:00Z"));
+    const { app, store } = buildApp({});
+    mockProvider({ register: registered, tokens: { access_token: "access",
+      ...(refresh && { refresh_token: "refresh" }), ...(expiry && { expires_in: 3600 }) } });
+
+    const response = await app.request(authorizePath());
+    const callback = await app.request(callbackPath(response));
+    expect(callback.status, await callback.clone().text()).toBe(200);
+    const html = await callback.text();
+    expect(html).toContain("Connected to");
+    if (refresh) {
+      expect(html).not.toContain("This connection can&#39;t renew itself");
+      expect(html).not.toContain("reconnect before");
+    } else {
+      expect(html).toContain("This connection can&#39;t renew itself");
+      if (expiry) {
+        const record = (await store.list({ workspaceId, vaultId: vault.id, limit: 10, includeArchived: true }))[0]!;
+        expect(record.credential.auth).toMatchObject({ expiresAt: "2026-10-16T13:00:00.000Z" });
+        expect(html).toContain("will stop working at 2026-10-16T13:00:00.000Z; reconnect before then");
+      } else {
+        expect(html).toContain("The provider did not supply an expiry time; reconnect when the token expires.");
+      }
+    }
+  });
+
   it("navigates the CLI's browser tab to its localhost listener", async () => {
     const { app } = buildApp({ PUBLIC_BASE_URL: "https://oma.example" });
     mockProvider({ register: registered });

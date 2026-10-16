@@ -630,6 +630,12 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     ]) {
       if (!requestedScopes.includes(s)) requestedScopes.push(s);
     }
+    // Some servers only issue refresh tokens for offline_access. Request it
+    // when advertised so a plain connect is renewable, but avoid invalid_scope
+    // from providers that do not support it.
+    if (meta.authServer.scopes_supported?.includes("offline_access") && !requestedScopes.includes("offline_access")) {
+      requestedScopes.push("offline_access");
+    }
     const requestedScope = requestedScopes.join(" ");
 
     // Store state in KV (10 minute TTL)
@@ -815,6 +821,12 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     // here doesn't roll back the credential (it's already persisted).
     const probeResult = await probeMcpServer(oauthState.mcp_server_url, tokens.access_token);
 
+    // A successful grant can still lack a refresh token; surface its lifetime
+    // so the operator knows to reconnect before the credential stops working.
+    const renewalWarning = tokens.refresh_token ? undefined : expiresAt
+      ? `This connection can't renew itself and will stop working at ${expiresAt}; reconnect before then.`
+      : "This connection can't renew itself. The provider did not supply an expiry time; reconnect when the token expires.";
+
     // Redirect back to console
     const redirectUrl = new URL(oauthState.redirect_uri);
     redirectUrl.searchParams.set("oauth", "success");
@@ -855,6 +867,7 @@ export function buildOAuthRoutes(deps: OAuthRoutesDeps) {
     return c.html(`
       <html><body>
       <p>Connected to ${escapeHtml(serverName)}. Closing…</p>
+      ${renewalWarning ? `<p>${escapeHtml(renewalWarning)}</p>` : ""}
       <script>
         (function(){
           var msg = ${scriptJson(completion)};

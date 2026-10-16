@@ -8,6 +8,78 @@ import { MemoryCredentialStore } from "../../../packages/credential-store-memory
 afterEach(() => vi.restoreAllMocks());
 
 describe("OAuth credential reconnection", () => {
+  it.each([true, false])("automatically obtains a renewable native grant and keeps its scopes on reconnect (reported scope=%s)", async reportsScope => {
+    const workspaceId = "workspace_offline_access";
+    const vault = { id: "vault_offline_access", archivedAt: null };
+    const store = new MemoryCredentialStore();
+    const credentials = nativeOAuthCredentials({ workspaceId, store, nextId: () => "credential_offline_access",
+      vaults: { retrieveVault: async () => ({ type: "found", vault }) } as never });
+    const state = new Map<string, string>();
+    const app = new Hono<{ Variables: { tenant_id: string } }>();
+    app.use("*", async (c, next) => { c.set("tenant_id", workspaceId); await next(); });
+    app.route("/v1/oma/oauth", buildOAuthRoutes({ env: {}, credentialsFor: () => credentials,
+      services: { kv: { get: async (key: string) => state.get(key) ?? null,
+        put: async (key: string, value: string) => { state.set(key, value); },
+        delete: async (key: string) => { state.delete(key); } } } as unknown as RouteServices,
+    }));
+    let advertisesOfflineAccess = true;
+    const authorizedScopes = new Map<string, string>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const path = new URL(String(url));
+      if (path.hostname === "mcp.test" && path.pathname.startsWith("/.well-known")) {
+        return Response.json({ resource: "https://mcp.test/mcp", authorization_servers: ["https://oauth.test"], scopes_supported: ["openid", "profile", "email"] });
+      }
+      if (path.href === "https://oauth.test/.well-known/oauth-authorization-server") return new Response(null, { status: 404 });
+      if (path.href === "https://oauth.test/.well-known/openid-configuration") {
+        return Response.json({ issuer: "https://oauth.test", authorization_endpoint: "https://oauth.test/authorize", token_endpoint: "https://oauth.test/token",
+          scopes_supported: advertisesOfflineAccess ? ["openid", "profile", "email", "offline_access"] : ["openid", "profile", "email"] });
+      }
+      if (path.origin === "https://oauth.test" && path.pathname === "/authorize") {
+        const code = `code-${authorizedScopes.size}`;
+        authorizedScopes.set(code, path.searchParams.get("scope") ?? "");
+        const callback = new URL(path.searchParams.get("redirect_uri")!);
+        callback.searchParams.set("state", path.searchParams.get("state")!);
+        callback.searchParams.set("code", code);
+        return Response.redirect(callback, 302);
+      }
+      if (path.href === "https://oauth.test/token") {
+        const body = new URLSearchParams(String(init?.body));
+        expect(body.get("client_id")).toBe("existing-client");
+        const scope = authorizedScopes.get(body.get("code")!);
+        expect(scope).toBeDefined();
+        // The fake models an AS that only issues refresh tokens when the
+        // authorization request asked for offline access, as Zitadel does.
+        return Response.json({ access_token: "new-access", expires_in: 3600,
+          ...(scope!.split(" ").includes("offline_access") && { refresh_token: "new-refresh" }),
+          ...(reportsScope && { scope }) });
+      }
+      if (path.href === "https://mcp.test/mcp") return Response.json({ jsonrpc: "2.0", id: 1, result: {} });
+      throw new Error(`Unexpected offline request ${path.href}`);
+    });
+    const params = new URLSearchParams({ vault_id: vault.id, mcp_server_url: "https://mcp.test/mcp", client_id: "existing-client" });
+    for (const reconnect of [false, true]) {
+      if (reconnect) {
+        // A saved grant must retain the requested/granted scope even if the
+        // provider's later metadata stops advertising it.
+        advertisesOfflineAccess = false;
+        params.delete("client_id");
+        params.set("credential_id", "credential_offline_access");
+      }
+      const response = await app.request(`/v1/oma/oauth/authorize?${params}`);
+      expect(response.status, await response.clone().text()).toBe(302);
+      const authorization = await fetch(response.headers.get("location")!);
+      const callback = await app.request(authorization.headers.get("location")!);
+      expect(callback.status, await callback.clone().text()).toBe(200);
+      const saved = await store.list({ workspaceId, vaultId: vault.id, limit: 10, includeArchived: true });
+      expect(saved).toHaveLength(1);
+      expect(saved[0]!.credential).toMatchObject({ id: "credential_offline_access", auth: {
+        accessToken: "new-access", scope: "openid profile email offline_access",
+        refresh: { refreshToken: "new-refresh", clientId: "existing-client", scope: "openid profile email offline_access" },
+      } });
+    }
+    expect([...authorizedScopes.values()]).toEqual(["openid profile email offline_access", "openid profile email offline_access"]);
+  });
+
   it.each([
     ["native", false, false], ["native", true, false], ["native", true, true],
     ["legacy", false, false], ["legacy", true, false],
